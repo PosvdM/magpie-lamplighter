@@ -70,6 +70,11 @@ const errMCPKeyEmpty = "MCP key is empty"
 // the requests it has already read. Tests shorten it.
 var drainTimeout = 5 * time.Second
 
+// handlerWait bounds how long Close waits for the handlers it cancelled. A
+// handler that ignores its context, such as one waiting on the disk,
+// would otherwise hold up the exit. Tests shorten it.
+var handlerWait = 5 * time.Second
+
 // Server owns the listener and all HTTP handler lifetimes.
 type Server struct {
 	mu         sync.Mutex
@@ -326,10 +331,10 @@ func (s *Server) closeLocked() {
 }
 
 // Close releases the port, cancels every request in progress, page and API
-// requests included, and waits for their handlers and for the drains. A
-// handler that ignores its context holds Close up; server.Server.Shutdown
-// therefore cancels the engine first, which the management requests wait
-// for.
+// requests included, and waits for the drains, and for their handlers up
+// to handlerWait. server.Server.Shutdown cancels the engine first, which
+// the management requests wait for, and waits for a configuration write
+// on its own.
 func (s *Server) Close() {
 	s.mu.Lock()
 	if !s.stopped {
@@ -339,7 +344,15 @@ func (s *Server) Close() {
 	s.closeLocked()
 	s.mu.Unlock()
 	s.drains.Wait()
-	s.handlers.Wait()
+	handlersDone := make(chan struct{})
+	go func() {
+		s.handlers.Wait()
+		close(handlersDone)
+	}()
+	select {
+	case <-handlersDone:
+	case <-time.After(handlerWait):
+	}
 	s.retries.Wait()
 	s.serves.Wait()
 }

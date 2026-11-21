@@ -185,7 +185,7 @@ func (s *Server) routes(page []byte) http.Handler {
 		writeJSON(w, http.StatusOK, s.status())
 	})
 	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
-		resp, err := s.engine.HistoryRange(r.URL.Query().Get("range"), r.URL.Query().Get("window"))
+		resp, err := s.engine.HistoryRange(r.Context(), r.URL.Query().Get("range"), r.URL.Query().Get("window"))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return

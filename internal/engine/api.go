@@ -671,9 +671,10 @@ func RangeSpan(name string, now time.Time, loc *time.Location) time.Duration {
 }
 
 // HistoryRange returns the history for a named range, see RangeSpan, and
-// the windows of one kind, see History.
-func (e *Engine) HistoryRange(name, kind string) (HistoryResponse, error) {
-	return e.History(RangeSpan(name, e.now(), e.config().Location()), kind)
+// the windows of one kind, see History. The scan of the history files ends
+// with ctx, the context of the page's request.
+func (e *Engine) HistoryRange(ctx context.Context, name, kind string) (HistoryResponse, error) {
+	return e.historyContext(ctx, RangeSpan(name, e.now(), e.config().Location()), kind, false, nil)
 }
 
 func (e *Engine) mcpHistoryRange(ctx context.Context, name, kind string, accept func(store.Record) bool) (HistoryResponse, error) {

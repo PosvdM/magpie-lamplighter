@@ -281,3 +281,38 @@ func TestLocalOrigin(t *testing.T) {
 		}
 	}
 }
+
+// Close waits for a handler that ignores its context only up to
+// handlerWait, so such a page or API request does not hold up the exit.
+func TestCloseBoundsTheWaitForHandlers(t *testing.T) {
+	defer func(was time.Duration) { handlerWait = was }(handlerWait)
+	handlerWait = 100 * time.Millisecond
+	addr := freeAddr(t)
+	s := New(&fakeBackend{}, "test")
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	s.SetWeb(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	}))
+	s.Configure(Config{Listen: addr, WebEnabled: true, AdminKey: "admin"})
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/api/history", nil)
+		req.Header.Set("Authorization", "Bearer admin")
+		if resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not start")
+	}
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close waits for a handler that ignores its context")
+	}
+}
