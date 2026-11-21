@@ -19,9 +19,13 @@ const streamFrameLimit = 1 << 20
 
 // Only protocol identifiers in this allowlist may reach persisted errors.
 // Never classify or retain free-form provider messages: they can contain secrets.
+//
+// "rate_limit" is Claude Code's name of a rate-limited turn, which Magpie's
+// Claude Code bridge writes as the stream error's code (internal/gateway
+// claude_subscription.go, the error kind of the failed turn).
 var streamErrorCodes = map[string]int{
 	"rate_limit_error": 429, "rate_limit_exceeded": 429, "insufficient_quota": 429, "quota_exceeded": 429,
-	"usage_limit_reached":  429,
+	"usage_limit_reached": 429, "rate_limit": 429,
 	"authentication_error": 401, "invalid_api_key": 401, "unauthorized": 401,
 	"permission_error": 403, "permission_denied": 403, "forbidden": 403,
 	"not_found_error": 404, "not_found": 404, "model_not_found": 404,
@@ -56,6 +60,14 @@ var magpiePassingWords = []struct {
 	{regexp.MustCompile(`(?i)\b429\b|rate.?limit|too many requests`), 429},
 	{regexp.MustCompile(`(?i)overloaded`), 529},
 }
+
+// claudeUsageLimit matches Claude Code's fixed wording of a used-up
+// subscription, "Claude AI usage limit reached|<unix reset>", which
+// Magpie's Claude Code bridge passes on as the message of a stream error
+// without a status when the turn fails after the stream started. Magpie
+// reads the same marker for the reset (internal/gateway routing.go,
+// resetsWords). Only the marker is read; the message is dropped.
+var claudeUsageLimit = regexp.MustCompile(`(?i)\busage limit reached\|[0-9]{10}\b`)
 
 // magpieHeldOpening matches the opening of Magpie's cappedError: every
 // account that could take the request is held at a cap set in Magpie, or
@@ -134,8 +146,14 @@ func streamError(v map[string]any) error {
 			status = allowedStreamStatus(match[1])
 		}
 	}
+	// Magpie's own hold is read first: its "usage limit reached: every
+	// account" is no limit of the vendor.
+	held := magpieHeldOpening.FindStringSubmatch(rawMessage)
+	if status == 0 && held == nil && claudeUsageLimit.MatchString(rawMessage) {
+		status = 429
+	}
 	explicit := status
-	if held := magpieHeldOpening.FindStringSubmatch(rawMessage); held != nil {
+	if held != nil {
 		// Worded like the pinned refusal before the headers, so that
 		// ignite.PinHeld and failure.Diagnose treat both alike.
 		if status == 0 {
