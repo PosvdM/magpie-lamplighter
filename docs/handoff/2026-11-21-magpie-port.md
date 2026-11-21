@@ -42,7 +42,7 @@
 
 v0.1 有以下限制，已写入 README 的“已知限制”和“端口”：
 
-- macOS 和 Windows 上 agy 自己登录的第一个 Antigravity 账号，凭证在系统钥匙串中，Lamplighter 不读取，返回明确的错误；在 Magpie 中再添加一次该账号即可。
+- macOS 和 Windows 上 agy 自己登录的第一个 Antigravity 账号，凭证在系统钥匙串中，Lamplighter 不读取，也无法确认 agy 当前登录的账号，所以既不查询额度也不点火（额度显示 Magpie 记下的读数）；在 Magpie 中再添加一次该账号即可。
 - `auth_method` 不是 `consumer`（或为空）的 Google 账号要另行查询 Cloud Code project，v0.1 返回错误。
 - `MAGPIE_ADDR` 设为局域网地址时网关要求网关密钥，v0.1 不支持。
 - `-listen` 只能是回环地址，其他地址时程序报错退出；从其他机器访问要用对外监听（`public_listen`）。
