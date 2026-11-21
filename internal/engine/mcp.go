@@ -717,7 +717,7 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	b.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	cmd := command{kind: "refresh", arg: auth, reply: make(chan commandReply, 1)}
+	cmd := newCommand(ctx, "refresh", auth)
 	select {
 	case e.cmdCh <- cmd:
 	case <-ctx.Done():

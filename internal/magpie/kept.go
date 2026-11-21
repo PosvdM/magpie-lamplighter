@@ -46,6 +46,11 @@ type keptWindow struct {
 	Unlimited bool       `json:"unlimited"`
 	Lane      string     `json:"lane"`
 	Balance   *float64   `json:"balance"`
+	// ResetSecs is the reset in seconds, which a card of POST
+	// /v1/magpie/quotas/refresh (provider.QuotaWindow) may give instead
+	// of resetsAt. GET /v1/magpie/quotas turns it into resetsAt from the
+	// time it answers (quotaReport), and keptOf does the same.
+	ResetSecs int64 `json:"resetSecs"`
 }
 
 // KeptQuotas returns Magpie's last readings of the Codex and Claude
@@ -84,30 +89,50 @@ func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 		if pin == "" || strings.TrimSpace(q.User) == "" {
 			continue
 		}
-		readAt := q.ReadAt
-		if readAt == nil {
-			readAt = q.AsOf
-		}
-		if readAt == nil || readAt.IsZero() {
-			continue
-		}
-		var groups []quota.RawGroup
-		switch q.Provider {
-		case "codex":
-			groups, err = keptCodex(q.Windows)
-		case "claude":
-			groups, err = keptClaude(q.Windows)
-		default:
-			continue
-		}
+		k, ok, err := keptOf(q, pin, now())
 		if err != nil {
 			return nil, fmt.Errorf("GET %s: %s: %w", routeOf(keptPath), pin, err)
 		}
-		if len(groups) > 0 {
-			out = append(out, host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC()})
+		if ok {
+			out = append(out, k)
 		}
 	}
 	return out, nil
+}
+
+// keptOf converts the card q of the account pin into a KeptQuota; ok is
+// false for a card without a reading time or windows Lamplighter reads,
+// such as an Antigravity card. A window that tells its reset only in
+// seconds (ResetSecs) is placed from at, the time of the answer.
+func keptOf(q keptQuota, pin string, at time.Time) (k host.KeptQuota, ok bool, err error) {
+	readAt := q.ReadAt
+	if readAt == nil {
+		readAt = q.AsOf
+	}
+	if readAt == nil || readAt.IsZero() {
+		return host.KeptQuota{}, false, nil
+	}
+	ws := make([]keptWindow, len(q.Windows))
+	for i, w := range q.Windows {
+		if w.ResetsAt == nil && w.ResetSecs > 0 {
+			reset := at.Add(time.Duration(w.ResetSecs) * time.Second)
+			w.ResetsAt = &reset
+		}
+		ws[i] = w
+	}
+	var groups []quota.RawGroup
+	switch q.Provider {
+	case "codex":
+		groups, err = keptCodex(ws)
+	case "claude":
+		groups, err = keptClaude(ws)
+	default:
+		return host.KeptQuota{}, false, nil
+	}
+	if err != nil || len(groups) == 0 {
+		return host.KeptQuota{}, false, err
+	}
+	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC()}, true, nil
 }
 
 // counted is whether w is a reading of a share used: not a text row, an
@@ -270,16 +295,16 @@ func (c cardState) at() *time.Time {
 	return nil
 }
 
-// cardOf is the subscription card of a among cards: this Magpie's own,
-// not a remote one, matched by provider and account name as KeptQuotas
-// matches them.
-func cardOf(cards []cardState, a listedAccount) (cardState, bool) {
-	for _, c := range cards {
+// cardIndex is the index of the subscription card of a among cards, -1
+// for none: this Magpie's own, not a remote one, matched by provider and
+// account name as KeptQuotas matches them.
+func cardIndex(cards []cardState, a listedAccount) int {
+	for i, c := range cards {
 		if c.From == "" && (c.Kind == "" || c.Kind == "subscription") && c.Provider == a.Provider && accountKey(c.User) == accountKey(a.User) {
-			return c, true
+			return i
 		}
 	}
-	return cardState{}, false
+	return -1
 }
 
 // refreshStale is why card, as the refresh answered it, is no new
@@ -333,7 +358,17 @@ func shortReason(s string) string {
 // recently; see claudeRefreshGap.
 var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 
-// RefreshQuota asks Magpie to read the quota of the account pin again.
+// RefreshQuota asks Magpie to read the quota of the account pin again;
+// see RefreshKept.
+func (h *Host) RefreshQuota(caller context.Context, pin string) error {
+	_, _, err := h.RefreshKept(caller, pin)
+	return err
+}
+
+// RefreshKept asks Magpie to read the quota of the account pin again, and
+// returns the account's card of the answer as a KeptQuota (keptOf), found
+// when there is one to use; it implements host.KeptRefresher.
+//
 // Right before, it reads the account list again: the account must still
 // be a subscription account that is switched on and has a name, since the
 // gateway refreshes every account of the provider when no name is given.
@@ -342,22 +377,24 @@ var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 //
 // The time of the account's kept reading (GET ?kept=1) is read before the
 // refresh. When the card the refresh answers is no newer reading
-// (refreshStale), it returns a *host.Error with codeRefreshStale.
+// (refreshStale), it returns a *host.Error with codeRefreshStale, and the
+// card when it has one.
 //
 // The account list and the kept reading end within refreshLookTimeout,
 // and the refresh itself within refreshTimeout, so that a slow reading
-// before it does not shorten the refresh.
+// before it does not shorten the refresh. Both also end with caller.
 //
 // It refuses within claudeRefreshGap (Claude) or refreshGap (others) of
 // the last refresh sent for the same account, whatever its result. A call
-// that fails before the refresh is sent does not count.
-func (h *Host) RefreshQuota(caller context.Context, pin string) error {
+// that fails or whose caller has ended before the refresh is sent does
+// not count.
+func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, bool, error) {
 	look, cancelLook := context.WithTimeout(caller, refreshLookTimeout)
 	defer cancelLook()
 	route := http.MethodPost + " " + refreshPath
 	listed, err := h.listAccounts(look)
 	if err != nil {
-		return refreshError(caller, route, err)
+		return host.KeptQuota{}, false, refreshError(caller, route, err)
 	}
 	var a listedAccount
 	found := false
@@ -369,52 +406,79 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 	}
 	switch {
 	case !found:
-		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 中没有这个账号"}
+		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 中没有这个账号"}
 	case a.Kind != "account":
-		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "这个账号不是订阅账号"}
+		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountNotFound, Message: "这个账号不是订阅账号"}
 	case strings.TrimSpace(a.User) == "":
-		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 没有给出这个账号的名称"}
+		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 没有给出这个账号的名称"}
 	case !*a.On:
-		return &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
+		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
 	}
 	if err := h.refreshAllowed(a, false); err != nil {
-		return err
+		return host.KeptQuota{}, false, err
 	}
 	var kept struct {
 		Data *[]cardState `json:"data"`
 	}
 	if err := h.gatewayJSON(look, http.MethodGet, keptPath, &kept); err != nil {
-		return refreshError(caller, route, err)
+		return host.KeptQuota{}, false, refreshError(caller, route, err)
 	}
 	if kept.Data == nil {
-		return fmt.Errorf("GET %s: %w: no data list", routeOf(keptPath), host.ErrFormat)
+		return host.KeptQuota{}, false, fmt.Errorf("GET %s: %w: no data list", routeOf(keptPath), host.ErrFormat)
 	}
 	var before *time.Time
-	if card, ok := cardOf(*kept.Data, a); ok {
-		before = card.at()
+	if i := cardIndex(*kept.Data, a); i >= 0 {
+		before = (*kept.Data)[i].at()
 	}
 	cancelLook()
+	// A caller that has ended sends no refresh, which would start the
+	// account's gap for nothing.
+	if err := caller.Err(); err != nil {
+		return host.KeptQuota{}, false, fmt.Errorf("%s: %w", route, context.Cause(caller))
+	}
 	// Checked again: another call may have sent a refresh meanwhile.
 	if err := h.refreshAllowed(a, true); err != nil {
-		return err
+		return host.KeptQuota{}, false, err
 	}
 	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
 	defer cancel()
 	query := url.Values{"provider": {a.Provider}, "user": {a.User}}
 	var resp struct {
-		Data *[]cardState `json:"data"`
+		Data *[]refreshedCard `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodPost, refreshPath+"?"+query.Encode(), &resp); err != nil {
-		return refreshError(caller, route, err)
+		return host.KeptQuota{}, false, refreshError(caller, route, err)
 	}
 	if resp.Data == nil {
-		return fmt.Errorf("%s: %w: no data list", route, host.ErrFormat)
+		return host.KeptQuota{}, false, fmt.Errorf("%s: %w: no data list", route, host.ErrFormat)
 	}
-	card, found := cardOf(*resp.Data, a)
-	if reason := refreshStale(card, found, before); reason != "" {
-		return &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
+	answered := now()
+	states := make([]cardState, len(*resp.Data))
+	for i, c := range *resp.Data {
+		states[i] = c.cardState
 	}
-	return nil
+	var card cardState
+	var k host.KeptQuota
+	usable := false
+	i := cardIndex(states, a)
+	if i >= 0 {
+		card = states[i]
+		c := (*resp.Data)[i]
+		// A card that does not convert is left to KeptQuotas, which
+		// reports its format.
+		k, usable, _ = keptOf(keptQuota{Provider: c.Provider, Kind: "subscription", User: c.User, Windows: c.Windows, ReadAt: c.ReadAt, AsOf: c.AsOf}, a.Pin, answered)
+	}
+	if reason := refreshStale(card, i >= 0, before); reason != "" {
+		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
+	}
+	return k, usable, nil
+}
+
+// refreshedCard is a card of POST /v1/magpie/quotas/refresh: its reading
+// state and its windows.
+type refreshedCard struct {
+	cardState
+	Windows []keptWindow `json:"windows"`
 }
 
 // refreshAllowed returns ErrRefreshLimited when a refresh of a was sent
@@ -442,13 +506,14 @@ func (h *Host) refreshAllowed(a listedAccount, send bool) error {
 }
 
 // refreshError is err of a RefreshQuota request, as codeGatewayUnavailable
-// when the gateway cannot be reached, answers 5xx or runs out of time.
-// Other errors, such as a 4xx answer or one of an unknown format, and any
-// error after the caller cancelled, are returned as they are.
+// when the gateway cannot be reached, answers 5xx or runs out of
+// refreshLookTimeout or refreshTimeout. Other errors, such as a 4xx answer
+// or one of an unknown format, and any error after the caller ended
+// (cancelled, or its own deadline passed), are returned as they are.
 func refreshError(caller context.Context, route string, err error) error {
 	var hostErr *host.Error
 	switch {
-	case errors.Is(caller.Err(), context.Canceled):
+	case caller.Err() != nil:
 		return err
 	case errors.As(err, &hostErr) && (hostErr.Code == "gateway_unreachable" || hostErr.Code == "gateway_http_error" && hostErr.Status >= 500):
 		return &host.Error{Method: route, Code: codeGatewayUnavailable, Message: "Magpie 网关暂时不可用", Status: hostErr.Status}

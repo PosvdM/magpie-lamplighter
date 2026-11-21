@@ -105,6 +105,17 @@ type command struct {
 	kind  string
 	arg   string
 	reply chan commandReply
+	// deadline is that of the request that sent the command, zero for
+	// none. The loop runs the command with its own context; a manual
+	// refresh fits its refreshes within the deadline (manualRefreshEnd).
+	deadline time.Time
+}
+
+// newCommand is a command sent by a request with ctx.
+func newCommand(ctx context.Context, kind, arg string) command {
+	cmd := command{kind: kind, arg: arg, reply: make(chan commandReply, 1)}
+	cmd.deadline, _ = ctx.Deadline()
+	return cmd
 }
 
 type commandReply struct {
@@ -145,7 +156,7 @@ func (e *Engine) dispatch(ctx context.Context, kind, arg string) commandReply {
 	if ctx.Err() != nil {
 		return commandReply{err: ErrCanceled}
 	}
-	cmd := command{kind: kind, arg: arg, reply: make(chan commandReply, 1)}
+	cmd := newCommand(ctx, kind, arg)
 	timer := time.NewTimer(commandTimeout)
 	defer timer.Stop()
 	select {
@@ -214,7 +225,7 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 	var results []ChannelResult
 	switch cmd.kind {
 	case "refresh":
-		err = e.manualPoll(ctx, cfg, cmd.arg)
+		err = e.manualPoll(ctx, cfg, cmd.arg, cmd.deadline)
 	case "ignite":
 		err = errNoTarget
 		for _, t := range e.collectTargets(cfg) {

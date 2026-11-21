@@ -283,33 +283,48 @@ func parseAgyStored(b []byte) (agyStored, error) {
 	return s, nil
 }
 
-// agyCredential reads the sign-in of an agy-cli account. A sign-in of
-// another account is refused before its tokens are used (agyFile.belongs).
-// An access token that has ended, or ends within googleRenewLead, is
-// renewed in memory through proxy.
-func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (host.Credential, error) {
+// agySignIn reads agy's sign-in of the agy-cli account l from local files
+// alone, and refuses one that is not l's (agyFile.belongs) before its
+// tokens are used.
+func (h *Host) agySignIn(l savedLogin) (agyStored, error) {
 	file, err := h.agyTokenFile(l)
 	if err != nil {
-		return host.Credential{}, err
+		return agyStored{}, err
 	}
 	b, err := os.ReadFile(file.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return host.Credential{}, errors.New("找不到 agy 的凭证文件，账号可能已在 Magpie 中退出登录")
+			return agyStored{}, errors.New("找不到 agy 的凭证文件，账号可能已在 Magpie 中退出登录")
 		}
-		return host.Credential{}, err
+		return agyStored{}, err
 	}
 	s, err := parseAgyStored(b)
 	if err != nil {
-		return host.Credential{}, fmt.Errorf("agy 的凭证文件：%w", err)
+		return agyStored{}, fmt.Errorf("agy 的凭证文件：%w", err)
 	}
-	t := s.Token
-	if t.AccessToken == "" && t.RefreshToken == "" {
-		return host.Credential{}, errors.New("agy 没有登录这个账号")
+	if s.Token.AccessToken == "" && s.Token.RefreshToken == "" {
+		return agyStored{}, errors.New("agy 没有登录这个账号")
 	}
 	if err := file.belongs(s.IDTokenEmail); err != nil {
-		return host.Credential{}, err
+		return agyStored{}, err
 	}
+	return s, nil
+}
+
+// agyFingerprint is the fingerprint of the sign-in s.
+func agyFingerprint(s agyStored) string {
+	if fp := fingerprint(s.Token.RefreshToken); fp != "" {
+		return fp
+	}
+	return fingerprint(s.Token.AccessToken)
+}
+
+// agyCredential reads the quota credential of an agy-cli account from its
+// sign-in s, already confirmed by agySignIn. An access token that has
+// ended, or ends within googleRenewLead, is renewed in memory through
+// proxy.
+func (h *Host) agyCredential(ctx context.Context, s agyStored, proxy string) (host.Credential, error) {
+	t := s.Token
 	method := strings.TrimSpace(s.AuthMethod)
 	if method != "" && method != "consumer" {
 		return host.Credential{}, fmt.Errorf("不支持 auth_method 为 %s 的 Antigravity 账号：它的 Cloud Code project 要另行查询", method)
@@ -317,10 +332,7 @@ func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (h
 	cred := host.Credential{
 		AccessToken: t.AccessToken,
 		ProjectID:   consumerProject,
-		Fingerprint: fingerprint(t.RefreshToken),
-	}
-	if cred.Fingerprint == "" {
-		cred.Fingerprint = fingerprint(t.AccessToken)
+		Fingerprint: agyFingerprint(s),
 	}
 	// Go's zero time, which agy writes for a token that does not end, is
 	// before 1970. parseAgyStored checked the format.

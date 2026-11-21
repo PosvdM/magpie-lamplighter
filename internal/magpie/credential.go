@@ -111,20 +111,51 @@ func (h *Host) login(provider, id string) (savedLogin, error) {
 // (@magpie-community/opencode-agy-cli-auth), which serves Antigravity.
 const agyCLI = "agy-cli"
 
-// Credential reads the credential of account from Magpie's files: Codex
-// and Claude from logins.json, Antigravity from the agy-cli plugin's
-// token file. Codex and Claude tokens are never refreshed here; one past
-// its expiry is returned with Expired set.
-func (h *Host) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
+// accountLogin is the Magpie provider id of account and its logins.json
+// entry.
+func (h *Host) accountLogin(account host.Account) (string, savedLogin, error) {
 	pinProvider, id, ok := strings.Cut(strings.TrimSpace(account.Pin), "/")
 	if !ok || pinProvider == "" || id == "" {
-		return host.Credential{}, fmt.Errorf("账号 pin %q 不是 <服务>/<id>", account.Pin)
+		return "", savedLogin{}, fmt.Errorf("账号 pin %q 不是 <服务>/<id>", account.Pin)
 	}
 	provider := strings.ToLower(strings.TrimSpace(account.Provider))
 	if provider == "" {
 		provider = strings.ToLower(pinProvider)
 	}
 	l, err := h.login(provider, id)
+	return provider, l, err
+}
+
+// ConfirmIdentity implements host.IdentityChecker. The gateway sends an
+// agy-cli account's requests with whichever Google account its agy is
+// signed in to; the sign-in is read from local files alone and must be
+// the account's (agyFile.belongs). Codex and Claude requests use the
+// account's own credential, which needs no check: they return "" and nil.
+// Any error means the account is not confirmed.
+func (h *Host) ConfirmIdentity(_ context.Context, account host.Account) (string, error) {
+	provider, l, err := h.accountLogin(account)
+	if err != nil {
+		return "", err
+	}
+	if provider != agyCLI {
+		return "", nil
+	}
+	s, err := h.agySignIn(l)
+	if err != nil {
+		return "", err
+	}
+	return agyFingerprint(s), nil
+}
+
+// Credential reads the credential of account from Magpie's files: Codex
+// and Claude from logins.json, Antigravity from the agy-cli plugin's
+// token file. Codex and Claude tokens are never refreshed here; one past
+// its expiry is returned with Expired set. An agy-cli account's sign-in is
+// confirmed first (agySignIn), before any proxy setting is read or token
+// renewed, so that an unconfirmed account always gives its
+// host.ErrIdentity error.
+func (h *Host) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
+	provider, l, err := h.accountLogin(account)
 	if err != nil {
 		return host.Credential{}, err
 	}
@@ -135,11 +166,15 @@ func (h *Host) Credential(ctx context.Context, account host.Account) (host.Crede
 	case "claude":
 		cred, err = h.claudeCredential(l)
 	case agyCLI:
+		var s agyStored
+		if s, err = h.agySignIn(l); err != nil {
+			return host.Credential{}, err
+		}
 		var proxy string
 		if proxy, err = h.proxyFor(provider, l.User); err != nil {
 			return host.Credential{}, err
 		}
-		cred, err = h.agyCredential(ctx, l, proxy)
+		cred, err = h.agyCredential(ctx, s, proxy)
 		cred.ProxyURL = proxy
 	default:
 		return host.Credential{}, fmt.Errorf("不支持读取 %s 账号的凭证", provider)

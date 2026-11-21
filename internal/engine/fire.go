@@ -420,9 +420,10 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// new login the request did not use. See noteFingerprint.
 	//
 	// The gateway sends an agy-cli account's request with whichever Google
-	// account its agy is signed in to. Its credential is read before every
-	// ignition, manual ones too, and an account that cannot be confirmed
-	// (host.ErrIdentity) gets no request; see identityChecked.
+	// account its agy is signed in to. The account is confirmed before
+	// every ignition, manual ones too, and again before each request
+	// (execute); an account that cannot be confirmed gets no request. See
+	// identityChecked.
 	fingerprint := ""
 	var err error
 	if !manual || identityChecked(t.cred) {
@@ -444,6 +445,11 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		}
 		err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
 	}
+	if errors.Is(err, host.ErrIdentity) {
+		// An unconfirmed sign-in has no fingerprint to wait on; the first
+		// readable credential counts as changed (noteFingerprint).
+		fingerprint = ""
+	}
 	now := e.now()
 	if errors.Is(err, errIgnitionWithdrawn) {
 		// Not a failure: the target no longer qualifies for automatic
@@ -451,11 +457,11 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		e.logf("info", "%s：%v", t.group.Label, err)
 		return err
 	}
-	if e.stopping() && errors.Is(err, context.Canceled) {
-		// The process exits: the request, its stream or its confirmation
-		// was cut short by the stop and says nothing about the account. An
-		// error the provider had already answered is not context.Canceled
-		// and is handled below.
+	if (e.stopping() || ctx.Err() != nil) && errors.Is(err, context.Canceled) {
+		// The process exits: the model list, the request, its stream or
+		// its confirmation was cut short by the stop and says nothing about
+		// the account. An error the provider had already answered is not
+		// context.Canceled and is handled below.
 		e.logf("info", "%s：退出时取消点火，不计为失败", t.group.Label)
 		return err
 	}
@@ -571,7 +577,13 @@ func (e *Engine) group(key string) (GroupView, bool) {
 //
 // Each request of an automatic ignition passes admit, which checks that
 // the target still qualifies; otherwise the requests not sent yet are
-// dropped with errIgnitionWithdrawn.
+// dropped with errIgnitionWithdrawn. Each request of an agy-cli account
+// confirms the account right before it is sent (confirmIdentity): agy can
+// sign in to another account while the model list is read or a candidate
+// is refused.
+//
+// A model list that fails because the engine stops or ctx ends returns
+// context.Canceled.
 func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manual bool) (string, sentResponse, error) {
 	var empty sentResponse
 	t.automatic = !manual
@@ -580,6 +592,10 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 	ts := e.state.Target(t.group.Key)
 
 	available, err := e.lister.List(ctx, e.host.Models)
+	if err != nil && (ctx.Err() != nil || e.stopping()) {
+		// The gateway's error does not tell that the stop cut it short.
+		return "", empty, context.Canceled
+	}
 	e.noteModels(available, err)
 	var candidates []string
 	switch {
@@ -617,6 +633,11 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		protocol, body, err := providers.Request(spec, model)
 		if err != nil {
 			return "", empty, err
+		}
+		if identityChecked(t.cred) {
+			if _, err := e.confirmIdentity(ctx, t.cred); err != nil {
+				return model, empty, err
+			}
 		}
 		resp, err := e.executeStream(ctx, t, host.ModelRequest{
 			Account:  t.cred.AuthIndex,
@@ -800,7 +821,9 @@ func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 // gateway does not pass on Codex's x-codex-* headers, and Antigravity has no
 // quota in its headers: for them, and when the headers carry no new window,
 // the credential is queried actively. The queries of a manual ignition
-// leave the credential state alone, like its failure.
+// leave the credential state alone, like its failure. A stop or an ended
+// ctx before the window is confirmed returns context.Canceled, also when
+// it cuts a query short.
 func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, base ignitionBase, resp host.ModelResponse, manual bool) error {
 	start := base.start
 	var groups []quota.RawGroup
@@ -823,11 +846,17 @@ func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, base 
 		if e.confirmed(t.group.Key, base, e.now()) {
 			return nil
 		}
-		if err := e.queryCred(ctx, cfg, t.cred, !manual); err != nil {
-			e.logf("warn", "点火确认时刷新额度失败：%s：%v", t.group.Label, err)
-		}
+		err := e.queryCred(ctx, cfg, t.cred, !manual)
 		if e.confirmed(t.group.Key, base, e.now()) {
 			return nil
+		}
+		if ctx.Err() != nil || e.stopping() {
+			// The stop cut the query short, or came before the next one:
+			// the window is neither confirmed nor refuted.
+			return context.Canceled
+		}
+		if err != nil {
+			e.logf("warn", "点火确认时刷新额度失败：%s：%v", t.group.Label, err)
 		}
 	}
 	return ignite.ErrNotConfirmed

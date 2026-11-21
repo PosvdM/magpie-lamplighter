@@ -64,7 +64,11 @@ func FromEnv() *Host {
 	return &Host{Addr: strings.TrimSpace(os.Getenv("MAGPIE_ADDR")), ConfigDir: dir}
 }
 
-var _ host.Host = (*Host)(nil)
+var (
+	_ host.Host            = (*Host)(nil)
+	_ host.IdentityChecker = (*Host)(nil)
+	_ host.KeptRefresher   = (*Host)(nil)
+)
 
 // Log writes one line: the level, the message and the fields as JSON when
 // there are any.

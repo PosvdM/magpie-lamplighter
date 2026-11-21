@@ -157,3 +157,111 @@ func TestManualIgnitionOfClaudeDoesNotReadTheCredential(t *testing.T) {
 		t.Fatalf("want one Claude request, got %d", len(h.executed))
 	}
 }
+
+// Any error that leaves an agy-cli account unconfirmed sends no request,
+// such as a proxy setting that cannot be read before the sign-in is: an
+// unreadable credential could hide a sign-in of another account. The
+// first readable credential ends the wait.
+func TestAgyIgnitionFailsClosed(t *testing.T) {
+	old := confirmDelays
+	confirmDelays = []time.Duration{time.Millisecond}
+	defer func() { confirmDelays = old }()
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	h, e, _ := agyIgnitionHost(t, c)
+	ctx := context.Background()
+	chosen := agyTarget(t, e)
+	h.credErrs = map[string]error{"4": errors.New("settings.json: unknown Magpie format")}
+
+	if err := e.igniteTarget(ctx, e.config(), chosen, true); !errors.Is(err, host.ErrIdentity) || len(h.executed) != 0 {
+		t.Fatalf("manual: err=%v executed=%d", err, len(h.executed))
+	}
+	e.performDue(ctx, e.config())
+	if len(h.executed) != 0 {
+		t.Fatalf("automatic: no request may go out, got %+v", h.executed)
+	}
+	ts := e.state.Target(chosen.group.Key)
+	if !strings.Contains(ts.LastError, "没有发送点火请求") || !strings.Contains(ts.LastError, "无法确认账号身份") || !e.credentialBlocked("4") {
+		t.Fatalf("target %+v credential %+v", ts, e.state.Credentials["4"])
+	}
+
+	h.credErrs = nil
+	e.poll(ctx, e.config(), c.t, "", false)
+	if e.credentialBlocked("4") {
+		t.Fatal("a readable credential must end the wait")
+	}
+}
+
+// agy can sign in to another account while a candidate model is refused;
+// the account is confirmed again before the next candidate is sent, by
+// automatic and manual ignition alike.
+func TestAgyIdentityConfirmedBeforeEachCandidate(t *testing.T) {
+	old := confirmDelays
+	confirmDelays = []time.Duration{time.Millisecond}
+	defer func() { confirmDelays = old }()
+	refused := &host.Error{Code: "model_execution_failed", Status: 404,
+		Message: `{"error":{"message":"model not found","type":"invalid_request_error","code":"model_not_found"}}`}
+	for _, manual := range []bool{false, true} {
+		c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+		h, e, _ := agyIgnitionHost(t, c)
+		ctx := context.Background()
+		chosen := agyTarget(t, e)
+		h.listModels = func() ([]string, error) { return []string{"gemini-3.8-flash-high", "gemini-3.5-flash"}, nil }
+		h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+			// agy signs in to another account while the first candidate
+			// is refused.
+			h.credErrs = map[string]error{"4": agySwitched}
+			return host.ModelResponse{StatusCode: 404}, refused
+		}
+		err := e.igniteTarget(ctx, e.config(), chosen, manual)
+		if !errors.Is(err, host.ErrIdentity) || len(h.executed) != 1 || h.executed[0].Model != "gemini-3.8-flash-high" {
+			t.Fatalf("manual=%v: err=%v executed=%+v", manual, err, h.executed)
+		}
+		if manual {
+			continue
+		}
+		if !e.credentialBlocked("4") {
+			t.Fatalf("credential %+v", e.state.Credentials["4"])
+		}
+		// Back to the account: the first readable credential ends the wait.
+		h.credErrs = nil
+		e.poll(ctx, e.config(), c.t, "", false)
+		if e.credentialBlocked("4") {
+			t.Fatal("a readable credential must end the wait")
+		}
+	}
+}
+
+// checkerHost confirms identities with confirm (host.IdentityChecker).
+type checkerHost struct {
+	*fakeHost
+	confirm func() (string, error)
+	calls   int
+}
+
+func (h *checkerHost) ConfirmIdentity(context.Context, host.Account) (string, error) {
+	h.calls++
+	return h.confirm()
+}
+
+// A host.IdentityChecker confirms the account in place of Credential,
+// which can fail for reasons other than the sign-in, such as the proxy.
+func TestIgnitionAsksTheIdentityChecker(t *testing.T) {
+	old := confirmDelays
+	confirmDelays = []time.Duration{time.Millisecond}
+	defer func() { confirmDelays = old }()
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	h, e, _ := agyIgnitionHost(t, c)
+	chosen := agyTarget(t, e)
+	checker := &checkerHost{fakeHost: h, confirm: func() (string, error) { return "fp", nil }}
+	e.host = checker
+	h.credErrs = map[string]error{"4": errors.New("settings.json: unknown Magpie format")}
+	_ = e.igniteTarget(context.Background(), e.config(), chosen, true)
+	// Once before the model list, once before the request.
+	if len(h.executed) != 1 || checker.calls != 2 {
+		t.Fatalf("executed %d, confirmations %d", len(h.executed), checker.calls)
+	}
+	checker.confirm = func() (string, error) { return "", agySwitched }
+	if err := e.igniteTarget(context.Background(), e.config(), chosen, true); !errors.Is(err, host.ErrIdentity) || len(h.executed) != 1 {
+		t.Fatalf("err=%v executed=%d", err, len(h.executed))
+	}
+}

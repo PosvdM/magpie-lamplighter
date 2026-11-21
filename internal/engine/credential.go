@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -133,11 +132,11 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 // agyCLI is Magpie's provider id of the agy-cli plugin.
 const agyCLI = "agy-cli"
 
-// identityChecked reports whether ignition of cred reads its credential
-// first to confirm the account, manual ignition too. The gateway sends an
-// agy-cli account's requests through agy, which uses whichever Google
-// account it is signed in to now; the pin alone does not tell which. Codex
-// and Claude requests use the account's own credential.
+// identityChecked reports whether ignition of cred confirms the account
+// before every request, manual ignition too. The gateway sends an agy-cli
+// account's requests through agy, which uses whichever Google account it
+// is signed in to now; the pin alone does not tell which. Codex and Claude
+// requests use the account's own credential.
 func identityChecked(cred *Cred) bool {
 	return strings.EqualFold(cred.HostProvider, agyCLI)
 }
@@ -145,14 +144,53 @@ func identityChecked(cred *Cred) bool {
 // errIdentityUnsent prefixes an ignition refused for host.ErrIdentity.
 const errIdentityUnsent = "没有发送点火请求"
 
+// identityUnconfirmed is an ignition request not sent because the
+// account could not be confirmed. It wraps host.ErrIdentity and the
+// host's error.
+type identityUnconfirmed struct{ err error }
+
+func (u identityUnconfirmed) Error() string {
+	if errors.Is(u.err, host.ErrIdentity) {
+		return errIdentityUnsent + "：" + u.err.Error()
+	}
+	return errIdentityUnsent + "：无法确认账号身份：" + u.err.Error()
+}
+
+func (u identityUnconfirmed) Unwrap() []error { return []error{host.ErrIdentity, u.err} }
+
+// confirmIdentity confirms that the gateway sends cred's requests with
+// cred's own sign-in, and returns the sign-in's fingerprint. It asks a
+// host.IdentityChecker, which reads local files alone, else reads the
+// credential. Any error means the account is not confirmed: it is
+// returned as identityUnconfirmed, and no request may be sent.
+func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred) (string, error) {
+	var fingerprint string
+	var err error
+	if checker, ok := e.host.(host.IdentityChecker); ok {
+		fingerprint, err = checker.ConfirmIdentity(ctx, hostAccount(cred))
+	} else {
+		var credential host.Credential
+		credential, err = e.host.Credential(ctx, hostAccount(cred))
+		fingerprint = credential.Fingerprint
+	}
+	if err != nil {
+		return "", identityUnconfirmed{err}
+	}
+	return fingerprint, nil
+}
+
 // ignitionCredential reads the fingerprint of cred's credential before an
-// ignition, "" when it cannot be read. It is an error only when the host
-// cannot confirm the account of the credential (host.ErrIdentity): the
-// request would go out with another account, so none is sent.
+// ignition, "" when it cannot be read. An agy-cli account
+// (identityChecked) must be confirmed (confirmIdentity), and any error
+// refuses the ignition. For other accounts it is an error only when the
+// host cannot confirm the account of the credential (host.ErrIdentity).
 func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
+	if identityChecked(cred) {
+		return e.confirmIdentity(ctx, cred)
+	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if errors.Is(err, host.ErrIdentity) {
-		return "", fmt.Errorf("%s：%w", errIdentityUnsent, err)
+		return "", identityUnconfirmed{err}
 	}
 	if err != nil {
 		return "", nil

@@ -7,12 +7,14 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
 	"github.com/PosvdM/magpie-lamplighter/internal/failure"
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 )
 
@@ -29,6 +31,25 @@ type ledgerHost struct {
 	lmu     sync.Mutex
 	streams map[string]chan struct{}
 	next    int
+	// ends are the end_reason of the ignition stream log records.
+	ends []string
+}
+
+func (h *ledgerHost) Log(_, _ string, fields map[string]any) {
+	if fields["event"] != "ignition_stream" {
+		return
+	}
+	reason, _ := fields["end_reason"].(string)
+	h.lmu.Lock()
+	h.ends = append(h.ends, reason)
+	h.lmu.Unlock()
+}
+
+// endReasons are the end_reason of the ignition streams so far.
+func (h *ledgerHost) endReasons() []string {
+	h.lmu.Lock()
+	defer h.lmu.Unlock()
+	return append([]string(nil), h.ends...)
 }
 
 func (h *ledgerHost) OpenModelStream(ctx context.Context, req host.ModelRequest) (host.ModelStream, error) {
@@ -137,26 +158,31 @@ func waitGoroutines(t *testing.T, before int) {
 }
 
 // Every way an ignition stream ends closes it before confirmation, and
-// leaves no goroutine behind.
+// leaves no goroutine behind. The stream ends with its own reason, and
+// only a stream without an execution error goes on to the confirmation
+// queries.
 func TestIgnitionClosesEveryStream(t *testing.T) {
 	old, oldTimeout := confirmDelays, ignitionStreamTimeout
 	confirmDelays = []time.Duration{time.Millisecond}
 	defer func() { confirmDelays, ignitionStreamTimeout = old, oldTimeout }()
 	ok := func(context.Context) (host.ModelStream, error) { return host.ModelStream{StatusCode: 200}, nil }
+	notConfirmed := func(err error) bool { return errors.Is(err, ignite.ErrNotConfirmed) }
 	for _, tc := range []struct {
 		name    string
 		timeout time.Duration
 		setup   func(e *Engine, h *ledgerHost)
 		want    func(err error) bool
+		reason  string
+		queried bool
 	}{
-		{"completed, confirmed by a query", 0, func(e *Engine, h *ledgerHost) {
+		{"completed, then confirmation queries", 0, func(e *Engine, h *ledgerHost) {
 			h.open = ok
 			h.read = func(<-chan struct{}) (host.StreamChunk, error) { return messageStop, nil }
-		}, func(err error) bool { return err != nil && !errors.Is(err, context.Canceled) }},
+		}, notConfirmed, "completed", true},
 		{"read error", 0, func(e *Engine, h *ledgerHost) {
 			h.open = ok
 			h.read = func(<-chan struct{}) (host.StreamChunk, error) { return host.StreamChunk{}, errors.New("reset") }
-		}, func(err error) bool { return err != nil }},
+		}, func(err error) bool { return err != nil && !notConfirmed(err) }, "read_error", false},
 		{"output window", 0, func(e *Engine, h *ledgerHost) {
 			h.open = ok
 			first := true
@@ -167,25 +193,25 @@ func TestIgnitionClosesEveryStream(t *testing.T) {
 				}
 				return blockUntilClosed(closed)
 			}
-		}, func(err error) bool { return err != nil }},
+		}, notConfirmed, "output_timeout", true},
 		{"two-minute limit", 50 * time.Millisecond, func(e *Engine, h *ledgerHost) {
 			h.open = ok
 			h.read = blockUntilClosed
-		}, func(err error) bool { return err != nil }},
+		}, func(err error) bool { return errors.Is(err, errIgnitionTimeout) }, "timeout", false},
 		{"exit while reading", 0, func(e *Engine, h *ledgerHost) {
 			h.open = ok
 			h.read = func(closed <-chan struct{}) (host.StreamChunk, error) {
 				go e.Cancel()
 				return blockUntilClosed(closed)
 			}
-		}, func(err error) bool { return errors.Is(err, context.Canceled) }},
+		}, func(err error) bool { return errors.Is(err, context.Canceled) }, "canceled", false},
 		{"withdrawn after the headers", 0, func(e *Engine, h *ledgerHost) {
 			h.open = func(context.Context) (host.ModelStream, error) {
 				e.Configure(ignitionOff(e), nil)
 				return host.ModelStream{StatusCode: 200}, nil
 			}
 			h.read = func(<-chan struct{}) (host.StreamChunk, error) { return messageStop, nil }
-		}, func(err error) bool { return !errors.Is(err, errIgnitionWithdrawn) }},
+		}, notConfirmed, "completed", true},
 		{"withdrawn before the headers", 0, func(e *Engine, h *ledgerHost) {
 			h.open = func(ctx context.Context) (host.ModelStream, error) {
 				e.Configure(ignitionOff(e), nil)
@@ -193,14 +219,14 @@ func TestIgnitionClosesEveryStream(t *testing.T) {
 				return host.ModelStream{}, ctx.Err()
 			}
 			h.read = blockUntilClosed
-		}, func(err error) bool { return errors.Is(err, errIgnitionWithdrawn) }},
+		}, func(err error) bool { return errors.Is(err, errIgnitionWithdrawn) }, "withdrawn", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ignitionStreamTimeout = oldTimeout
 			if tc.timeout > 0 {
 				ignitionStreamTimeout = tc.timeout
 			}
-			e, h, chosen, _ := newLedgerEngine(t)
+			e, h, chosen, queried := newLedgerEngine(t)
 			tc.setup(e, h)
 			before := runtime.NumGoroutine()
 			err := e.igniteTarget(context.Background(), e.config(), chosen, false)
@@ -209,6 +235,12 @@ func TestIgnitionClosesEveryStream(t *testing.T) {
 			}
 			if n := h.openStreams(); n != 0 || len(h.executed) != 1 {
 				t.Fatalf("%d streams left open after %d requests", n, len(h.executed))
+			}
+			if ends := h.endReasons(); len(ends) != 1 || ends[0] != tc.reason {
+				t.Fatalf("end reasons %v, want [%s]", ends, tc.reason)
+			}
+			if (*queried > 0) != tc.queried {
+				t.Fatalf("%d confirmation queries, want some: %v", *queried, tc.queried)
 			}
 			waitGoroutines(t, before)
 		})
@@ -221,11 +253,33 @@ func TestIgnitionClosesEveryStream(t *testing.T) {
 func TestExitDoesNotCountAsIgnitionFailure(t *testing.T) {
 	old := confirmDelays
 	defer func() { confirmDelays = old }()
-	for _, phase := range []string{"headers", "stream", "confirmation"} {
+	for _, phase := range []string{"model list", "headers", "stream", "confirmation", "confirmation query"} {
 		t.Run(phase, func(t *testing.T) {
 			confirmDelays = []time.Duration{time.Millisecond}
 			e, h, chosen, _ := newLedgerEngine(t)
 			switch phase {
+			case "model list":
+				// The list is not cached and no model stands in for it:
+				// the stop cuts its request, and the gateway's error does
+				// not say so.
+				h.listModels = func() ([]string, error) {
+					e.Cancel()
+					return nil, &host.Error{Method: "GET /v1/models", Code: "gateway_unreachable", Message: "Get \"http://127.0.0.1:3425/v1/models\": context canceled"}
+				}
+			case "confirmation query":
+				// The stop cuts the last confirmation query short.
+				h.open = func(context.Context) (host.ModelStream, error) { return host.ModelStream{StatusCode: 200}, nil }
+				h.read = func(<-chan struct{}) (host.StreamChunk, error) { return messageStop, nil }
+				var sent atomic.Bool
+				h.onClose = func() { sent.Store(true) }
+				query := h.fakeHost.http
+				h.fakeHost.http = func(req httpRequest) httpResponse {
+					if sent.Load() && req.URL == providers.ClaudeUsageURL {
+						e.Cancel()
+						return httpResponse{StatusCode: http.StatusBadGateway}
+					}
+					return query(req)
+				}
 			case "headers":
 				h.open = func(ctx context.Context) (host.ModelStream, error) {
 					go e.Cancel()

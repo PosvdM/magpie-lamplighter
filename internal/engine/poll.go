@@ -344,14 +344,36 @@ func (e *Engine) shouldSkipActive(cfg config.Config, cred *Cred, slot, now time.
 	return true
 }
 
-// manualRefreshBudget bounds the quota refreshes that Magpie runs for
-// expired credentials during one manual refresh, all of them together. A
-// tool call through Magpie waits at most about 50 seconds for the whole
-// refresh. One RefreshQuota of package magpie takes at most 8 seconds for
-// its readings before the refresh and 32 for the refresh, in which
-// Magpie's gateway waits at most 30 seconds for one quota; the budget
-// leaves one call all of that.
-const manualRefreshBudget = 42 * time.Second
+// The time of a manual refresh. A tool call through Magpie waits at most
+// about 50 seconds for the whole refresh (the plugin host gives it 55, and
+// Lamplighter's tool route 50). One RefreshQuota of package magpie takes
+// at most 8 seconds for its readings before the refresh and 32 for the
+// refresh, in which Magpie's gateway waits at most 30 seconds for one
+// quota. Tests shorten them.
+var (
+	// manualRefreshBudget bounds one manual refresh from its start, the
+	// account list included: the refreshes that Magpie runs for expired
+	// credentials share it, and end keptRereadWait before it, so that the
+	// kept quota can still be read after a refresh that ran out.
+	manualRefreshBudget = 48 * time.Second
+	// keptRereadWait bounds reading Magpie's kept quota after a refresh
+	// whose answer brought no card of the account to apply.
+	keptRereadWait = 5 * time.Second
+	// replyMargin is left between the end of a manual refresh and the
+	// deadline of the request that asked for it, for the reply.
+	replyMargin = time.Second
+)
+
+// manualRefreshEnd is when a manual refresh started at start ends: after
+// manualRefreshBudget, or replyMargin before deadline, the deadline of the
+// request that asked for it (zero for none), when that is sooner.
+func manualRefreshEnd(start, deadline time.Time) time.Time {
+	end := start.Add(manualRefreshBudget)
+	if !deadline.IsZero() && deadline.Add(-replyMargin).Before(end) {
+		end = deadline.Add(-replyMargin)
+	}
+	return end
+}
 
 // poll runs one round of active queries. slot is the aligned time this round
 // belongs to. onlyAuth limits the round to one credential. force disables the
@@ -365,12 +387,17 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // credential first has Magpie refresh its quota (refreshKept). Scheduled
 // rounds never do: a Claude refresh runs Claude Code's /usage.
 //
+// The refreshes share renew, which ends keptRereadWait before the end of
+// the manual refresh (manualRefreshEnd): deadline is that of the request
+// that asked for the refresh, zero for none.
+//
 // It returns the error of the refresh: for one account, that account's
 // error, or errRefreshAccountGone when the account is not loaded; for all,
 // only a failed account list. A refreshFailure in it gives the reason
 // Magpie could not refresh, or brought no new reading.
-func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string) error {
-	renew, cancel := context.WithTimeout(ctx, manualRefreshBudget)
+func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string, deadline time.Time) error {
+	end := manualRefreshEnd(time.Now(), deadline)
+	renew, cancel := context.WithDeadline(ctx, end.Add(-keptRereadWait))
 	defer cancel()
 	errs, listErr := e.pollWith(ctx, cfg, e.now(), onlyAuth, true, renew)
 	switch {
@@ -497,16 +524,21 @@ func (e *Engine) applyKept(ctx context.Context, cred *Cred) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("凭证已过期，读取 Magpie 额度记录失败：%w", err)
 	}
 	for _, k := range kept {
-		if k.Pin != cred.AuthIndex {
-			continue
+		if k.Pin == cred.AuthIndex {
+			e.applyKeptQuota(ctx, k)
+			return k.ReadAt, nil
 		}
-		if k.ReadAt.After(e.keptAt[k.Pin]) {
-			e.keptAt[k.Pin] = k.ReadAt
-			e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
-		}
-		return k.ReadAt, nil
 	}
 	return time.Time{}, errors.New("凭证已过期，Magpie 也没有这个账号的额度记录")
+}
+
+// applyKeptQuota applies the kept reading k when it is newer than the last
+// one applied to its account.
+func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota) {
+	if k.ReadAt.After(e.keptAt[k.Pin]) {
+		e.keptAt[k.Pin] = k.ReadAt
+		e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
+	}
 }
 
 // refreshKept asks Magpie to read the quota of cred again, for an account
@@ -516,9 +548,22 @@ func (e *Engine) applyKept(ctx context.Context, cred *Cred) (time.Time, error) {
 // and a refresh without a new reading (refresh_stale, or a kept reading no
 // newer than the one applied before) a stale refreshFailure, each with the
 // outcome of applying the last reading.
+//
+// A host.KeptRefresher answers the account's card with the refresh, which
+// is applied as it is. Otherwise, as after a refresh that failed, the kept
+// quota is read again within keptRereadWait, which manualPoll keeps free
+// after renew.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
 	before := e.keptAt[cred.AuthIndex]
-	refreshErr := e.host.RefreshQuota(renew, cred.AuthIndex)
+	var refreshErr error
+	var card host.KeptQuota
+	answered := false
+	if r, ok := e.host.(host.KeptRefresher); ok {
+		card, answered, refreshErr = r.RefreshKept(renew, cred.AuthIndex)
+		answered = answered && card.Pin == cred.AuthIndex
+	} else {
+		refreshErr = e.host.RefreshQuota(renew, cred.AuthIndex)
+	}
 	var hostErr *host.Error
 	switch {
 	case errors.As(refreshErr, &hostErr) && hostErr.Code == refreshStaleCode:
@@ -526,9 +571,18 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 	case errors.As(refreshErr, &hostErr) && refreshReasons[hostErr.Code] != "":
 		refreshErr = &refreshFailure{reason: refreshReasons[hostErr.Code], err: refreshErr}
 	case refreshErr != nil && renew.Err() != nil && ctx.Err() == nil:
-		refreshErr = fmt.Errorf("超过 %s 未完成：%w", manualRefreshBudget, refreshErr)
+		refreshErr = fmt.Errorf("超过手动刷新的时限，未完成：%w", refreshErr)
 	}
-	readAt, err := e.applyKept(ctx, cred)
+	var readAt time.Time
+	var err error
+	if answered {
+		e.applyKeptQuota(ctx, card)
+		readAt = card.ReadAt
+	} else {
+		reread, cancel := context.WithTimeout(ctx, keptRereadWait)
+		readAt, err = e.applyKept(reread, cred)
+		cancel()
+	}
 	if refreshErr == nil && err == nil && !readAt.After(before) {
 		// Magpie reported the refresh as done, but its reading is the one
 		// applied before.
