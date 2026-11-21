@@ -1101,3 +1101,197 @@ test("older failure events without params hide their whole detail when masked", 
   // Events with params keep the masking by names and error texts.
   assert.equal(ctx.eventView(event("ignite_failed", 0, { label: "Claude", params: { manual: "1", error: "x", summary: "y" } })).whole, false);
 });
+
+test("the theme and language follow Magpie, else the browser", () => {
+  const ctx = context(["pageTheme", "pageLanguage"]);
+  assert.equal(ctx.pageTheme({ dark: true, lang: "en" }, false), "dark");
+  assert.equal(ctx.pageTheme({ dark: false, lang: "en" }, true), "light");
+  assert.equal(ctx.pageTheme(null, true), "dark");
+  assert.equal(ctx.pageTheme({}, false), "light");
+  assert.equal(ctx.pageLanguage({ dark: false, lang: "zh-TW" }, "en-US"), "zh");
+  assert.equal(ctx.pageLanguage({ dark: false, lang: "ja" }, "zh-CN"), "en");
+  assert.equal(ctx.pageLanguage(null, "zh-CN"), "zh");
+  assert.equal(ctx.pageLanguage({ dark: true }, "fr"), "en");
+  assert.equal(ctx.pageLanguage(null, ""), "en");
+});
+
+test("the page speaks Magpie's bridge protocol to its parent only", async () => {
+  const posted = [], calls = { theme: 0, language: 0, refresh: 0 };
+  const parent = { postMessage: (msg, target) => posted.push([plain(msg), target]) };
+  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible"], {
+    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 },
+    status: null, history: null, renderChart: () => {},
+    applyTheme: () => calls.theme++, applyLanguage: () => calls.language++,
+    loadStatus: () => { calls.refresh++; return Promise.resolve(); }, refreshHistory: () => {},
+  });
+  const hello = ctx.magpieCall("hello");
+  assert.deepEqual(posted, [[{ magpie: 1, id: 1, method: "hello" }, "*"]]);
+  // Another window's answer, or one without the marker, is ignored.
+  ctx.magpieMessage({ source: {}, data: { magpie: 1, id: 1, result: { dark: false } } });
+  ctx.magpieMessage({ source: parent, data: { id: 1, result: { dark: false } } });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 1, result: { dark: true, lang: "zh", tokens: {}, visible: true } } });
+  assert.deepEqual(plain(await hello), { dark: true, lang: "zh", tokens: {}, visible: true });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "theme", data: { dark: false, lang: "en", tokens: { bg: "#fff" } } } });
+  assert.deepEqual(plain(ctx.magpie.theme), { dark: false, lang: "en" });
+  assert.equal(calls.theme, 1);
+  assert.equal(calls.language, 1);
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: false } } });
+  assert.equal(ctx.magpie.visible, false);
+  ctx.status = {};
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: true } } });
+  assert.equal(ctx.magpie.visible, true);
+  assert.equal(calls.refresh, 1);
+  const copy = ctx.magpieCall("image.copy", { png: "blob" });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 2, error: "A picture is a PNG of 16 MB at most" } });
+  await assert.rejects(copy, /16 MB/);
+  // The page never reports errors to Magpie, which would replace it.
+  assert.doesNotMatch(source, /method: "error"|magpieCall\("error"/);
+});
+
+test("opened on its own the page asks nothing of a parent", async () => {
+  const win = {};
+  win.parent = win;
+  const ctx = context(["inFrame", "magpieCall"], { window: win, magpie: { calls: {}, next: 0 } });
+  assert.equal(ctx.inFrame(), false);
+  await assert.rejects(ctx.magpieCall("hello"), /not in Magpie/);
+});
+
+test("the sandbox drops neither storage errors nor confirmations", () => {
+  // Every use of localStorage tolerates the sandbox's SecurityError.
+  const lines = source.split("\n");
+  lines.forEach((line, i) => {
+    if (!/localStorage\./.test(line) || /^\s*\/\//.test(line)) return;
+    const guarded = /try \{/.test(line) || /try \{\s*$/.test(lines[i - 1]) || /try \{\s*$/.test(lines[i - 2]);
+    assert.ok(guarded, "line " + (i + 1) + ": " + line.trim());
+  });
+  assert.doesNotMatch(source, /parentRoot|watchParent|cli-proxy|sessionStorage|document\.cookie|\balert\(|\bprompt\(/);
+  // confirm() is called only where it can ask.
+  assert.deepEqual(lines.filter((line) => /\bconfirm\(/.test(line) && !/^\s*\/\//.test(line)).map((line) => line.trim()), ["if (!SANDBOXED) return confirm(message);"]);
+
+  const toasts = [];
+  let now = 1000;
+  const ctx = context(["confirmed"], {
+    SANDBOXED: true, toast: (text) => toasts.push(text), translate: (key, arg) => key + ":" + arg,
+    confirm: () => { throw new Error("no dialogs in the sandbox"); },
+    Date: { now: () => now },
+  });
+  const button = {};
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  assert.deepEqual(toasts, ["confirm_again:Ignite?"]);
+  now += 4000;
+  assert.equal(ctx.confirmed(button, "Ignite?"), true);
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  now += 6000;
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  ctx.SANDBOXED = false;
+  ctx.confirm = (text) => text === "Ignite?";
+  assert.equal(ctx.confirmed(button, "Ignite?"), true);
+});
+
+test("Magpie's warm-up accounts are named as the page names them", () => {
+  const ctx = context(["warmupNames"]);
+  const title = (p) => ({ claude: "Claude", codex: "Codex" })[p] || p;
+  const accounts = [
+    { auth_index: "claude/a", provider: "claude", note: "Work\nsecond line", email: "a@example.com" },
+    { auth_index: "codex/b", provider: "codex", email: "b@example.com" },
+  ];
+  assert.deepEqual(plain(ctx.warmupNames(["claude/a", "codex/b", "claude/gone", "claude/off", "", 3], accounts, { "claude/off": "Spare" }, title)),
+    ["Claude Work", "Codex b@example.com", "claude/gone", "Spare"]);
+  assert.deepEqual(plain(ctx.warmupNames(undefined, accounts, {}, title)), []);
+  assert.deepEqual(plain(ctx.warmupNames(null, accounts, {}, title)), []);
+});
+
+test("enabling the page on the public listener saves a new admin key with it", () => {
+  let inputs = [];
+  const ctx = context(["topKey", "setPath", "buildPatch", "mcpKey", "adminKey"], {
+    rawConfig: {}, status: { config: {} },
+    $: () => ({ elements: inputs }),
+    newMcpKey: () => "llmcp_generated", newAdminKey: () => "lladm_generated",
+  });
+  function patch(name, value) {
+    inputs = [{ name, value, type: "checkbox", checked: value, getAttribute: () => null }];
+    return JSON.parse(JSON.stringify(ctx.buildPatch(name)));
+  }
+  assert.deepEqual(patch("web_enabled", true), { web_enabled: true, admin_key: "lladm_generated" });
+  assert.deepEqual(patch("web_enabled", false), { web_enabled: false });
+  ctx.rawConfig.admin_key = "lladm_saved";
+  assert.deepEqual(patch("web_enabled", true), { web_enabled: true });
+});
+
+test("generated keys are 32 random bytes in base64url after their prefix", () => {
+  const ctx = context(["newSecret", "newMcpKey", "newAdminKey"], { crypto: require("node:crypto").webcrypto, Uint8Array, btoa });
+  assert.match(ctx.newAdminKey(), /^lladm_[A-Za-z0-9_-]{43}$/);
+  assert.match(ctx.newMcpKey(), /^llmcp_[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(ctx.newAdminKey(), ctx.newAdminKey());
+});
+
+test("the public listener state falls back to the MCP state", () => {
+  const ctx = context(["publicState"]);
+  const pub = { listen: "0.0.0.0:8318", running: true, error: "", web: true, mcp: false };
+  assert.equal(ctx.publicState({ public: pub, mcp: { running: false } }), pub);
+  assert.deepEqual(plain(ctx.publicState({ mcp: { enabled: true, listen: "127.0.0.1:8318", running: false, error: "bind" } })),
+    { listen: "127.0.0.1:8318", running: false, error: "bind", web: null, mcp: false });
+  assert.equal(ctx.publicState({}), null);
+  assert.equal(ctx.publicState(null), null);
+});
+
+test("a 401 asks for the key unless the page changed the key meanwhile", async () => {
+  const asked = [];
+  const ctx = context(["api"], {
+    key: "", PAGE_TOKEN: "", translate: (k) => k, setTimeout, clearTimeout, askForKey: (message) => asked.push(message),
+    fetch: async () => ({ status: 401, ok: false, json: async () => ({ error: "unauthorized" }) }),
+  });
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.deepEqual(asked, [""]);
+  ctx.key = "old";
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.deepEqual(asked, ["", "key_invalid"]);
+  ctx.fetch = async (path, opts) => {
+    assert.equal(opts.headers.Authorization, "Bearer old");
+    ctx.key = "new";
+    return { status: 401, ok: false, json: async () => ({}) };
+  };
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.equal(asked.length, 2);
+});
+
+test("the key form works without form submission", () => {
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  assert.match(html, /<button id="key-submit"[^>]+type="button"/);
+  assert.match(source, /\$\("key-submit"\)\.addEventListener\("click", submitKey\)/);
+  assert.match(source, /\$\("key-input"\)\.addEventListener\("keydown"/);
+  // The admin key is generated, shown and copied like the MCP key.
+  for (const id of ["admin-key-view", "admin-key-show", "admin-key-copy", "admin-key-new", "public-status"]) assert.match(html, new RegExp('id="' + id + '"'));
+  assert.match(html, /name="web_enabled" type="checkbox"/);
+});
+
+test("API requests carry the page token only when the page has one", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  // The internal listener replaces this exact tag (web.PageWith).
+  assert.equal(html.split('<meta name="lamplighter-page" content="">').length, 2);
+  const meta = (content) => ({ querySelector: (sel) => {
+    assert.equal(sel, 'meta[name="lamplighter-page"]');
+    return content === null ? null : { getAttribute: () => content };
+  } });
+  const token = context(["pageToken"]);
+  assert.equal(token.pageToken(meta("tok_123")), "tok_123");
+  assert.equal(token.pageToken(meta("")), "");
+  assert.equal(token.pageToken(meta(null)), "");
+
+  const sent = [];
+  const ctx = context(["api"], {
+    key: "", PAGE_TOKEN: "tok_123", translate: (k) => k, setTimeout, clearTimeout, askForKey: () => {},
+    fetch: async (p, opts) => { sent.push(opts.headers); return { status: 200, ok: true, json: async () => ({}) }; },
+  });
+  await ctx.api("GET", "api/status");
+  await ctx.api("PATCH", "api/config", { a: 1 });
+  assert.equal(sent[0]["X-Lamplighter-Page"], "tok_123");
+  assert.equal(sent[1]["X-Lamplighter-Page"], "tok_123");
+  ctx.PAGE_TOKEN = "";
+  await ctx.api("GET", "api/status");
+  assert.equal("X-Lamplighter-Page" in sent[2], false);
+  // Requests go out only through api(), and never on a parent's message.
+  assert.equal(source.match(/\bfetch\(/g).length, 1);
+  const handler = source.match(/  function magpieMessage\([^]*?\n  }/)[0];
+  assert.doesNotMatch(handler, /api\(|fetch\(/);
+});

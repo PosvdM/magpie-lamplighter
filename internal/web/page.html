@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The internal listener fills in its page token; see pageToken in page.js. -->
+<meta name="lamplighter-page" content="">
 <title>Lamplighter</title>
 <style>/*CSS*/</style>
 </head>
@@ -14,7 +16,7 @@
   <p class="secondary" data-i18n="key_hint">通过对外地址访问时需要 Lamplighter 的管理密钥（设置中的 admin_key），密钥保存在当前浏览器中。</p>
   <form id="key-form">
     <input id="key-input" type="password" autocomplete="off" placeholder="Lamplighter 管理密钥" data-i18n-placeholder="key_placeholder">
-    <button class="btn btn-primary" type="submit" data-i18n="key_submit">确定</button>
+    <button id="key-submit" class="btn btn-primary" type="button" data-i18n="key_submit">确定</button>
   </form>
   <p id="key-error" class="error-text" hidden></p>
 </div>
@@ -260,22 +262,42 @@
           </div>
           <p class="hint" data-i18n="remember_chart_filters_hint">在当前浏览器中记住上次选择的额度窗口、时间范围和排序；关闭后每次打开页面都使用默认选择。</p>
         </fieldset>
+        <fieldset class="public">
+          <legend><span data-i18n="public_access">对外访问</span></legend>
+          <p class="hint" data-i18n="public_hint">内部监听只供 Magpie 使用，不需要密钥。对外监听让其他设备通过浏览器或 MCP 访问 Lamplighter：页面和接口需要管理密钥，MCP 需要 MCP 的密钥。两者都关闭时不监听。</p>
+          <div class="checks">
+            <label class="inline"><input name="web_enabled" type="checkbox"><span data-i18n="web_enabled">在对外监听上提供页面和接口</span></label>
+          </div>
+          <div class="grid-3">
+            <label><span data-i18n="public_listen">对外监听地址</span><input name="public_listen" type="text" spellcheck="false" autocomplete="off" placeholder="127.0.0.1:8318"></label>
+            <div class="field span-2" id="admin-key-field">
+              <span class="field-label" data-i18n="admin_key">管理密钥</span>
+              <div class="key-row">
+                <code id="admin-key-view" class="key-view"></code>
+                <button id="admin-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
+                <button id="admin-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
+                <button id="admin-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" data-i18n="public_status">状态</span>
+            <div id="public-status" class="mcp-status"></div>
+          </div>
+        </fieldset>
         <fieldset class="mcp">
           <legend><span>MCP</span></legend>
           <p class="hint" data-i18n="mcp_hint">AI 客户端（如 Claude Code）可以通过 MCP 查询额度、历史和事件，并刷新额度。</p>
           <div class="checks">
             <label class="inline"><input name="mcp_enabled" type="checkbox"><span data-i18n="mcp_enabled">启用 MCP 接口</span></label>
           </div>
-          <div class="grid-3">
-            <label><span data-i18n="public_listen">对外监听地址</span><input name="public_listen" type="text" spellcheck="false" autocomplete="off" placeholder="127.0.0.1:8318"></label>
-            <div class="field span-2" id="mcp-key-field">
-              <span class="field-label" data-i18n="mcp_key">密钥</span>
-              <div class="key-row">
-                <code id="mcp-key-view" class="key-view"></code>
-                <button id="mcp-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
-                <button id="mcp-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
-                <button id="mcp-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
-              </div>
+          <div class="field" id="mcp-key-field">
+            <span class="field-label" data-i18n="mcp_key">密钥</span>
+            <div class="key-row">
+              <code id="mcp-key-view" class="key-view"></code>
+              <button id="mcp-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
+              <button id="mcp-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
+              <button id="mcp-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
             </div>
           </div>
           <div class="field">

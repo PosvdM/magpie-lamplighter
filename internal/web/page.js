@@ -7,6 +7,19 @@
   var CONFIG_API = "api/config";
   var KEY_STORE = "lamplighter-admin-key";
 
+  // In Magpie's sandboxed frame the page has an opaque origin, so its own
+  // api/… requests are cross-origin (Origin: null). The internal listener
+  // writes a token of its process into the page's lamplighter-page meta
+  // tag and answers such requests with CORS headers only when they carry
+  // it in X-Lamplighter-Page; another site cannot read the page to learn
+  // it. The page takes no requests from its parent, so a site embedding it
+  // cannot use the token through it.
+  function pageToken(doc) {
+    var meta = doc.querySelector('meta[name="lamplighter-page"]');
+    return (meta && meta.getAttribute("content")) || "";
+  }
+  var PAGE_TOKEN = pageToken(document);
+
   var key = "";
   var status = null;
   var settingsFilled = false;
@@ -46,41 +59,92 @@
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  // The page runs in a same-origin iframe of the Management Center, so it
-  // reads the theme from the parent document: data-theme is "dark", "white"
-  // or absent for the default light theme. Opened on its own, it falls back
-  // to the theme the Management Center stored in localStorage.
-  function parentRoot() {
-    try {
-      if (window.parent !== window) return window.parent.document.documentElement;
-    } catch (e) { /* cross-origin */ }
-    return null;
+  // ---- Magpie ----
+
+  // In Magpie the page runs in the frame of a plugin page, sandboxed to
+  // allow-scripts: an opaque origin without localStorage, clipboard,
+  // dialogs or popups. Magpie's page service adds the same sandbox when
+  // its address is opened in a tab of its own. SANDBOXED tells the page to
+  // work around the missing parts.
+  var SANDBOXED = String(window.origin) === "null";
+
+  // The frame first loads the plugin's page file, which sends it to this
+  // page. Magpie answers the messages of the frame, whatever document it
+  // holds (pluginpages.js matches ev.source), so the page speaks the
+  // protocol of Magpie's page bridge (internal/gui/pagebridge.js) itself:
+  // "hello" answers with { dark, lang, tokens, visible }, a "theme" event
+  // follows every change of theme or language, and a "visibility" event
+  // tells when the reader leaves the page and comes back. ready is set once
+  // Magpie has answered. The page never sends the "error" method, which
+  // replaces the page with Magpie's error view.
+  var magpie = { ready: false, theme: null, visible: true, calls: {}, next: 0 };
+
+  function inFrame() {
+    try { return window.parent !== window; } catch (e) { return false; }
+  }
+
+  function magpieCall(method, params) {
+    if (!inFrame()) return Promise.reject(new Error("not in Magpie"));
+    var id = ++magpie.next;
+    return new Promise(function (resolve, reject) {
+      magpie.calls[id] = { resolve: resolve, reject: reject };
+      window.parent.postMessage({ magpie: 1, id: id, method: method, params: params }, "*");
+    });
+  }
+
+  function magpieMessage(e) {
+    if (!inFrame() || e.source !== window.parent) return;
+    var m = e.data;
+    if (!m || typeof m !== "object" || m.magpie !== 1) return;
+    if (m.event === "theme") { magpieTheme(m.data); return; }
+    if (m.event === "visibility") { magpieVisible(!(m.data && m.data.visible === false)); return; }
+    var call = magpie.calls[m.id];
+    if (!call) return;
+    delete magpie.calls[m.id];
+    if (m.error) call.reject(new Error(String(m.error)));
+    else call.resolve(m.result);
+  }
+
+  function magpieTheme(theme) {
+    magpie.theme = theme && typeof theme === "object" ? { dark: theme.dark, lang: theme.lang } : null;
+    applyTheme();
+    applyLanguage();
+    if (status && history) renderChart();
+  }
+
+  // Coming back to the page refreshes it at once; while away it skips the
+  // periodic refresh.
+  function magpieVisible(visible) {
+    var back = visible && !magpie.visible;
+    magpie.visible = visible;
+    if (back && status) loadStatus().then(refreshHistory).catch(function () {});
+  }
+
+  function magpieHello() {
+    if (!inFrame()) return;
+    window.addEventListener("message", magpieMessage);
+    magpieCall("hello").then(function (answer) {
+      magpie.ready = true;
+      if (answer && answer.visible === false) magpie.visible = false;
+      magpieTheme(answer);
+      // Screenshots go through Magpie now that it answers.
+      renderCardsSnapshot();
+      if (status) renderStatus();
+    }).catch(function () { /* not Magpie: the browser's settings stay */ });
+  }
+
+  // The theme follows Magpie, whose theme is light or dark, and the
+  // browser when the page is opened on its own.
+  function pageTheme(magpieTheme, browserDark) {
+    if (magpieTheme && typeof magpieTheme.dark === "boolean") return magpieTheme.dark ? "dark" : "light";
+    return browserDark ? "dark" : "light";
   }
 
   function applyTheme() {
-    var theme = "light";
-    var root = parentRoot();
-    if (root) {
-      var value = root.getAttribute("data-theme");
-      if (value === "dark" || value === "white") theme = value;
-    } else {
-      var stored = "auto";
-      try {
-        var parsed = JSON.parse(localStorage.getItem("cli-proxy-theme") || "null");
-        stored = (parsed && parsed.state && parsed.state.theme) || (parsed && parsed.theme) || stored;
-      } catch (e) { /* use auto */ }
-      if (stored === "dark" || stored === "white") theme = stored;
-      if (stored === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) theme = "dark";
-    }
+    var dark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var theme = pageTheme(magpie.theme, dark);
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);
-  }
-
-  function watchParent() {
-    var root = parentRoot();
-    if (!root || !window.MutationObserver) return;
-    new MutationObserver(function () { applyTheme(); applyLanguage(); renderChart(); })
-      .observe(root, { attributes: true, attributeFilter: ["data-theme", "lang"] });
   }
 
   // ---- Language ----
@@ -155,7 +219,7 @@
       chart_prefs: "额度图表", remember_chart_filters: "记住筛选条件",
       remember_chart_filters_hint: "在当前浏览器中记住上次选择的额度窗口、时间范围和排序；关闭后每次打开页面都使用默认选择。",
       save_hint: "修改后自动保存到 Lamplighter 的 config.json 并立即应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。",
-      language_note: "通知语言跟随最近打开此页面时管理中心的语言，当前为{0}。",
+      language_note: "通知语言跟随最近一次打开此页面时的页面语言，当前为{0}。",
       lang_zh: "中文", lang_en: "English",
       due: "已到", minutes: "{0} 分钟", hours_minutes: "{0} 小时 {1} 分", days: "{0} 天",
       soon: "即将", in_time: "{0}后", just_now: "刚刚", ago: "{0}前",
@@ -247,7 +311,16 @@
       mcp_public_url: "对外地址（可选）",
       mcp_public_hint: "对外开放时请使用反向代理并配置 HTTPS，然后在这里填写对外地址，下面的配置随之更新。这个地址只保存在当前浏览器。",
       mcp_snippets: "客户端配置", mcp_claude: "Claude Code", mcp_json: "通用 JSON", mcp_stdio: "只支持 stdio 的客户端（mcp-remote）",
-      mcp_no_key: "先生成密钥，配置中的 <key> 会换成实际的密钥。", mcp_error: "MCP 接口未启动：{0}"
+      mcp_no_key: "先生成密钥，配置中的 <key> 会换成实际的密钥。", mcp_error: "MCP 接口未启动：{0}",
+      copy_failed_sandbox: "Magpie 中的页面不能写入剪贴板。请选中文本手动复制，或通过对外地址在浏览器中打开页面后复制",
+      confirm_again: "{0} 再点一次确认。",
+      public_access: "对外访问",
+      public_hint: "内部监听只供 Magpie 使用，不需要密钥。对外监听让其他设备通过浏览器或 MCP 访问 Lamplighter：页面和接口需要管理密钥，MCP 需要 MCP 的密钥。两者都关闭时不监听。",
+      web_enabled: "在对外监听上提供页面和接口", admin_key: "管理密钥",
+      admin_regenerate_confirm: "生成新的管理密钥？旧密钥会立即失效，通过对外地址打开的页面需要输入新密钥。",
+      public_status: "状态", public_off: "未启用", public_web: "页面和接口", public_mcp: "MCP",
+      public_error: "对外监听未启动：{0}",
+      warmup_notice: "Magpie 为这些账号开启了预热：{0}。预热和 Lamplighter 的自动点火会重复点火，请在 Magpie 中关闭这些账号的预热。"
     },
     en: {
       app_sub: "", repo_hint: "View on GitHub",
@@ -315,7 +388,7 @@
       chart_prefs: "Quota chart", remember_chart_filters: "Remember the filters",
       remember_chart_filters_hint: "This browser remembers the last quota window, time range and order. When off, the page opens with the default choices.",
       save_hint: "Changes save to Lamplighter's config.json automatically and apply at once. Text and numbers save when you leave the field or press Enter. Save results appear beside section headings or advanced group legends.",
-      language_note: "Notifications use the Management Center language from the last time this page was opened, now {0}.",
+      language_note: "Notifications use the language of this page from the last time it was opened, now {0}.",
       lang_zh: "中文", lang_en: "English",
       due: "due", minutes: "{0} min", hours_minutes: "{0} h {1} min", days: "{0} days",
       soon: "soon", in_time: "in {0}", just_now: "just now", ago: "{0} ago",
@@ -408,7 +481,16 @@
       mcp_public_url: "Public address (optional)",
       mcp_public_hint: "To open it to other machines, put a reverse proxy with HTTPS in front and enter its address here; the configs below follow it. The address is kept in this browser only.",
       mcp_snippets: "Client configuration", mcp_claude: "Claude Code", mcp_json: "Generic JSON", mcp_stdio: "stdio-only clients (mcp-remote)",
-      mcp_no_key: "Generate a key first; it replaces <key> in the configs.", mcp_error: "The MCP endpoint is not running: {0}"
+      mcp_no_key: "Generate a key first; it replaces <key> in the configs.", mcp_error: "The MCP endpoint is not running: {0}",
+      copy_failed_sandbox: "Pages in Magpie cannot write to the clipboard. Select the text and copy it, or open the page through the public address in a browser",
+      confirm_again: "{0} Click again to confirm.",
+      public_access: "Public access",
+      public_hint: "The internal listener serves Magpie only and needs no key. The public listener lets other devices reach Lamplighter in a browser or over MCP: the page and API need the admin key, MCP needs its own key. With both off, nothing listens.",
+      web_enabled: "Serve the page and API on the public listener", admin_key: "Admin key",
+      admin_regenerate_confirm: "Generate a new admin key? The old key stops working at once, and pages opened through the public address need the new one.",
+      public_status: "Status", public_off: "Off", public_web: "Page and API", public_mcp: "MCP",
+      public_error: "The public listener is not running: {0}",
+      warmup_notice: "Magpie warms up these accounts: {0}. Its warm-up and Lamplighter's ignition would both start the window; turn warm-up off for these accounts in Magpie."
     }
   };
 
@@ -420,24 +502,16 @@
     return text;
   }
 
-  // The language follows the Management Center: the lang attribute of the
-  // parent page, which it updates on every switch, or the language it stored
-  // when the page is opened on its own. Chinese variants show Chinese and
-  // every other language English.
-  function centerLanguage() {
-    var root = parentRoot();
-    var value = root ? root.getAttribute("lang") || "" : "";
-    if (!value) {
-      try {
-        var raw = localStorage.getItem("cli-proxy-language") || "";
-        try {
-          var parsed = JSON.parse(raw);
-          value = (parsed && parsed.state && parsed.state.language) || (parsed && parsed.language) || (typeof parsed === "string" ? parsed : "");
-        } catch (e) { value = raw; }
-      } catch (e) { /* no storage */ }
-    }
-    if (!value) value = navigator.language || "";
+  // The language follows Magpie's ("zh", "zh-TW", "en", …), and the
+  // browser's when the page is opened on its own. Chinese variants show
+  // Chinese and every other language English.
+  function pageLanguage(magpieTheme, browser) {
+    var value = (magpieTheme && typeof magpieTheme.lang === "string" && magpieTheme.lang) || browser || "";
     return /^zh/i.test(value) ? "zh" : "en";
+  }
+
+  function browserLanguage() {
+    return (navigator.languages && navigator.languages[0]) || navigator.language || "";
   }
 
   function applyStaticText() {
@@ -453,7 +527,7 @@
 
   var languageApplied = false;
   function applyLanguage() {
-    var next = centerLanguage();
+    var next = pageLanguage(magpie.theme, browserLanguage());
     if (languageApplied && next === lang) return;
     lang = next;
     languageApplied = true;
@@ -488,7 +562,9 @@
   // timeout, in milliseconds, aborts a request that takes longer.
   function api(method, path, body, timeout) {
     var opts = { method: method, headers: { "Accept": "application/json" } };
+    var sentKey = key;
     if (key) opts.headers.Authorization = "Bearer " + key;
+    if (PAGE_TOKEN) opts.headers["X-Lamplighter-Page"] = PAGE_TOKEN;
     if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
@@ -507,13 +583,23 @@
         return {};
       }).then(function (data) {
         if (res.status === 401) {
-          askForKey(translate("key_invalid"));
+          // A request sent before this page saved a new admin key does not
+          // make the new key invalid.
+          if (sentKey === key) askForKey(sentKey ? translate("key_invalid") : "");
           throw new Error("unauthorized");
         }
         if (!res.ok) throw new Error(data.error || data.message || ("HTTP " + res.status));
         return data;
       });
     }).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
+  }
+
+  // After the page saves a new admin key, a page that sends a key sends the
+  // new one.
+  function useKey(secret) {
+    if (!key) return;
+    key = secret;
+    try { localStorage.setItem(KEY_STORE, secret); } catch (err) {}
   }
 
   function askForKey(message) {
@@ -523,6 +609,20 @@
     $("key-section").hidden = false;
     $("key-error").hidden = !message;
     $("key-error").textContent = message || "";
+  }
+
+  // Magpie's sandbox has no dialogs: confirm() returns false there without
+  // asking. Sandboxed, the action asks in a toast and runs on a second click
+  // of the same button within 5 seconds.
+  function confirmed(button, message) {
+    if (!SANDBOXED) return confirm(message);
+    if (button.confirmUntil && Date.now() < button.confirmUntil) {
+      button.confirmUntil = 0;
+      return true;
+    }
+    button.confirmUntil = Date.now() + 5000;
+    toast(translate("confirm_again", message));
+    return false;
   }
 
   var toastTimer = null;
@@ -791,9 +891,11 @@
   // drawn with the page's style sheet through an SVG foreignObject on a
   // canvas, at the screen's pixel ratio. Animations, transitions and hover
   // styles are left out. Nothing outside the page is loaded, so the canvas
-  // stays readable.
+  // stays readable. In Magpie the sandbox has no clipboard, and Magpie
+  // copies the PNG for the page (the bridge's image.copy).
   function canCopyImage() {
-    return !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext);
+    if (magpie.ready) return true;
+    return !SANDBOXED && !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext);
   }
 
   // A PNG blob of the nodes side by side in a frame width pixels wide. The
@@ -849,7 +951,8 @@
     var png;
     try { png = snapshotPng(nodes, Math.ceil(width) + 24); } catch (err) { png = Promise.reject(err); }
     var write;
-    try { write = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); } catch (err) { write = Promise.reject(err); }
+    if (magpie.ready) write = png.then(function (blob) { return magpieCall("image.copy", { png: blob }); });
+    else try { write = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); } catch (err) { write = Promise.reject(err); }
     png.catch(function () {});
     write.then(function () { toast(translate("snapshot_copied")); }, function (err) {
       toast(translate("snapshot_failed", (err && (err.message || err.name)) || String(err)));
@@ -914,6 +1017,21 @@
     return el("div", { class: "notice" }, [el("span", { class: "notice-icon", text: "!" }), el("span", {}, maskedNodes(text))]);
   }
 
+  // The accounts Magpie warms up (status.magpie_warmup, a list of pins), by
+  // the names the page shows: the service and the account name, else the
+  // email; an account the status does not list by its name in
+  // account_names, else its pin.
+  function warmupNames(pins, accounts, names, titleOf) {
+    if (!Array.isArray(pins)) return [];
+    return pins.filter(function (pin) { return typeof pin === "string" && pin; }).map(function (pin) {
+      var account = (accounts || []).filter(function (a) { return a.auth_index === pin; })[0];
+      var saved = names && typeof names[pin] === "string" ? names[pin].split(/\r?\n/)[0].trim() : "";
+      if (!account) return saved || pin;
+      var name = (account.note || "").split(/\r?\n/)[0].trim() || account.email || saved || pin;
+      return titleOf(account.provider) + " " + name;
+    });
+  }
+
   function renderNotices() {
     var box = $("notices");
     clear(box);
@@ -922,7 +1040,11 @@
     if (status.list_error) box.appendChild(notice(status.list_error));
     if (status.models_error) box.appendChild(notice(translate("models_error", status.models_error)));
     if (status.notify_error) box.appendChild(notice(translate("notify_error", status.notify_error)));
-    if (status.mcp && status.mcp.enabled && !status.mcp.running && status.mcp.error) box.appendChild(notice(translate("mcp_error", status.mcp.error)));
+    if (status.public) {
+      if (!status.public.running && status.public.error) box.appendChild(notice(translate("public_error", status.public.error)));
+    } else if (status.mcp && status.mcp.enabled && !status.mcp.running && status.mcp.error) box.appendChild(notice(translate("mcp_error", status.mcp.error)));
+    var warmup = warmupNames(status.magpie_warmup, status.accounts, rawConfig.account_names, providerTitle);
+    if (warmup.length) box.appendChild(notice(translate("warmup_notice", warmup.join(lang === "zh" ? "、" : ", "))));
     // No channel is how notifications are turned off, so it is a hint in the
     // settings rather than a notice.
     $("notify-off").hidden = !(status.config && !status.config.bark_url && !(status.config.webhook && status.config.webhook.url));
@@ -1276,7 +1398,7 @@
     status.targets.forEach(function (t) {
       var st = targetStatus(t);
       var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), onclick: function () {
-        if (!confirm(translate("ignite_confirm", t.label))) return;
+        if (!confirmed(button, translate("ignite_confirm", t.label))) return;
         runAction(button, API + "/ignite", { target: t.key }, translate("ignited", t.label));
       } });
       var next = parseTime(t.next_due), reset = parseTime(t.reset), last = parseTime(t.last_success);
@@ -3081,6 +3203,7 @@
       overview.appendChild(el("div", { class: "empty", text: historyFailed ? translate("history_failed", historyFailed) : translate("loading") }));
       return;
     }
+    $("legend-projection").textContent = translate("legend_projection_" + historyWindow);
     var rows = chartRows();
     if (!rows.length) {
       overview.appendChild(el("div", { class: "empty", text: translate("no_history") }));
@@ -3093,7 +3216,6 @@
     renderDetail(selected, head, detail);
     placeDetailHead($("chart-detail-wrap"), head, detail, chartView);
     renderChartTable(rows);
-    $("legend-projection").textContent = translate("legend_projection_" + historyWindow);
   }
 
   // The buttons are rebuilt only when the window or the language changes;
@@ -3360,6 +3482,7 @@
     effective.webhook.headers = webhook.headers || {};
     // Plugins without MCP report neither field.
     if (effective.mcp_enabled === undefined) effective.mcp_enabled = !!rawConfig.mcp_enabled;
+    if (effective.web_enabled === undefined) effective.web_enabled = !!rawConfig.web_enabled;
     if (!effective.public_listen) effective.public_listen = rawConfig.public_listen || MCP_LISTEN;
     return effective;
   }
@@ -3574,6 +3697,8 @@
     // Turning MCP on without a key also saves a new key, since the plugin
     // does not listen without one.
     if (top === "mcp_enabled" && patch.mcp_enabled && !mcpKey().trim()) patch.mcp_key = newMcpKey();
+    // Likewise the page and API need an admin key on the public listener.
+    if (top === "web_enabled" && patch.web_enabled && !adminKey().trim()) patch.admin_key = newAdminKey();
     // Save the same URL and listen defaults that config.Parse applies, so
     // status comparisons do not wait on a trailing slash or an empty field.
     if (top === "bark_url") patch[top] = patch[top].replace(/\/+$/, "");
@@ -3610,6 +3735,7 @@
     var kind = input.getAttribute("data-account-field");
     if (kind) return translate(kind === "name" ? "rename" : "weight");
     if (input.id === "mcp-key-new") return translate("mcp_key");
+    if (input.id === "admin-key-new") return translate("admin_key");
     if (input.closest(".thresholds")) return translate("thresholds");
     var mode = input.closest(".mode-switch");
     if (mode) return mode.getAttribute("aria-label");
@@ -3649,7 +3775,7 @@
   // and browser validation messages remain verbatim.
   function saveText(text) {
     var keys = ["save_saved", "save_saving", "save_waiting", "save_applied", "save_unconfirmed",
-      "mcp_error", "weight_invalid",
+      "mcp_error", "public_error", "weight_invalid",
       "thresholds_order", "headers_invalid", "json_invalid"];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i], languages = Object.keys(I18N);
@@ -3824,7 +3950,7 @@
       });
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
-        showApplied(say, token, /^(mcp_|public_listen)/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
+        showApplied(say, token, /^(mcp_|public_listen$|web_enabled$|admin_key$)/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
         return loadConfig();
       }).catch(function (err) {
         say("failed", err.message);
@@ -3938,12 +4064,16 @@
   // unconfirmed after the timeout. A change of MCP settings shows the MCP
   // error instead when the endpoint does not start. The save waits for its
   // token even when a newer save owns the field's state.
-  function showApplied(say, token, mcp) {
+  // listener is set for the settings of the public listener, whose error
+  // after the save is a failure.
+  function showApplied(say, token, listener) {
     say("waiting", translate("save_waiting"));
     return whenApplied(token).then(function (applied) {
-      var error = mcp && status && status.mcp && status.mcp.enabled && status.mcp.error;
+      var pub = status && status.public, error = "";
+      if (listener && pub) error = !pub.running && pub.error;
+      else if (listener) error = status && status.mcp && status.mcp.enabled && status.mcp.error;
       if (!applied) say("unverified", translate("save_unconfirmed"));
-      else if (error) say("failed", translate("mcp_error", error));
+      else if (error) say("failed", translate(pub ? "public_error" : "mcp_error", error));
       else say("saved", translate("save_applied"));
       return applied;
     });
@@ -3964,16 +4094,61 @@
   var MCP_URL_STORE = "lamplighter-mcp-url";
   var mcpKeyShown = false;
 
-  // 32 random bytes in base64url after the llmcp_ prefix.
-  function newMcpKey() {
+  var adminKeyShown = false;
+
+  // 32 random bytes in base64url after the prefix.
+  function newSecret(prefix) {
     var bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
     var text = "";
     for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
-    return "llmcp_" + btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return prefix + btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
+  function newMcpKey() { return newSecret("llmcp_"); }
+
+  function newAdminKey() { return newSecret("lladm_"); }
+
   function mcpKey() { return typeof rawConfig.mcp_key === "string" ? rawConfig.mcp_key : ""; }
+
+  function adminKey() { return typeof rawConfig.admin_key === "string" ? rawConfig.admin_key : ""; }
+
+  // The public listener's state: status.public, else the MCP state, which
+  // shares the listener, with what it serves unknown.
+  function publicState(st) {
+    if (!st) return null;
+    if (st.public) return st.public;
+    if (!st.mcp) return null;
+    return { listen: st.mcp.listen || "", running: !!st.mcp.running, error: st.mcp.error || "", web: null, mcp: !!st.mcp.running };
+  }
+
+  // The admin key and the state of the public listener.
+  function renderPublic() {
+    if (!$("admin-key-view")) return;
+    var secret = adminKey();
+    var view = $("admin-key-view");
+    view.textContent = secret ? (adminKeyShown ? secret : maskedKey(secret)) : translate("mcp_key_unset");
+    view.classList.toggle("muted", !secret);
+    $("admin-key-show").hidden = !secret;
+    $("admin-key-show").textContent = translate(adminKeyShown ? "mcp_hide" : "mcp_show");
+    $("admin-key-copy").hidden = !secret;
+
+    var box = $("public-status");
+    clear(box);
+    var state = publicState(status);
+    if (!state) box.appendChild(badge("muted", translate("mcp_unknown")));
+    else if (state.running) {
+      box.appendChild(badge("success", translate("mcp_running")));
+      var serves = [];
+      if (state.web) serves.push(translate("public_web"));
+      if (state.mcp) serves.push(translate("public_mcp"));
+      box.appendChild(el("span", { class: "mono", text: state.listen || "" }));
+      if (serves.length) box.appendChild(el("span", { text: serves.join(" · ") }));
+    } else {
+      box.appendChild(badge(state.error ? "failure" : "muted", translate(state.error ? "mcp_stopped" : "public_off")));
+      if (state.error) box.appendChild(el("span", { class: "error-text", text: state.error }));
+    }
+  }
 
   function maskedKey(value) { return value ? value.slice(0, 6) + "••••••••••••" + value.slice(-4) : ""; }
 
@@ -3986,7 +4161,8 @@
     stored = stored.trim().replace(/\/+$/, "").replace(/\/mcp$/, "");
     if (stored) return /^[a-z][a-z0-9+.-]*:\/\//i.test(stored) ? stored : "https://" + stored;
     var input = $("settings").elements["public_listen"];
-    var listen = (input && input.value.trim()) || (status && status.mcp && status.mcp.listen) || MCP_LISTEN;
+    var state = publicState(status);
+    var listen = (input && input.value.trim()) || (state && state.listen) || MCP_LISTEN;
     var at = listen.lastIndexOf(":");
     var host = at >= 0 ? listen.slice(0, at) : listen, port = at >= 0 ? listen.slice(at) : "";
     if (!host || host === "0.0.0.0" || host === "[::]" || host === "::") host = location.hostname || "127.0.0.1";
@@ -4039,6 +4215,7 @@
       ]));
     });
     if (!secret) snippets.appendChild(el("p", { class: "hint", text: translate("mcp_no_key") }));
+    renderPublic();
   }
 
   // Copies text, through a selected text area where the Clipboard API is
@@ -4053,18 +4230,36 @@
       var ok = false;
       try { ok = document.execCommand("copy"); } catch (err) {}
       document.body.removeChild(area);
-      if (ok) done(); else toast(translate("copy_failed"));
+      if (ok) done(); else toast(translate(SANDBOXED ? "copy_failed_sandbox" : "copy_failed"));
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    if (!SANDBOXED && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
     else fallback();
   }
 
   // A new key replaces the old one at once; replacing a key asks first.
   function generateMcpKey() {
-    if (mcpKey() && !confirm(translate("mcp_regenerate_confirm"))) return;
-    var button = $("mcp-key-new"), say = claimState(saveHost(button), button), secret = newMcpKey();
+    var button = $("mcp-key-new");
+    if (mcpKey() && !confirmed(button, translate("mcp_regenerate_confirm"))) return;
+    var say = claimState(saveHost(button), button), secret = newMcpKey();
     saveQueue = saveQueue.then(function () {
       return patchConfig({ mcp_key: secret }).then(function (token) {
+        showApplied(say, token, true);
+        return loadConfig();
+      }).catch(function (err) {
+        say("failed", err.message);
+      });
+    });
+  }
+
+  // A page opened through the public listener sends the admin key; after
+  // replacing it, the page sends the new one.
+  function generateAdminKey() {
+    var button = $("admin-key-new");
+    if (adminKey() && !confirmed(button, translate("admin_regenerate_confirm"))) return;
+    var say = claimState(saveHost(button), button), secret = newAdminKey();
+    saveQueue = saveQueue.then(function () {
+      return patchConfig({ admin_key: secret }).then(function (token) {
+        useKey(secret);
         showApplied(say, token, true);
         return loadConfig();
       }).catch(function (err) {
@@ -4129,18 +4324,24 @@
     });
     clearInterval(refreshTimer);
     refreshTimer = setInterval(function () {
-      if (document.hidden) return;
+      if (document.hidden || !magpie.visible) return;
       loadStatus().then(refreshHistory).catch(function () {});
     }, 30000);
   }
 
-  $("key-form").addEventListener("submit", function (e) {
+  // Magpie's sandbox blocks form submission without a submit event, so the
+  // key is also taken on Enter and on a click of the button. Without
+  // localStorage the key lasts until the page reloads.
+  function submitKey(e) {
     e.preventDefault();
     key = $("key-input").value.trim();
     if (!key) return;
     try { localStorage.setItem(KEY_STORE, key); } catch (err) {}
     start();
-  });
+  }
+  $("key-form").addEventListener("submit", submitKey);
+  $("key-submit").addEventListener("click", submitKey);
+  $("key-input").addEventListener("keydown", function (e) { if (e.key === "Enter") submitKey(e); });
   $("refresh-all").addEventListener("click", function (e) {
     runAction(e.currentTarget, API + "/refresh", {}, translate("refreshed_all"));
   });
@@ -4194,6 +4395,9 @@
   $("mcp-key-new").addEventListener("click", generateMcpKey);
   $("mcp-key-show").addEventListener("click", function () { mcpKeyShown = !mcpKeyShown; renderMcp(); });
   $("mcp-key-copy").addEventListener("click", function (e) { copyText(mcpKey(), e.currentTarget); });
+  $("admin-key-new").addEventListener("click", generateAdminKey);
+  $("admin-key-show").addEventListener("click", function () { adminKeyShown = !adminKeyShown; renderPublic(); });
+  $("admin-key-copy").addEventListener("click", function (e) { copyText(adminKey(), e.currentTarget); });
   // The public address stays in this browser; the configs follow it.
   $("mcp-public-url").addEventListener("input", function (e) {
     try {
@@ -4289,18 +4493,11 @@
     if (chartBehind && !chartPointer && !chartCard.contains(e.relatedTarget)) renderChart();
   });
   window.addEventListener("resize", function () { if (history) renderChart(); });
-  window.addEventListener("storage", function (e) {
-    if (e.key === "cli-proxy-theme") { applyTheme(); renderChart(); }
-    if (e.key === "cli-proxy-language") applyLanguage();
-  });
+  window.addEventListener("languagechange", applyLanguage);
   if (window.matchMedia) {
     var media = window.matchMedia("(prefers-color-scheme: dark)");
-    if (media.addEventListener) media.addEventListener("change", function () { applyTheme(); renderChart(); });
+    if (media.addEventListener) media.addEventListener("change", function () { applyTheme(); if (status && history) renderChart(); });
   }
-
-  // Checked without reading the parent, so the layout also clears the
-  // Management Center's toolbar when it is served from another origin.
-  if (window.self !== window.top) document.documentElement.classList.add("embedded");
   // A request to raw.githubusercontent.com that is dropped without a reply
   // only fails when the browser's connection times out, so the logo also
   // moves to the mirror when it has not loaded within 5 seconds.
@@ -4313,7 +4510,7 @@
   }, 5000);
   applyTheme();
   applyLanguage();
-  watchParent();
+  magpieHello();
   var storedView = "quota";
   try { storedView = localStorage.getItem(VIEW_STORE) || "quota"; } catch (err) {}
   showView(storedView);

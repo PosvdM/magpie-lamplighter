@@ -167,6 +167,35 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 
 ## 管理页面
 
+### 运行环境
+
+页面由内部监听的 `GET /` 提供，也可以经对外监听访问。在 Magpie 中，插件页面的 iframe 先加载插件包中的页面文件，再跳到内部监听：桌面窗口直接访问 `127.0.0.1:<端口>`，`magpie web` 经 Magpie 页面服务的反向代理访问。Magpie 每次 Restart（安装、更新或设置插件，更新 Bun）都会结束插件宿主及其子进程；打开页面时 Magpie 先启动宿主，最多等 7 秒，服务未就绪时显示 502 页并每 2 秒重试。
+
+iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 CSP sandbox，所以页面在不透明源中运行（`window.origin` 为 `"null"`，`page.js` 中的 `SANDBOXED`）：没有 `localStorage`，`confirm()` 不弹窗直接返回假，不能写剪贴板，表单不能提交。页面按以下方式处理：
+
+- `localStorage` 的每次读写都放在 `try` 中。沙箱中读写失败时，视图、打码、图表筛选、5 小时重置开关、MCP 对外地址和管理密钥只在本次打开期间有效。
+- 需要确认的操作（立即点火、替换管理密钥或 MCP 密钥）经 `confirmed` 询问：沙箱外调用 `confirm()`；沙箱中在提示框里显示确认文字，5 秒内再点一次同一个按钮才执行。
+- 复制文字时，沙箱中不调用 Clipboard API，改用选中文本加 `execCommand("copy")`；失败时提示手动复制，或经对外地址在浏览器中打开页面。截图见下文。
+- 管理密钥输入框的按钮为 `type="button"`，点击按钮和在输入框中按回车都提交密钥，不依赖表单的提交事件。
+
+页面在沙箱中请求自己的 `api/…` 也是跨源请求（`Origin: null`）。内部监听把进程启动时生成的令牌写入页面的 `<meta name="lamplighter-page" content="">`，页面读取它（`pageToken`），非空时在每个请求中以 `X-Lamplighter-Page` 发送；内部监听只对带正确令牌的 `Origin: null` 请求返回 CORS 头，见“HTTP 接口”。其他网站读不到页面，也就拿不到令牌。页面的请求只由自己的代码发出（`api`），不按父窗口的消息发请求或返回数据，嵌入页面的网站无法借用令牌。
+
+### 与 Magpie 窗口的通信
+
+页面不加载 Magpie 的 `bridge.js`，自己实现其中的消息协议（Magpie 源码 `internal/gui/pagebridge.js`，窗口一侧为 `internal/gui/assets/pluginpages.js`）。Magpie 按 `ev.source` 识别插件页面的 iframe，与其中加载的是哪个文档无关，所以跳到内部监听之后仍能通信。
+
+- 页面在 iframe 中（`window.parent !== window`）加载时向父窗口发送 `{magpie: 1, id, method: "hello"}`（`magpieHello`），Magpie 答复 `{dark, lang, tokens, context, service, visible}`。答复到达后 `magpie.ready` 为真。
+- Magpie 在主题或语言变化时发送 `{magpie: 1, event: "theme", data: {dark, lang, tokens}}`，在读者离开和回到页面时发送 `{magpie: 1, event: "visibility", data: {visible}}`。页面只处理来自 `window.parent`、带 `magpie: 1` 的消息（`magpieMessage`）。
+- 离开页面期间跳过每 30 秒一次的状态刷新，回到页面时立即刷新。
+- 页面不发送 `error` 方法：Magpie 收到后会用“页面出错”替换整个插件页面。
+- 页面单独打开或 Magpie 不答复时，主题和语言跟随浏览器。
+
+### 独立访问和管理密钥
+
+经对外监听打开时，`api` 收到 401 后显示“需要管理密钥”。输入的密钥保存在 `localStorage` 的 `lamplighter-admin-key` 中，之后以 `Authorization: Bearer <密钥>` 发送。请求没有带密钥时只显示输入框；带了密钥时清除它并显示“管理密钥无效”。请求发出后页面换了密钥（例如本页刚生成了新的管理密钥）时，迟到的 401 不清除新密钥。本页生成新的管理密钥后，带密钥访问的页面改用新密钥。
+
+### 页面功能
+
 设置通过 `PATCH /api/config` 自动保存：开关和勾选框的 `change` 事件触发保存，文本和数字在失焦或按回车时保存，每次只提交改动字段所在的顶层键；三档提醒阈值校验 `notice ≥ low ≥ critical` 后一起提交。`bark_url` 去掉尾部斜线，空的对外监听地址按后端默认值保存，避免已应用判断与后端规整结果不一致。该接口整体替换顶层键，所以 `ignition`、`providers`、`recovery_notify` 等对象以已保存的对象为基础整体提交。保存依次进行，后一次以前一次写入的配置为基础；数字不满足输入框的范围或步长时不保存。页面的请求都使用相对路径（`api/…`），所以页面在自己监听的根路径和 Magpie 页面服务的反向代理后面都能工作。
 
 浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示，输入框恢复为已保存的值。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
@@ -183,7 +212,7 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 
 账号卡片的头部只显示服务标签（含非默认权重倍数）和邮箱。底部的 `.account-head.cell-note` 左侧显示套餐，右侧依次放置“刷新”和相机按钮；按钮使用 `.no-snapshot`，不出现在导出的图片中。底部行在卡片拉伸时贴齐内容区底边，套餐名称过长时单行省略。有套餐的卡片保留头部及原套餐行占用的高度，无套餐或无额度内容的卡片增加相同样式的底部操作行。卡片区标题栏的操作位置独立于卡片内部布局。
 
-卡片、卡片区和曲线详情图的相机按钮调用 `snapshotPng`，克隆目标节点并移除 `.no-snapshot` 操作按钮，将当前样式、主题和模糊状态通过 SVG `foreignObject` 绘制到 canvas，按设备像素比生成 PNG，再通过 `ClipboardItem` 写入剪贴板。曲线详情图的截图对象是 `#chart-detail-wrap`，标题行和图表在这个容器里。截图外框的内边距、背景及静态样式统一定义在 `page.css` 的 `.snapshot-frame` 规则中，离屏测量和 SVG 导出使用同一份样式。过程不加载页面外资源，避免 canvas 被跨源内容污染；动画、过渡和悬停样式不参与截图。只有安全上下文中支持图片剪贴板的浏览器启用按钮，复制仍受浏览器权限限制。
+卡片、卡片区和曲线详情图的相机按钮调用 `snapshotPng`，克隆目标节点并移除 `.no-snapshot` 操作按钮，将当前样式、主题和模糊状态通过 SVG `foreignObject` 绘制到 canvas，按设备像素比生成 PNG，再通过 `ClipboardItem` 写入剪贴板。曲线详情图的截图对象是 `#chart-detail-wrap`，标题行和图表在这个容器里。截图外框的内边距、背景及静态样式统一定义在 `page.css` 的 `.snapshot-frame` 规则中，离屏测量和 SVG 导出使用同一份样式。过程不加载页面外资源，避免 canvas 被跨源内容污染；动画、过渡和悬停样式不参与截图。在 Magpie 中（`magpie.ready`），PNG 交给 Magpie 的 `image.copy`，由 Magpie 写入系统剪贴板，在 `magpie web` 中由浏览器窗口复制。没有 Magpie 时通过 `ClipboardItem` 写入剪贴板，只在沙箱外的安全上下文中、浏览器支持图片剪贴板时启用按钮，复制仍受浏览器权限限制。
 
 顶部的“额度 | 设置”切换两个独立视图，所选视图保存在浏览器的 `localStorage` 中（`lamplighter-view`）。“设置”视图依次显示账号、通知渠道、提醒规则、自动点火、服务和高级。
 
@@ -191,13 +220,15 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 
 “设置”视图的“账号”区通过手柄支持一维拖动排序，以凭证文件名列表整体保存 `account_order`；页面在后端排序基础上按最新保存的列表重排，使卡片和图表立即响应顺序变化。拖动使用 Pointer Events，手柄设置 `touch-action: none`；固定定位的不可交互副本跟随指针，副本使用卡片的圆角、边框和背景并保留浮动阴影，原行隐藏内容并显示同样圆角的虚线边框作为占位。命中判断使用各行不含变换的布局中线，其他行以 180 毫秒的 FLIP 动画让位。松手时副本滑至占位行后保存，保存状态显示在“账号”标题旁；按 Esc 或收到 `pointercancel` 时恢复原顺序，不保存。拖动及落定期间推迟账号重绘，系统要求减少动态效果时跳过动画。
 
-MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥，则用 `crypto.getRandomValues` 生成 32 字节随机数，以 `llmcp_` 加 base64url 编码与开关一起保存。
+“高级”中的“对外访问”设置 `public_listen`、`web_enabled` 和 `admin_key`，状态读取 `status.public`（`listen`、`running`、`error`、`web`、`mcp`，`publicState`）；状态接口没有这个字段时退回读取 `status.mcp` 的 `listen`、`running` 和 `error`。开启 `web_enabled` 时没有管理密钥，页面用 `crypto.getRandomValues` 生成 32 字节随机数，以 `lladm_` 加 base64url 编码与开关一起保存；“生成新密钥”确认后替换它。“MCP”设置 `mcp_enabled` 和 `mcp_key`，监听状态读取 `status.mcp`；开启时没有有效密钥，同样生成 `llmcp_` 开头的密钥一起保存。两种密钥打码显示，可以显示和复制。保存这些字段后，对外监听的错误（`status.public.error`，没有 `status.public` 时为 `status.mcp.error`）显示为保存失败，页顶也显示提示。客户端配置中的地址取浏览器中保存的对外地址，没有时取对外监听地址。
+
+`status.magpie_warmup` 列出 Magpie 开启了预热的账号 pin，字段缺失时按空数组处理。列表非空时页顶提示这些账号需要在 Magpie 中关闭预热，以免与自动点火重复点火。账号按页面上的名称显示（`warmupNames`）：服务名加名称（`note`）或邮箱；状态中没有这个账号时显示 `account_names` 中的名称，再没有时显示 pin。
 
 页面标题旁的图标从 GitHub 加载仓库中的 `assets/logo.png`，更换图标不需要发布新版本。`raw.githubusercontent.com` 无法访问（例如在中国大陆）或 5 秒内没有加载完时，改经 `ghfast.top` 镜像加载；仍然失败时不显示。
 
 图表的筛选按钮（`.segmented`）和设置中的三选一开关（`.mode-switch`）共用一套滑块：`page.js` 的 `placeThumb` 测量选中项的位置和尺寸（取不含缩放的小数值），写入滑块的 CSS 变量。各选项宽度不同，所以按测量值定位。用户点选时滑块带回弹滑过去并挤压一下；其他情况直接定位：代码改变选中项时（如首次填入设置、恢复筛选条件）直接调用 `placeThumb`，切换语言、窗口尺寸变化和从隐藏变为可见时由监听控件及其选项尺寸的 `ResizeObserver` 调用。时间范围按钮只在切换额度窗口或语言时重建，点选时原地更新 `aria-pressed`，滑块才能滑动。点击已选中的按钮不改变选择；图表读取失败时，这样的点击会重新读取。系统设置减少动态效果时，`prefers-reduced-motion` 规则关闭这些动画；该规则放在 `page.css` 末尾，以覆盖前面定义的过渡。
 
-页面文字都在 `page.js` 的 `I18N` 词典中，中文和英文各一份；`page.html` 中的静态文字用 `data-i18n`（以及 `data-i18n-placeholder`、`data-i18n-title`、`data-i18n-aria-label`）标出词条，其中的中文原文只在脚本应用语言前显示。语言跟随管理中心：先读父页面根元素的 `lang`（管理中心每次切换语言都会更新它）并监听变化，单独打开时读 `localStorage` 的 `cli-proxy-language`，再退回到浏览器语言；`zh` 开头的显示中文，其余显示英文。状态接口的 `language` 与页面语言不同时，页面调用 `POST .../language` 上报，失败时在下一次刷新状态时重试。
+页面文字都在 `page.js` 的 `I18N` 词典中，中文和英文各一份；`page.html` 中的静态文字用 `data-i18n`（以及 `data-i18n-placeholder`、`data-i18n-title`、`data-i18n-aria-label`）标出词条，其中的中文原文只在脚本应用语言前显示。语言跟随 Magpie（hello 答复和 `theme` 事件中的 `lang`，如 `zh`、`zh-TW`、`en`），单独打开时跟随浏览器语言（`navigator.languages[0]`）并监听 `languagechange`；`zh` 开头的显示中文，其余显示英文（`pageLanguage`）。状态接口的 `language` 与页面语言不同时，页面调用 `POST .../language` 上报，失败时在下一次刷新状态时重试。
 
 事件文字由页面按事件的 `params` 用当前语言拼出（见下文“数据”）。没有 `params` 的旧事件显示存下的中文原文。上游返回的错误原文和推送标题不翻译：推送标题本来就是按通知语言生成的。
 
@@ -208,9 +239,7 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 - **错误**：列表中的错误只显示一行：优先用 `params.summary`，否则由 `errorSummary` 提炼（JSON 之前的文字，加上 JSON 中的 HTTP 状态码 · reason · message；解析不出时取第一行），超过 160 个字符（`ERROR_CHARS`）截断；完整原文在悬停提示中。手动点火失败（`manual` 为 `1`）只显示摘要，不显示重试时间。`ignite_paused` 没有 `until` 时，`reason` 为 `auth` 或 `suspended` 显示“暂停，等待更新凭证”或“暂停，账号已停用”加摘要，其余只显示摘要。
 - **凭证问题**：`credential_invalid` 按 `reason` 显示凭证失效、账号停用、被限流三种徽标。同一额度组前后 60 秒内（`PAUSE_PAIR`）的 `ignite_paused` 并入时间最近的 `credential_invalid` 那一行，不单独显示。`source` 为 `ignite` 或并入了暂停时，详情是摘要后加“· 点火已暂停”，有 `until`（取凭证事件的，没有时取并入的暂停的）时改为“· 点火暂停到 时间”；其余情况下，限流且有 `until` 时加“· 限流到 时间”。悬停提示每项一行，依次为“HTTP 状态码 · code · summary”（缺少的部分省略）、`appeal_url`（有才写）、并入的暂停事件的 `params.error` 原文（有才写）；查询发现、没有并入暂停的 `credential_invalid` 只有前两项。打码时不显示悬停提示。`appeal_url` 是 http 或 https 地址时显示申诉链接。
 
-页面的视觉样式与管理中心一致：CSS 变量沿用管理中心 `src/styles/themes.scss` 的名称和取值（浅色、纯白、深色三套），额度条和图表通过 `quotaLevel` 共用满、高、中、低、空五档颜色：原始值接近 100% 为满、接近 0% 为空（`LEVEL_EPSILON` 为 `1e-6`，容纳加权平均的浮点误差）；中间按前两档提醒阈值划分（默认 >50% 为高，>20% 为中，其余为低），满额和耗尽有独立颜色。判断先于显示值取整，因此 99.6% 不使用满额颜色；中、低的分界与通知标题的 🟡、🔴 一致，遥测数字使用等宽字体。页面与管理中心同源，主题直接读取父页面根元素的 `data-theme`，并监听其变化；单独打开时退回到管理中心保存在 `localStorage` 的 `cli-proxy-theme`。管理中心改了配色时，同步更新 `internal/web/page.css` 中的变量。
-
-管理中心把插件页面的 iframe 铺满内容区，顶部不留空白，右上角的浮动工具栏（178 × 52 px，距窗口顶边和右边各 24 px）盖在 iframe 上。窗口宽度在 768 px 及以下时管理中心使用手机布局：侧栏收起，iframe 与窗口同宽，工具栏为 162 × 48 px、距边缘 12 px，左上角另有一个 48 × 48 px 的菜单按钮。页面在 iframe 中打开时（`window.self !== window.top`，不需要读取父页面，所以管理中心与插件不同源时也生效）给根元素加 `embedded` 类：标题行右侧留出工具栏的宽度，放不下时换行；“立即刷新全部”放在“额度”标题行的右侧，这一行从工具栏下方 8 px 开始；宽度在 768 px 及以下时整个页面从工具栏和菜单按钮下方开始；宽度超过 1584 px 时工具栏落在页面边距中，不做调整。这些数值来自管理中心的 `src/styles/layout.scss`（`.main-header .header-actions`、`.mobile-sidebar-actions`），管理中心改了这些控件的位置或大小时，同步更新 `page.css` 中的对应规则。
+页面的 CSS 变量沿用 CPA 管理中心 `src/styles/themes.scss` 的名称和取值（浅色、深色两套），额度条和图表通过 `quotaLevel` 共用满、高、中、低、空五档颜色：原始值接近 100% 为满、接近 0% 为空（`LEVEL_EPSILON` 为 `1e-6`，容纳加权平均的浮点误差）；中间按前两档提醒阈值划分（默认 >50% 为高，>20% 为中，其余为低），满额和耗尽有独立颜色。判断先于显示值取整，因此 99.6% 不使用满额颜色；中、低的分界与通知标题的 🟡、🔴 一致，遥测数字使用等宽字体。主题跟随 Magpie 的 `dark`，单独打开时跟随浏览器的 `prefers-color-scheme` 并监听其变化（`pageTheme`）；深色时根元素带 `data-theme="dark"`。Magpie 的主题只分浅色和深色，页面使用自己的配色，不使用 Magpie 传来的 `tokens`。
 
 额度变化图表的数据处理都在页面中完成：
 
