@@ -47,11 +47,11 @@ sh scripts/build.sh [版本号]
 3. `.github/workflows/release.yml` 依次运行：
    - `test`：检查标签与 `package.json` 的版本号一致，运行 gofmt 检查、`go vet ./...`、`go test -race ./...`、页面和 npm 外壳的测试。
    - `build`：`sh scripts/build.sh <版本号>` 构建六个平台的程序，`npm pack` 打包。
-   - `publish`：用 npm Trusted Publishing（OIDC，不需要令牌）发布这个包，需要 npm 11.5.1 或更高版本。
+   - `publish`：用 npm Trusted Publishing（OIDC，不需要令牌）发布这个包，需要 npm 11.5.1 或更高版本。npm 上已有这个版本时跳过发布并留下提示，继续创建 Release。
    - `release`：创建 GitHub Release 的草稿，附上包和 `checksums.txt`。
 4. 在 GitHub 上补充草稿的说明后发布。程序通过 GitHub 的最新 Release 判断是否有新版本（`internal/release`），草稿发布前不会提示更新。
 
-npm 上的 Trusted Publisher 设置要写仓库 `PosvdM/magpie-lamplighter` 和文件名 `release.yml`；重命名这个文件时，要在 npm 上删除旧设置并重新创建。npm 只能为已存在的包配置 Trusted Publishing，所以第一个版本在本机发布：登录 npm 后运行 `sh scripts/build.sh && npm publish`。
+npm 上的 Trusted Publisher 设置要写仓库 `PosvdM/magpie-lamplighter` 和文件名 `release.yml`；重命名这个文件时，要在 npm 上删除旧设置并重新创建。npm 只能为已存在的包配置 Trusted Publishing，所以第一个版本在本机发布：登录 npm 后运行 `sh scripts/build.sh && npm publish`，再推送它的标签；`publish` 发现版本已在 npm 上，只创建 Release。这时 Release 附带的是 CI 构建的包，与 npm 上本机构建的包不一定逐字节相同。
 
 ## 修改约定
 

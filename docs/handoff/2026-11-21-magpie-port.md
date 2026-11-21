@@ -62,7 +62,7 @@ v0.1 有以下限制，README 改写时写进去：
 3. 首次发布 0.1.0：npm 只能为已存在的包配置 Trusted Publisher，所以第一个版本由用户在本机发布：
    1. 在合并后的 `main` 上，登录 npm 后运行 `sh scripts/build.sh && npm publish`（`package.json` 的版本已是 `0.1.0`）。
    2. 在 npm 上为 `magpie-lamplighter` 配置 Trusted Publisher：仓库 `PosvdM/magpie-lamplighter`，文件 `release.yml`。
-   3. 打 `v0.1.0` 标签并推送。`release.yml` 的 `publish` 会因为 0.1.0 已在 npm 上而失败，之后的 `release` 不会运行，需要手动创建 Release：用 `sh scripts/build.sh && npm pack` 打出的 `magpie-lamplighter-0.1.0.tgz` 运行 `gh release create v0.1.0 --draft --generate-notes magpie-lamplighter-0.1.0.tgz`，或在 GitHub 网页上创建。
+   3. 打 `v0.1.0` 标签并推送。`release.yml` 的 `publish` 发现 0.1.0 已在 npm 上，跳过发布，`release` 照常创建草稿 Release。
    4. `release.yml` 创建的是草稿 Release，补充说明后手动发布；程序按 GitHub 的最新 Release 提示更新，草稿发布前不会提示。
 
    之后的版本：修改 `package.json` 的版本号，打 `v<版本号>` 标签推送，CI 测试、构建、经 Trusted Publishing 发布并创建草稿 Release，见 [开发](../development.md) 的“发布”。

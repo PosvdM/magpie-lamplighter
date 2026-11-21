@@ -80,7 +80,16 @@ jobs:
           package-manager-cache: false
       # Trusted Publishing needs npm 11.5.1 or later.
       - run: npm install -g npm@11
-      - run: npm publish magpie-lamplighter-*.tgz
+      # The first version is published by hand, before npm lets the package
+      # have a Trusted Publisher; its tag then only needs the release.
+      - name: Publish unless the version is on npm already
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$(npm view "magpie-lamplighter@$version" version 2>/dev/null)" = "$version" ]; then
+            echo "::notice::magpie-lamplighter@$version is on npm already, not published again"
+            exit 0
+          fi
+          npm publish magpie-lamplighter-*.tgz
 
   release:
     needs: publish
