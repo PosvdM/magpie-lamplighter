@@ -3,6 +3,7 @@ package magpie
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -130,7 +131,7 @@ func TestRefreshQuota(t *testing.T) {
 	now = func() time.Time { return clock }
 	t.Cleanup(func() { now = time.Now })
 	g, h := newGateway(t, map[string]string{
-		"GET /v1/magpie/accounts":        accountsJSON,
+		"GET /v1/magpie/accounts":        claudeOn,
 		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
 	})
 	ctx := context.Background()
@@ -157,12 +158,185 @@ func TestRefreshQuota(t *testing.T) {
 	if err := h.RefreshQuota(ctx, "codex/1a2b3c4d5e6f7a8b"); err != nil {
 		t.Fatalf("Codex refresh after refreshGap: %v", err)
 	}
-	if err := h.RefreshQuota(ctx, "codex/unknown"); err == nil {
-		t.Fatal("refresh of an unknown pin succeeded")
-	}
 	// The limit belongs to the Host: another Host refreshes at once.
 	other := &Host{Addr: h.Addr}
 	if err := other.RefreshQuota(ctx, "claude/0f0e0d0c0b0a0908"); err != nil {
 		t.Fatalf("refresh on another Host: %v", err)
+	}
+}
+
+// claudeOn is accountsJSON with the Claude account switched on.
+var claudeOn = strings.Replace(accountsJSON, `"plan":"max","on":false`, `"plan":"max","on":true`, 1)
+
+// RefreshQuota checks the account again right before it asks the gateway,
+// and tells why it did not.
+func TestRefreshQuotaChecksAccount(t *testing.T) {
+	noName := strings.Replace(claudeOn, `"user":"b@example.com"`, `"user":" "`, 1)
+	for _, c := range []struct {
+		name, accounts, pin, code string
+	}{
+		{"unknown pin", claudeOn, "codex/unknown", codeAccountNotFound},
+		{"API key", claudeOn, "deepseek/k1", codeAccountNotFound},
+		{"no name", noName, "claude/0f0e0d0c0b0a0908", codeAccountNotFound},
+		{"switched off", accountsJSON, "claude/0f0e0d0c0b0a0908", codeAccountOff},
+	} {
+		g, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts":        c.accounts,
+			"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
+		})
+		err := h.RefreshQuota(context.Background(), c.pin)
+		var hostErr *host.Error
+		if !errors.As(err, &hostErr) || hostErr.Code != c.code || hostErr.Message == "" {
+			t.Errorf("%s: err = %v, want code %s", c.name, err, c.code)
+		}
+		for _, r := range g.requests {
+			if r.Method == http.MethodPost {
+				t.Errorf("%s: sent %s %s", c.name, r.Method, r.URL)
+			}
+		}
+		// A refused account does not use up its refresh: switched on, it
+		// refreshes at once.
+		g.bodies["GET /v1/magpie/accounts"] = claudeOn
+		if c.code == codeAccountOff {
+			if err := h.RefreshQuota(context.Background(), c.pin); err != nil {
+				t.Errorf("%s: refresh once switched on: %v", c.name, err)
+			}
+		}
+	}
+}
+
+// A gateway that cannot be reached or answers 5xx is gateway_unavailable;
+// a 4xx answer stays the gateway's own error.
+func TestRefreshQuotaGatewayUnavailable(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		code   string
+	}{
+		{http.StatusBadGateway, codeGatewayUnavailable},
+		{http.StatusServiceUnavailable, codeGatewayUnavailable},
+		{http.StatusBadRequest, "gateway_http_error"},
+	} {
+		h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				io.WriteString(w, claudeOn)
+				return
+			}
+			http.Error(w, `{"error":{"message":"busy"}}`, c.status)
+		})
+		err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b")
+		var hostErr *host.Error
+		if !errors.As(err, &hostErr) || hostErr.Code != c.code || hostErr.Status != c.status {
+			t.Errorf("HTTP %d: err = %v, want code %s", c.status, err, c.code)
+		}
+	}
+	// The account list answers 5xx.
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	})
+	var hostErr *host.Error
+	if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); !errors.As(err, &hostErr) || hostErr.Code != codeGatewayUnavailable {
+		t.Errorf("account list 500: err = %v", err)
+	}
+	// Nothing listens.
+	server := httptest.NewServer(http.NotFoundHandler())
+	addr := strings.TrimPrefix(server.URL, "http://")
+	server.Close()
+	h = &Host{Addr: addr}
+	if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); !errors.As(err, &hostErr) || hostErr.Code != codeGatewayUnavailable {
+		t.Errorf("unreachable gateway: err = %v", err)
+	}
+}
+
+// shortDeadlines shortens the deadlines of the gateway calls.
+func shortDeadlines(t *testing.T) {
+	t.Helper()
+	was := []time.Duration{accountsTimeout, keptTimeout, listTimeout, refreshTimeout}
+	accountsTimeout, keptTimeout, listTimeout, refreshTimeout = 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond
+	t.Cleanup(func() {
+		accountsTimeout, keptTimeout, listTimeout, refreshTimeout = was[0], was[1], was[2], was[3]
+	})
+}
+
+// stallingGateway answers the routes in bodies, and stalls on the route
+// stall names: before the response headers ("headers") or halfway through
+// the body ("body"), until the request is cancelled.
+func stallingGateway(t *testing.T, bodies map[string]string, route, how string) *Host {
+	t.Helper()
+	release := make(chan struct{})
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != route {
+			io.WriteString(w, bodies[r.Method+" "+r.URL.Path])
+			return
+		}
+		if how == "body" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"object":"list","data":[`)
+			w.(http.Flusher).Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	return h
+}
+
+// The calls the background loop makes end within their deadlines when
+// the gateway takes the connection and stops answering, though the
+// caller's context never ends.
+func TestGatewayCallsEndOnStall(t *testing.T) {
+	shortDeadlines(t)
+	bodies := map[string]string{
+		"GET /v1/magpie/accounts":        claudeOn,
+		"GET /v1/magpie/quotas":          `{"object":"list","data":[]}`,
+		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
+		"GET /v1/models":                 modelsSample,
+	}
+	calls := []struct {
+		name  string
+		route string
+		call  func(h *Host) error
+	}{
+		{"Accounts", "GET /v1/magpie/accounts", func(h *Host) error { _, err := h.Accounts(context.Background()); return err }},
+		{"KeptQuotas", "GET /v1/magpie/quotas", func(h *Host) error { _, err := h.KeptQuotas(context.Background()); return err }},
+		{"KeptQuotas' account list", "GET /v1/magpie/accounts", func(h *Host) error { _, err := h.KeptQuotas(context.Background()); return err }},
+		{"RefreshQuota", "POST /v1/magpie/quotas/refresh", func(h *Host) error { return h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b") }},
+		{"RefreshQuota's account list", "GET /v1/magpie/accounts", func(h *Host) error { return h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b") }},
+		{"Models", "GET /v1/models", func(h *Host) error { _, err := h.Models(context.Background()); return err }},
+	}
+	for _, c := range calls {
+		for _, how := range []string{"headers", "body"} {
+			h := stallingGateway(t, bodies, c.route, how)
+			done := make(chan error, 1)
+			go func() { done <- c.call(h) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Errorf("%s, stalled at the %s: no error", c.name, how)
+				}
+				var hostErr *host.Error
+				if strings.HasPrefix(c.name, "RefreshQuota") && (!errors.As(err, &hostErr) || hostErr.Code != codeGatewayUnavailable) {
+					t.Errorf("%s, stalled at the %s: err = %v, want gateway_unavailable", c.name, how, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s, stalled at the %s: still waiting", c.name, how)
+			}
+		}
+	}
+}
+
+// The deadlines stay within what their callers allow: a quota refresh
+// takes the gateway's 30 seconds for a card and ends before the 50
+// seconds of a tool call through Magpie.
+func TestGatewayDeadlines(t *testing.T) {
+	if refreshTimeout <= 30*time.Second || refreshTimeout >= 50*time.Second {
+		t.Errorf("refreshTimeout = %s", refreshTimeout)
+	}
+	for name, d := range map[string]time.Duration{"accounts": accountsTimeout, "kept": keptTimeout, "models": listTimeout} {
+		if d <= 0 || d > 30*time.Second {
+			t.Errorf("%sTimeout = %s", name, d)
+		}
 	}
 }

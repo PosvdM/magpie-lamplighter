@@ -70,17 +70,25 @@ func (h *Host) readJSONFile(name string, out any) error {
 // login is the logins.json entry of the account pin of provider.
 // Magpie names a Codex or Claude account by its entry's id, else by
 // nameID of the agent and name, and a plugin's account by nameID of the
-// plugin's provider id and the name (AccountIDs in
-// internal/provider/account_models.go).
+// plugin's provider id and the name, whatever id its entry has
+// (AccountIDs in internal/provider/account_models.go: LoginID looks for
+// agent "<provider id>", which no plugin entry has).
+//
+// Magpie writes "null" for a list without accounts, which is read as
+// one; an entry that is not an object wraps host.ErrFormat.
 func (h *Host) login(provider, id string) (savedLogin, error) {
-	var ls []savedLogin
-	if err := h.readJSONFile("logins.json", &ls); err != nil {
+	var raw []json.RawMessage
+	if err := h.readJSONFile("logins.json", &raw); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return savedLogin{}, errors.New("Magpie 配置目录中没有 logins.json")
 		}
 		return savedLogin{}, err
 	}
-	for _, l := range ls {
+	for i, entry := range raw {
+		var l savedLogin
+		if !isJSONObject(entry) || json.Unmarshal(entry, &l) != nil {
+			return savedLogin{}, fmt.Errorf("logins.json: %w: entry %d is not a login", host.ErrFormat, i)
+		}
 		switch {
 		case l.Agent == provider:
 			own := l.ID
@@ -91,7 +99,7 @@ func (h *Host) login(provider, id string) (savedLogin, error) {
 				return l, nil
 			}
 		case l.Agent == "plugin:"+provider:
-			if strings.EqualFold(nameID(provider, l.User), id) || l.ID != "" && strings.EqualFold(l.ID, id) {
+			if strings.EqualFold(nameID(provider, l.User), id) {
 				return l, nil
 			}
 		}
@@ -148,7 +156,17 @@ func (h *Host) Credential(ctx context.Context, account host.Account) (host.Crede
 	return cred, nil
 }
 
-// codexCredential reads a Codex auth.json kept in logins.json.
+// isJSONObject reports whether b is a JSON object, not null or another
+// value.
+func isJSONObject(b []byte) bool {
+	t := strings.TrimSpace(string(b))
+	return strings.HasPrefix(t, "{")
+}
+
+// codexCredential reads a Codex auth.json kept in logins.json. tokens
+// without an access token is a sign-in Magpie imported from its refresh
+// token alone: Expired, so the engine reads Magpie's kept quota. tokens
+// with neither token wraps host.ErrFormat.
 func codexCredential(auth json.RawMessage) (host.Credential, error) {
 	var a struct {
 		AuthMode string `json:"auth_mode"`
@@ -169,6 +187,9 @@ func codexCredential(auth json.RawMessage) (host.Credential, error) {
 		return host.Credential{}, fmt.Errorf("logins.json 的 Codex 凭证：%w: no tokens", host.ErrFormat)
 	}
 	t := a.Tokens
+	if t.AccessToken == "" && t.RefreshToken == "" {
+		return host.Credential{}, fmt.Errorf("logins.json 的 Codex 凭证：%w: tokens without access_token or refresh_token", host.ErrFormat)
+	}
 	cred := host.Credential{AccessToken: t.AccessToken, AccountID: t.AccountID}
 	if cred.AccountID == "" {
 		if claims, _ := jwtClaims(t.IDToken)["https://api.openai.com/auth"].(map[string]any); claims != nil {
@@ -179,7 +200,9 @@ func codexCredential(auth json.RawMessage) (host.Credential, error) {
 	if cred.Fingerprint == "" {
 		cred.Fingerprint = fingerprint(t.AccessToken)
 	}
-	if exp, ok := jwtClaims(t.AccessToken)["exp"].(float64); ok && exp > 0 && !now().Before(time.Unix(int64(exp), 0)) {
+	if t.AccessToken == "" {
+		cred.Expired = true
+	} else if exp, ok := jwtClaims(t.AccessToken)["exp"].(float64); ok && exp > 0 && !now().Before(time.Unix(int64(exp), 0)) {
 		cred.Expired = true
 	}
 	return cred, nil
@@ -210,16 +233,23 @@ type claudeOAuth struct {
 	ExpiresAt int64 `json:"expiresAt"`
 }
 
+// parseClaudeAuth reads Claude Code's credentials: claudeAiOauth, or the
+// setupToken Magpie keeps for an account added with one. Both missing
+// gives nil and ""; JSON that is not an object of that shape, or a
+// claudeAiOauth with neither token, wraps host.ErrFormat.
 func parseClaudeAuth(b []byte) (oauth *claudeOAuth, setupToken string, err error) {
 	var a struct {
 		OAuth      *claudeOAuth `json:"claudeAiOauth"`
 		SetupToken string       `json:"setupToken"`
 	}
+	if !isJSONObject(b) {
+		return nil, "", fmt.Errorf("%w: not a JSON object", host.ErrFormat)
+	}
 	if err := json.Unmarshal(b, &a); err != nil {
 		return nil, "", fmt.Errorf("%w: %v", host.ErrFormat, err)
 	}
-	if a.OAuth == nil && a.SetupToken == "" {
-		return nil, "", fmt.Errorf("%w: neither claudeAiOauth nor setupToken", host.ErrFormat)
+	if a.OAuth != nil && a.OAuth.AccessToken == "" && a.OAuth.RefreshToken == "" {
+		return nil, "", fmt.Errorf("%w: claudeAiOauth without accessToken or refreshToken", host.ErrFormat)
 	}
 	return a.OAuth, a.SetupToken, nil
 }
@@ -231,18 +261,35 @@ func parseClaudeAuth(b []byte) (oauth *claudeOAuth, setupToken string, err error
 //
 // An account added with a setup-token has no token the usage API takes;
 // it is returned as Expired, so the engine reads Magpie's kept quota.
+//
+// The file in claude-accounts is optional: Claude Code keeps it in the
+// keychain on macOS, and leaves it without claudeAiOauth when signed out.
+// One that cannot be read for another reason is an error, and one that is
+// not Claude Code's format wraps host.ErrFormat.
 func (h *Host) claudeCredential(l savedLogin) (host.Credential, error) {
 	oauth, setup, err := parseClaudeAuth(l.Auth)
 	if err != nil {
 		return host.Credential{}, fmt.Errorf("logins.json 的 Claude 凭证：%w", err)
 	}
 	if oauth == nil {
+		if setup == "" {
+			return host.Credential{}, fmt.Errorf("logins.json 的 Claude 凭证：%w: neither claudeAiOauth nor setupToken", host.ErrFormat)
+		}
 		return host.Credential{Fingerprint: fingerprint(setup), Expired: true}, nil
 	}
 	sum := sha256.Sum256([]byte(accountKey(l.User)))
 	file := filepath.Join(h.ConfigDir, "claude-accounts", hex.EncodeToString(sum[:])[:16], ".credentials.json")
-	if b, err := os.ReadFile(file); err == nil {
-		if own, _, err := parseClaudeAuth(b); err == nil && own != nil && own.AccessToken != "" && own.ExpiresAt > oauth.ExpiresAt {
+	b, err := os.ReadFile(file)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return host.Credential{}, fmt.Errorf("读取 Claude Code 的凭证文件失败：%w", err)
+	default:
+		own, _, err := parseClaudeAuth(b)
+		if err != nil {
+			return host.Credential{}, fmt.Errorf("Claude Code 的凭证文件 %s：%w", filepath.Join("claude-accounts", filepath.Base(filepath.Dir(file)), ".credentials.json"), err)
+		}
+		if own != nil && own.AccessToken != "" && own.ExpiresAt > oauth.ExpiresAt {
 			oauth = own
 		}
 	}

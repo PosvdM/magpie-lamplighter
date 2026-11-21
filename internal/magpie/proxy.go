@@ -5,25 +5,27 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
 )
 
 // proxyFor is the proxy Magpie sends the requests of account user of
-// provider through, as ProxyOfLogin and netproxy decide it in Magpie:
+// provider through, as ProxyOfLogin and netproxy.For decide it in Magpie:
 //
 //  1. the account's own proxy in providers.json (accountProxies, by the
 //     account name in lower case), else the provider's (proxy);
-//  2. else the global proxy in settings.json (proxy);
-//  3. else the proxy the plugin host was started with. Magpie passes it
-//     as MAGPIE_HTTPS_PROXY and the like (a SOCKS5 one bridged to HTTP),
-//     never as HTTPS_PROXY.
+//  2. else the global proxy in settings.json (proxy), which Magpie uses
+//     for every request to a vendor, whatever NO_PROXY says.
 //
-// "" means none was found, "direct" a direct connection. A saved proxy
-// ("@<id>") is replaced by its address with its login. A saved proxy that
-// is gone or is an SSH server is an error: the request must not take
-// another way out.
+// "" means neither is set: the request takes the environment's proxy,
+// as egress does for "". Magpie then uses the environment's or the
+// system's proxy with its exceptions; it passes that one to the plugin
+// host as MAGPIE_HTTPS_PROXY, MAGPIE_HTTP_PROXY and MAGPIE_NO_PROXY, and
+// the npm shell starts Lamplighter with them as HTTPS_PROXY, HTTP_PROXY
+// and NO_PROXY, so the exceptions apply here too. "direct" means a
+// direct connection. A saved proxy ("@<id>") is replaced by its address
+// with its login. A saved proxy that is gone or is an SSH server is an
+// error: the request must not take another way out.
 func (h *Host) proxyFor(provider, user string) (string, error) {
 	var file struct {
 		Providers []struct {
@@ -62,11 +64,6 @@ func (h *Host) proxyFor(provider, user string) (string, error) {
 		choice = strings.TrimSpace(settings.Proxy)
 	}
 	if choice == "" {
-		for _, name := range []string{"MAGPIE_HTTPS_PROXY", "MAGPIE_ALL_PROXY", "MAGPIE_HTTP_PROXY"} {
-			if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-				return v, nil
-			}
-		}
 		return "", nil
 	}
 	if strings.EqualFold(choice, "direct") {

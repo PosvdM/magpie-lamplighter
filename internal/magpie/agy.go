@@ -23,16 +23,24 @@ import (
 )
 
 // The agy-cli plugin (@magpie-community/opencode-agy-cli-auth, read at
-// version 0.1.106 of magpie-community/plugins) runs the agy CLI on each
+// version 0.1.108 of magpie-community/plugins) runs the agy CLI on each
 // Google account. Its accounts are kept in plugin-auth.json under keys
-// such as "agy-cli" and "agy-cli#k3x9a2", each
-// {"type": "api", "key": "agy:<home>", "metadata": {"email", "agyHome"}}.
-// An account with an agyHome keeps agy's sign-in in a file under
-// $XDG_STATE_HOME/magpie-agy-bridge/accounts/<agyHome> (account.mjs). The
-// account without one is agy's own: agy keeps it in the system keyring on
-// macOS and Windows, and in ~/.gemini/antigravity-cli on Linux without a
-// keyring, such as Magpie's Docker image. Lamplighter does not read a
-// keyring, which can ask the user for permission.
+// such as "agy-cli" and "agy-cli#k3x9a2", as Magpie's host.js saves the
+// plugin's sign-in (signedInAs in index.mjs):
+//
+//   - {"type": "api", "key": "agy:<home>", "metadata": {"email", "agyHome": "<home>"}}
+//     is an account with a home of its own, whose agy keeps its sign-in in
+//     a file under $XDG_STATE_HOME/magpie-agy-bridge/accounts/<home>
+//     (account.mjs);
+//   - {"type": "api", "key": "agy", "metadata": {"email"}} is agy's own
+//     account: agy keeps it in the system keyring on macOS and Windows, and
+//     in ~/.gemini/antigravity-cli on Linux without a keyring, such as
+//     Magpie's Docker image. Lamplighter does not read a keyring, which can
+//     ask the user for permission.
+//
+// Any other entry wraps host.ErrFormat: the default token file is read only
+// for an entry known to be agy's own, as it holds whichever account agy
+// itself is signed in to.
 
 const (
 	// googleTokenURL renews an access token with the OAuth client agy
@@ -83,15 +91,26 @@ func (h *Host) agyTokenFile(key string) (string, error) {
 		}
 		return "", err
 	}
+	if key == "" {
+		return "", fmt.Errorf("logins.json 的 agy-cli 账号：%w: no home", host.ErrFormat)
+	}
 	raw, ok := auth[key]
-	if !ok || key == "" {
+	if !ok {
 		return "", fmt.Errorf("plugin-auth.json 中没有 agy-cli 账号 %q", key)
 	}
 	var entry struct {
+		Type     string         `json:"type"`
+		Key      string         `json:"key"`
 		Metadata map[string]any `json:"metadata"`
+	}
+	if !isJSONObject(raw) {
+		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: not an object", key, host.ErrFormat)
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: %v", key, host.ErrFormat, err)
+	}
+	if entry.Type != "api" {
+		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: type is %q, not api", key, host.ErrFormat, entry.Type)
 	}
 	home := ""
 	if v, ok := entry.Metadata["agyHome"]; ok {
@@ -100,6 +119,12 @@ func (h *Host) agyTokenFile(key string) (string, error) {
 			return "", fmt.Errorf("plugin-auth.json 的 %s：%w: agyHome is not a home id", key, host.ErrFormat)
 		}
 		home = s
+	}
+	switch {
+	case home != "" && entry.Key != "agy:"+home:
+		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: key does not name agyHome", key, host.ErrFormat)
+	case home == "" && entry.Key != "agy":
+		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: neither agy's own account nor one with an agyHome", key, host.ErrFormat)
 	}
 	if home != "" {
 		state := os.Getenv("XDG_STATE_HOME")
@@ -127,7 +152,9 @@ type agyStored struct {
 	Token *struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
-		Expiry       string `json:"expiry"`
+		// Expiry is RFC 3339, as Go writes a time.Time; Go's zero time
+		// is a token that does not end.
+		Expiry *string `json:"expiry"`
 	} `json:"token"`
 	AuthMethod string `json:"auth_method"`
 }
@@ -156,6 +183,12 @@ func parseAgyStored(b []byte) (agyStored, error) {
 	}
 	if s.Token == nil {
 		return agyStored{}, fmt.Errorf("%w: no token", host.ErrFormat)
+	}
+	if s.Token.Expiry == nil {
+		return agyStored{}, fmt.Errorf("%w: token without expiry", host.ErrFormat)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, *s.Token.Expiry); err != nil {
+		return agyStored{}, fmt.Errorf("%w: expiry %q is not RFC 3339", host.ErrFormat, *s.Token.Expiry)
 	}
 	return s, nil
 }
@@ -195,10 +228,10 @@ func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (h
 	if cred.Fingerprint == "" {
 		cred.Fingerprint = fingerprint(t.AccessToken)
 	}
-	// Go's zero time, which agy writes for a token that does not end, parses
-	// to a time before 1970.
-	expires, perr := time.Parse(time.RFC3339Nano, t.Expiry)
-	ends := perr == nil && expires.Unix() > 0
+	// Go's zero time, which agy writes for a token that does not end, is
+	// before 1970. parseAgyStored checked the format.
+	expires, _ := time.Parse(time.RFC3339Nano, *t.Expiry)
+	ends := expires.Unix() > 0
 	if t.AccessToken != "" && (!ends || now().Add(googleRenewLead).Before(expires)) {
 		return cred, nil
 	}

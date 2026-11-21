@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
@@ -27,13 +26,11 @@ const readChunkSize = 32 << 10
 // modelsPath lists the models of every account.
 const modelsPath = "/v1/models"
 
-// listTimeout bounds GET /v1/models.
-const listTimeout = 20 * time.Second
-
 // Models returns the model ids of GET /v1/models. Magpie names a model
 // "<provider>/<model>"; an id without a provider, which Magpie lists when
 // the user asks for bare ids, gets its owned_by as the provider, so that
-// every id names the provider that serves it.
+// every id names the provider that serves it. The call ends within
+// listTimeout.
 func (h *Host) Models(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, listTimeout)
 	defer cancel()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,5 +42,21 @@ func TestInvalidProxyFailsClosed(t *testing.T) {
 	_, err := (&Egress{}).Do(context.Background(), "ftp://user:secret@bad", quota.Request{Method: "GET", URL: "https://example.com"})
 	if err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("invalid proxy must fail without its password: %v", err)
+	}
+}
+
+// An empty proxy takes the environment's, NO_PROXY included; "direct" and
+// "none" take none.
+func TestEnvironmentAndDirectProxy(t *testing.T) {
+	e := &Egress{}
+	env, err := e.transport("")
+	if err != nil || env.Proxy == nil || reflect.ValueOf(env.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
+		t.Fatalf("empty proxy: %v, want http.ProxyFromEnvironment", err)
+	}
+	for _, direct := range []string{"direct", "none"} {
+		tr, err := e.transport(direct)
+		if err != nil || tr.Proxy != nil {
+			t.Fatalf("%s: proxy set, %v", direct, err)
+		}
 	}
 }
