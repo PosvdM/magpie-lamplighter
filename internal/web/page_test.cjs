@@ -1295,3 +1295,151 @@ test("API requests carry the page token only when the page has one", async () =>
   const handler = source.match(/  function magpieMessage\([^]*?\n  }/)[0];
   assert.doesNotMatch(handler, /api\(|fetch\(/);
 });
+
+// ---- Time zone and ignition settings ----
+
+const pageHtml = () => fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+
+function timezoneContext(rawConfig, statusConfig) {
+  const input = saveNode("INPUT", { name: "timezone" });
+  input.type = "text";
+  input.accountDirty = undefined;
+  const unsaved = { hidden: true };
+  const ctx = context(["effectiveConfig", "browserTimezone", "renderTimezone", "fillInput", "getPath"], {
+    rawConfig, status: { config: statusConfig || {} }, MCP_LISTEN: "127.0.0.1:8318",
+    Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: "Asia/Shanghai" }) }) },
+    document: { activeElement: null },
+    $: (id) => id === "settings" ? { elements: { timezone: input } } : id === "timezone-unsaved" ? unsaved : null,
+  });
+  const fill = () => { ctx.fillInput(input, ctx.effectiveConfig()); ctx.renderTimezone(); };
+  return { ctx, input, unsaved, fill };
+}
+
+test("without a saved time zone the field shows the browser's, marked as not saved", () => {
+  const { ctx, input, unsaved, fill } = timezoneContext({}, { timezone: "" });
+  fill();
+  assert.equal(input.value, "Asia/Shanghai");
+  assert.equal(unsaved.hidden, false);
+  // The field being edited, a draft or a failed value is left alone.
+  input.value = "";
+  ctx.document.activeElement = input;
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  ctx.document.activeElement = null;
+  input.settingsDirty = true;
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  input.settingsDirty = false;
+  input.setAttribute("aria-invalid", "true");
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  input.removeAttribute("aria-invalid");
+  // The saved name shows without the mark, whatever the status reports.
+  ctx.rawConfig.timezone = "Europe/Berlin";
+  fill();
+  assert.equal(input.value, "Europe/Berlin");
+  assert.equal(unsaved.hidden, true);
+  // A browser that reports no time zone leaves the field empty and unmarked.
+  const none = timezoneContext({});
+  none.ctx.Intl = { DateTimeFormat: () => { throw new Error("no Intl"); } };
+  none.fill();
+  assert.equal(none.input.value, "");
+  assert.equal(none.unsaved.hidden, true);
+  // Filling the field writes nothing: the page has no save in that path.
+  const render = source.match(/  function renderTimezone\([^]*?\n  }/)[0];
+  assert.doesNotMatch(render, /saveField|patchConfig|api\(/);
+});
+
+test("the time zone datalist lists the browser's names, or none to type in", () => {
+  const ctx = context(["timezoneOptions"]);
+  ctx.Intl = { supportedValuesOf: (kind) => { assert.equal(kind, "timeZone"); return ["Asia/Shanghai", "Europe/Berlin"]; } };
+  assert.deepEqual(plain(ctx.timezoneOptions()), ["Asia/Shanghai", "Europe/Berlin", "UTC"]);
+  ctx.Intl = { supportedValuesOf: () => ["UTC", "Asia/Tokyo"] };
+  assert.deepEqual(plain(ctx.timezoneOptions()), ["UTC", "Asia/Tokyo"]);
+  ctx.Intl = {};
+  assert.deepEqual(plain(ctx.timezoneOptions()), []);
+  ctx.Intl = { supportedValuesOf: () => { throw new RangeError("unsupported"); } };
+  assert.deepEqual(plain(ctx.timezoneOptions()), []);
+  const html = pageHtml();
+  assert.match(html, /<input name="timezone" type="text" list="timezone-options"/);
+  assert.match(html, /<datalist id="timezone-options"><\/datalist>/);
+  assert.match(source, /timezoneOptions\(\)\.forEach\(function \(name\) \{ \$\("timezone-options"\)\.appendChild\(el\("option", \{ value: name \}\)\); \}\);/);
+});
+
+function timezoneSaveContext(reply) {
+  const heading = saveNode("H2");
+  const section = { tagName: "SECTION", querySelector: (selector) => { assert.equal(selector, ".card-title"); return heading; } };
+  const input = saveNode("INPUT", { name: "timezone" });
+  input.type = "text";
+  input.closest = (selector) => selector === ".settings-section" ? section : null;
+  const sent = [], refilled = [];
+  const ctx = stateContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "patchConfig", "api"], {
+    rawConfig: {}, status: { config: {} }, saveQueue: Promise.resolve(), savedTokens: [],
+    THRESHOLDS: ["notice_threshold", "low_threshold", "critical_threshold"],
+    CONFIG_API: "api/config", key: "", PAGE_TOKEN: "", askForKey: () => {}, setTimeout, clearTimeout,
+    newConfigToken: () => "0123456789abcdef",
+    $: () => ({ elements: [input] }),
+    fetch: async (p, opts) => { sent.push(JSON.parse(opts.body)); return reply(JSON.parse(opts.body)); },
+    showApplied: (say) => { say("saved", "applied"); return Promise.resolve(true); },
+    refillSaved: (intent) => refilled.push(intent),
+    loadConfig: async () => { Object.assign(ctx.rawConfig, { timezone: sent.at(-1).timezone }); },
+  });
+  return { ctx, heading, input, sent, refilled };
+}
+
+test("saving the filled-in time zone writes it to the config", async () => {
+  const { ctx, heading, input, sent, refilled } = timezoneSaveContext(() => ({ status: 200, ok: true, json: async () => ({}) }));
+  // The browser's time zone shown in the field, saved with the button.
+  input.value = "Asia/Shanghai";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ timezone: "Asia/Shanghai", config_token: "0123456789abcdef" }]);
+  assert.equal(ctx.rawConfig.timezone, "Asia/Shanghai");
+  assert.equal(heading.textContent, "applied");
+  assert.equal(refilled.length, 1);
+  assert.match(source, /\$\("timezone-save"\)\.addEventListener\("click", function \(\) \{ saveField\(\{ target: \$\("settings"\)\.elements\.timezone \}\); \}\);/);
+});
+
+test("a time zone the plugin rejects shows its 400 error as a save failure", async () => {
+  const error = 'unknown time zone "Mars/Olympus"';
+  const { ctx, heading, input, sent } = timezoneSaveContext(() => ({ status: 400, ok: false, json: async () => ({ error }) }));
+  input.value = " Mars/Olympus ";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  assert.equal(sent[0].timezone, "Mars/Olympus");
+  assert.equal(ctx.rawConfig.timezone, undefined);
+  assert.equal(heading.textContent, "✕ Save failed✕ timezone save failed: " + error);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(input.value, " Mars/Olympus ");
+});
+
+test("the ignition switch shows the saved config and assumes no default", () => {
+  const effective = (raw, statusEnabled) => {
+    const { ctx } = timezoneContext(raw, { ignition: { enabled: statusEnabled, start_hour: 7 } });
+    return plain(ctx.effectiveConfig().ignition);
+  };
+  assert.deepEqual(effective({ ignition: { enabled: false } }, true), { enabled: false, start_hour: 7 });
+  assert.deepEqual(effective({ ignition: { enabled: true } }, false), { enabled: true, start_hour: 7 });
+  // A config file without the key shows what the plugin applies.
+  assert.equal(effective({}, false).enabled, false);
+  assert.equal(effective({ ignition: {} }, true).enabled, true);
+  const html = pageHtml();
+  assert.match(html, /<input name="ignition\.enabled" type="checkbox">/);
+  // The hint about the time zone and Magpie's warm-up sits by the switch.
+  assert.match(html, /name="ignition\.enabled"[^\n]*\n\s*<\/div>\n\s*<p class="hint" id="ignition-enable-hint" data-i18n="ignition_enable_hint">/);
+  for (const language of ["zh", "en"]) {
+    const dictionary = source.match(new RegExp("\\n    " + language + ": \\{[^]*?\\n    \\}"))[0];
+    for (const name of ["ignition_enable_hint", "timezone", "timezone_name", "timezone_save", "timezone_unsaved", "timezone_hint"]) {
+      assert.match(dictionary, new RegExp("\\b" + name + ": \""), language + " " + name);
+    }
+  }
+  assert.match(source, /ignition_enable_hint: "开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。"/);
+});
+
+test("no text refers to CPA settings the Magpie plugin does not have", () => {
+  const html = pageHtml();
+  for (const text of [source, html]) {
+    assert.doesNotMatch(text, /ignition_models_hint|no_models_key|API key|模型列表 API|管理中心|Management (key|Center)|CLIProxy|lock_error/i);
+  }
+});

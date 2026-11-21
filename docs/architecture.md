@@ -207,6 +207,8 @@ iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 
 
 浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示，输入框恢复为已保存的值。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
 
+“时区”区编辑配置中的 `timezone`（IANA 名称），点火时间、通知和页面中的时间按它计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。输入框的 `datalist` 选项取自 `Intl.supportedValuesOf("timeZone")`，浏览器不支持时没有选项，只能手填；名称由插件在保存时校验，无效时 `PATCH /api/config` 返回 400，页面按其他设置的保存失败显示错误。`GET /api/config` 中没有 `timezone` 或为空时，`renderTimezone` 在输入框中预填浏览器的时区（`Intl.DateTimeFormat().resolvedOptions().timeZone`），并显示“尚未保存”和“保存”按钮；页面不自动保存这个值，用户修改输入框或点“保存”后才写入。正在编辑、有草稿或保存失败的输入框不预填。时区和自动点火开关以 `GET /api/config` 中保存的值为准，文件中没有这一项时取 `status.config` 中插件实际使用的值，页面不假设默认值。点火开关旁提示开启前先设置时区，并在 Magpie 中关闭预热（见“Magpie 的预热”）。
+
 `webhook.headers` 和 `webhook.success_json` 在页面上以文本编辑（每行一个 `名称: 值`、JSON 对象），无法解析时不保存。状态接口只返回 webhook 的地址、请求头和请求体是否已设置，页面从 `GET /api/config` 读取原值填入表单。
 
 保存失败时保留输入草稿；普通设置通过 `settingsDirty`、账号字段通过 `accountDirty` 避免回填覆盖草稿。`captureIntent` 在变更事件发生时保存字段值及各控件的 `settingsEdit` 编辑代次，队列中的 `buildPatch` 按这份意图构造补丁并记录实际提交的控件。配置确认后，`refillSaved` 清理本次实际提交、代次仍匹配且没有独立失败标记的控件草稿，再回填有效值。同一顶层键内其他控件的后续保存不阻止这项清理；后续编辑的草稿、无法解析或未提交的字段仍保留。单选组共享编辑代次并作为整体确认；组内仍有草稿或失败时跳过整组回填，避免设置某个单选框时间接覆盖较新的选择。`claimState` 按项设置 `owner`，后续状态通过绑定该所有权的 `say` 更新。任何 `input` 事件都会推进编辑代次、撤销旧 `owner` 并清除该项的普通进度，未解决的失败仍保留。旧请求继续完成并等待自己的令牌，但不能用迟到的响应更新新输入的结果。

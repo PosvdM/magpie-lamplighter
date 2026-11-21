@@ -200,8 +200,21 @@
           </div>
         </div>
         <p class="hint" data-i18n="notify_modes_hint">“用完后”：窗口用完后，在下一次重置时通知一次。“有余量”：剩余高于告急阈值时才提醒。重置前提醒在 5 小时窗口重置前 1 小时、7 天窗口重置前 1 天发送。恢复通知附带上一周期的剩余额度，取自每次重置前 30 秒的查询。</p>
-        <p class="hint" id="timezone-note"></p>
         <p class="hint" id="language-note"></p>
+      </section>
+
+      <section class="card settings-section">
+        <h2 class="card-title"><span data-i18n="timezone">时区</span></h2>
+        <div class="grid-3">
+          <label><span data-i18n="timezone_name">IANA 时区名称</span><input name="timezone" type="text" list="timezone-options" spellcheck="false" autocomplete="off" placeholder="Asia/Shanghai"></label>
+        </div>
+        <datalist id="timezone-options"></datalist>
+        <div class="off-note timezone-unsaved" id="timezone-unsaved" hidden>
+          <span data-i18n="timezone_unsaved">时区尚未保存，确认输入框中的时区后点“保存”。</span>
+          <button id="timezone-save" class="btn btn-secondary btn-sm" type="button" data-i18n="timezone_save">保存</button>
+        </div>
+        <p class="hint" data-i18n="timezone_hint">点火时间、通知和页面中的时间按这个时区计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。尚未保存时，输入框中预填浏览器的时区。</p>
+        <p class="hint" id="timezone-note"></p>
       </section>
 
       <section class="card settings-section">
@@ -209,6 +222,7 @@
         <div class="checks">
           <label class="inline"><input name="ignition.enabled" type="checkbox"><span data-i18n="ignition_enabled">启用自动点火</span></label>
         </div>
+        <p class="hint" id="ignition-enable-hint" data-i18n="ignition_enable_hint">开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。</p>
         <div id="ignition-params" class="ignition-params">
           <p class="off-note" id="ignition-off" data-i18n="ignition_off" hidden>自动点火已关闭，这些设置暂不生效。</p>
           <div class="grid-3">
@@ -225,7 +239,6 @@
               <tbody id="ignition-rows"></tbody>
             </table>
           </div>
-          <p class="hint" data-i18n="ignition_models_hint">选择点火模型需要“高级”中的模型列表 API key。</p>
         </div>
       </section>
 
