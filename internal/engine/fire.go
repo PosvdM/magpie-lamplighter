@@ -307,7 +307,7 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		} else {
 			retry := retryText(outcome.RetryIn)
 			if outcome.Cooldown {
-				retry = "CPA 冷却结束，" + retry
+				retry = "Magpie 账号休息结束，" + retry
 			}
 			params := map[string]string{"retry_seconds": strconv.Itoa(int(outcome.RetryIn.Round(time.Second).Seconds())), "error": err.Error(), "summary": d.Summary}
 			if outcome.Cooldown {
@@ -353,8 +353,8 @@ func (e *Engine) group(key string) (GroupView, bool) {
 }
 
 // execute sends the ignition request with the newest candidate model. It
-// tries the next candidate when CPA rejects a model for the pinned
-// credential, and once per ignition when the provider refuses a model.
+// tries the next candidate when Magpie refuses a model for the pinned
+// account, and once per ignition when the provider refuses a model.
 func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, host.ModelResponse, error) {
 	var empty host.ModelResponse
 	spec := providers.Lookup(t.group.Provider)
@@ -411,7 +411,7 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 			lastErr = err
 			continue
 		}
-		// CPA lists a new model for every credential of the provider, and one
+		// Magpie lists a new model for every account of the provider, and one
 		// account may not be able to use it yet. A second refusal points at
 		// the request or the account, so it ends the ignition.
 		if refused == "" && i < len(candidates)-1 && ignite.ModelRejected(err) {

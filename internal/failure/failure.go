@@ -80,9 +80,11 @@ var suspendedPhrases = []string{
 // authCodes are error codes of a rejected credential.
 var authCodes = []string{"invalid_grant", "unauthorized", "unauthenticated", "invalid_token", "authentication_error", "token_expired", "token_revoked"}
 
-// cpaCooldown marks CPA's local cooldown of a credential, which is no
-// provider response; ignite.CooldownWait and ignite.Classify handle it.
-var cpaCooldown = []string{"model_cooldown", "are cooling down", "auth_unavailable"}
+// pinMarker starts Magpie's own refusals of a request pinned with
+// X-Magpie-Account (internal/gateway fallback.go, pinTo). A 429 among them
+// is a rest or a cap of the account in Magpie, which is no provider
+// response; ignite.CooldownWait and ignite.Classify handle it.
+const pinMarker = "x-magpie-account:"
 
 var statusPattern = regexp.MustCompile(`(?i)\b(?:http|status)\s*(\d{3})\b`)
 
@@ -94,8 +96,8 @@ var statusPattern = regexp.MustCompile(`(?i)\b(?:http|status)\s*(\d{3})\b`)
 //     means a missing permission or a disabled API.
 //   - ReasonAuth: HTTP 401, quota.ErrUnauthorized, or an authCodes code such
 //     as invalid_grant.
-//   - ReasonRateLimited: HTTP 429 or RESOURCE_EXHAUSTED, unless the text is
-//     CPA's local cooldown.
+//   - ReasonRateLimited: HTTP 429 or RESOURCE_EXHAUSTED, unless Magpie
+//     refused the pinned account itself.
 //
 // Other errors get an empty Reason.
 func Diagnose(err error) Diagnosis {
@@ -157,8 +159,8 @@ func Diagnose(err error) Diagnosis {
 		d.Reason = ReasonSuspended
 	case d.Status == 401 || containsAny(codes, authCodes) || strings.Contains(lower, "invalid_grant"):
 		d.Reason = ReasonAuth
-	case containsAny(lower, cpaCooldown):
-		// CPA's own cooldown keeps its handling.
+	case strings.Contains(lower, pinMarker):
+		// Magpie's own refusal keeps its handling.
 	case d.Status == 429 || strings.Contains(codes, "resource_exhausted") || strings.Contains(codes, "rate_limit"):
 		d.Reason = ReasonRateLimited
 	}

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"math"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -186,51 +185,80 @@ type FailureOutcome struct {
 	NotifyCircuit bool
 	Until         time.Time
 	RetryIn       time.Duration
-	// Cooldown is true when the retry waits for a CPA cooldown and the
-	// failure was not counted.
+	// Cooldown is true when the retry waits for the end of the pinned
+	// account's rest in Magpie and the failure was not counted.
 	Cooldown bool
 }
 
-// maxCooldownWait bounds the CPA cooldown that defers a retry. A longer
-// cooldown means the quota is still exhausted, which the normal retry and
-// failure protection handle.
+// maxCooldownWait bounds the rest that defers a retry. A longer rest means
+// the quota is still exhausted, which the normal retry and failure
+// protection handle.
 const maxCooldownWait = 10 * time.Minute
 
-var resetSecondsPattern = regexp.MustCompile(`"reset_seconds"\s*:\s*(\d+)`)
+// Magpie answers a request pinned with X-Magpie-Account itself, before
+// asking the vendor, when the account cannot take it (internal/gateway
+// fallback.go, pinTo). Every such answer starts with the header's name:
+//
+//   - 429 "X-Magpie-Account: <account> rests until <RFC 3339> (<why>); no
+//     other account is tried in its place": Magpie rests an account after
+//     a rate limit, a used-up quota or a refusal until the vendor's reset.
+//   - 429 with "usage cap reached" or "spend cap reached": a cap the user
+//     set on the account in Magpie.
+//   - 400 "<account>'s plan doesn't list <model>" and 404 "no account
+//     <name> serves this model": the account does not serve the model.
+const pinMarker = "x-magpie-account:"
 
-// CooldownWait returns how long CPA keeps the credential in its local
-// cooldown, from the reset_seconds of a model_cooldown error. CPA cools a
-// credential down after a 429 until the provider's reset plus a margin, so
-// an ignition at reset plus grace can arrive a few seconds too early.
-func CooldownWait(err error) (time.Duration, bool) {
+var restUntilPattern = regexp.MustCompile(`rests until (\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2}))`)
+
+// PinHeld reports whether err is Magpie holding the pinned account back
+// without asking the vendor: a rest or a cap. It is no answer of the
+// vendor, so it is no rate limit of the account.
+func PinHeld(err error) bool {
 	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, pinMarker) &&
+		(strings.Contains(text, "rests until") || strings.Contains(text, "cap reached"))
+}
+
+// pinUnserved reports whether Magpie refused the model for the pinned
+// account without asking the vendor.
+func pinUnserved(text string) bool {
+	return strings.Contains(text, pinMarker) &&
+		(strings.Contains(text, "plan doesn't list") || strings.Contains(text, "serves this model"))
+}
+
+// CooldownWait returns how long Magpie still rests the pinned account,
+// from the latest "rests until" time of the error, measured from now. An
+// account that hit its limit rests until the vendor's reset, so an
+// ignition at reset plus grace can arrive a few seconds too early.
+func CooldownWait(err error, now time.Time) (time.Duration, bool) {
+	if err == nil || !PinHeld(err) {
 		return 0, false
 	}
-	text := err.Error()
-	if !strings.Contains(text, "model_cooldown") && !strings.Contains(text, "are cooling down") {
+	var until time.Time
+	for _, match := range restUntilPattern.FindAllStringSubmatch(err.Error(), -1) {
+		if t, parseErr := time.Parse(time.RFC3339Nano, match[1]); parseErr == nil && t.After(until) {
+			until = t
+		}
+	}
+	wait := until.Sub(now)
+	if until.IsZero() || wait <= 0 {
 		return 0, false
 	}
-	match := resetSecondsPattern.FindStringSubmatch(text)
-	if match == nil {
-		return 0, false
-	}
-	seconds, convErr := strconv.Atoi(match[1])
-	if convErr != nil || seconds <= 0 {
-		return 0, false
-	}
-	wait := time.Duration(seconds) * time.Second
 	return wait, wait <= maxCooldownWait
 }
 
 // RecordFailure updates the failure state. Hard errors and the last allowed
 // transient error pause the target until the next daily start.
 //
-// A short CPA cooldown is waited out instead: the retry runs when the
-// cooldown ends plus the grace period, and the failure is not counted. Only
-// the first of consecutive cooldowns gets this, so a cooldown that keeps
-// renewing still reaches the failure protection.
+// A short rest of the pinned account in Magpie is waited out instead: the
+// retry runs when the rest ends plus the grace period, and the failure is
+// not counted. Only the first of consecutive rests gets this, so a rest
+// that keeps renewing still reaches the failure protection.
 func (s Schedule) RecordFailure(ts *store.TargetState, now time.Time, err error) FailureOutcome {
-	if wait, ok := CooldownWait(err); ok && !s.recentCooldown(ts, now) {
+	if wait, ok := CooldownWait(err, now); ok && !s.recentCooldown(ts, now) {
 		delay := wait + time.Duration(s.Cfg.GraceSeconds)*time.Second
 		ts.LastError = truncate(errorText(err), 500)
 		ts.LastFailureEpoch = epoch(now)
@@ -273,13 +301,12 @@ func RecordCredentialFailure(ts *store.TargetState, now time.Time, err error, su
 }
 
 // recentCooldown reports whether the previous failure, shortly before now,
-// was already a CPA cooldown.
+// was already a rest that was waited out.
 func (s Schedule) recentCooldown(ts *store.TargetState, now time.Time) bool {
 	if ts.LastFailureEpoch == 0 || now.Sub(epochTime(ts.LastFailureEpoch)) > 2*maxCooldownWait {
 		return false
 	}
-	_, ok := CooldownWait(errors.New(ts.LastError))
-	return ok
+	return PinHeld(errors.New(ts.LastError))
 }
 
 func errorText(err error) string {
@@ -305,7 +332,7 @@ const (
 	Transient Kind = iota
 	// Hard errors pause the target until the next daily start.
 	Hard
-	// Unsupported means CPA rejected the model for the pinned credential
+	// Unsupported means Magpie refused the model for the pinned account
 	// before contacting the provider; the caller tries the next model.
 	Unsupported
 )
@@ -314,7 +341,7 @@ const (
 // observed afterwards.
 var ErrNotConfirmed = errors.New("点火请求已返回，但未确认到新的固定 5h reset")
 
-// ErrNoModel means CPA rejected every candidate model for the credential.
+// ErrNoModel means no candidate model could be used for the account.
 var ErrNoModel = errors.New("候选点火模型都不能用于该凭证")
 
 var hardStatuses = map[int]bool{400: true, 401: true, 403: true, 404: true, 409: true, 422: true, 429: true}
@@ -328,14 +355,11 @@ func Classify(err error) Kind {
 		return Hard
 	}
 	text := strings.ToLower(err.Error())
-	// CPA's scheduler answers "auth_not_found" when the pinned credential
-	// does not serve the model, and the handler answers "unknown provider for
-	// model" when no credential does. Neither reaches the provider.
-	if strings.Contains(text, "auth_not_found") || strings.Contains(text, "unknown provider for model") {
+	// Neither of these reached the provider.
+	if pinUnserved(text) {
 		return Unsupported
 	}
-	// A local cooldown in CPA is not a provider response; retry later.
-	if strings.Contains(text, "are cooling down") || strings.Contains(text, "auth_unavailable") {
+	if PinHeld(err) {
 		return Transient
 	}
 	if hardStatuses[host.StatusOf(err)] {
@@ -344,7 +368,7 @@ func Classify(err error) Kind {
 	for _, marker := range []string{
 		"http 400", "http 401", "http 403", "http 404", "http 409", "http 422", "http 429",
 		"status 400", "status 401", "status 403", "status 404", "status 409", "status 422", "status 429",
-		"not_found", "not found", "unsupported", "invalid model", "credential is unavailable",
+		"not_found", "not found", "unsupported", "invalid model",
 	} {
 		if strings.Contains(text, marker) {
 			return Hard
@@ -354,7 +378,7 @@ func Classify(err error) Kind {
 }
 
 // ModelRejected reports whether the provider refused the model itself, with
-// HTTP 400 or 404. CPA lists a model for every credential of a provider, so a
+// HTTP 400 or 404. Magpie lists a model for every account of a provider, so a
 // listed model can still be refused by one account. Authentication errors and
 // rate limits concern the account and are not model rejections.
 func ModelRejected(err error) bool {
