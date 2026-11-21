@@ -1647,15 +1647,24 @@
     return short ? short + " · " : "";
   }
 
-  // The label of quota group key as it shows apart from its account card.
-  // A label that names the account, such as "Antigravity#main" of a
-  // credential event, already starts with the service and stays as it is.
+  // The title of a quota group label as it shows apart from its account
+  // card, for provider as sharedGroups gives it (none for an account with
+  // one group): name, the service in front (prefix) and its short form for
+  // a narrow chart (short). A label that already names the service, such
+  // as "Claude" of the main group of a Claude account or "Antigravity#main"
+  // of a credential event, stays as it is. The chart's rows, its totals,
+  // its table, the ignition table and the events all take their titles
+  // here.
+  function groupName(provider, label) {
+    var title = provider && label ? providerTitle(provider) : "";
+    if (!title || label === title || label.indexOf(title + "#") === 0) return { name: label, prefix: "", short: "" };
+    var prefix = servicePrefix(provider);
+    return { name: prefix + label, prefix: prefix, short: shortPrefix(provider) };
+  }
+
+  // The title of the label of quota group key.
   function groupTitle(key, label) {
-    var provider = sharedGroups(status && status.accounts)[key];
-    if (!label || !provider) return label;
-    var title = providerTitle(provider);
-    if (label === title || label.indexOf(title + "#") === 0) return label;
-    return servicePrefix(provider) + label;
+    return groupName(sharedGroups(status && status.accounts)[key], label).name;
   }
 
   // Events of an account rather than one of its quota groups: credential
@@ -2297,6 +2306,10 @@
   // form (short, "AG · ") instead, and then loses characters at the end of
   // the group label: the service always stays in front, so "Claude / GPT"
   // of an Antigravity account never reads as a Claude account.
+  //
+  // Group labels have no length limit (Antigravity keeps an unknown one as
+  // it is), so the longest prefix that fits is found by binary search: a
+  // label of n characters takes about log2(n) measurements, not n.
   function fitName(name, prefix, room, short, width) {
     if (width(name) <= room) return name;
     var keep = 1;
@@ -2305,22 +2318,40 @@
       if (width(name) <= room) return name;
       keep = Array.from(short).length + 1;
     }
-    var chars = Array.from(name), n = chars.length - 1;
-    for (; n > keep; n--) if (width(chars.slice(0, n).join("") + "…") <= room) break;
-    return chars.slice(0, Math.max(keep, n)).join("") + "…";
+    var chars = Array.from(name);
+    var cut = function (n) { return chars.slice(0, n).join("") + "…"; };
+    // The longest n in [keep, length - 1] whose cut fits; keep characters
+    // stay even when they do not.
+    var lo = keep, hi = Math.max(keep, chars.length - 1);
+    while (lo < hi) {
+      var mid = Math.ceil((lo + hi) / 2);
+      if (width(cut(mid)) <= room) lo = mid;
+      else hi = mid - 1;
+    }
+    // Kerning can make a longer text narrower, so the candidate is measured
+    // once more, and shortened in the rare case it does not fit.
+    while (lo > keep && width(cut(lo)) > room) lo--;
+    return cut(lo);
   }
 
-  // The width of text in the body font at size px and weight, in the
-  // chart's units: measured on a canvas, or estimated per character where
-  // there is none.
+  // A function (text, size, weight) giving the width of text in the body
+  // font, in the chart's units: measured on a canvas, or estimated per
+  // character where there is none. The font family is read once, when the
+  // function is made for a redraw; the canvas font is set only when the
+  // size or weight changes.
   var measureContext = null;
-  function textWidth(text, size, weight) {
+  function textMeasure() {
     if (measureContext === null) {
       try { measureContext = document.createElement("canvas").getContext("2d") || false; } catch (err) { measureContext = false; }
     }
-    if (!measureContext) return Array.from(text).length * size * 0.54;
-    measureContext.font = weight + " " + size + "px " + getComputedStyle(document.body).fontFamily;
-    return measureContext.measureText(text).width;
+    var context = measureContext;
+    if (!context) return function (text, size) { return Array.from(text).length * size * 0.54; };
+    var family = getComputedStyle(document.body).fontFamily, font = "";
+    return function (text, size, weight) {
+      var want = weight + " " + size + "px " + family;
+      if (want !== font) context.font = font = want;
+      return context.measureText(text).width;
+    };
   }
 
   function fmtDiff(d) { return d == null ? "—" : (d > 0 ? "+" : d < 0 ? "−" : "") + Math.abs(d) + "%"; }
@@ -2508,8 +2539,9 @@
       var account = accountOf["group|" + s.group];
       if (account === undefined) account = accountOf["auth|" + s.auth_index];
       if (!byLabel[id]) { byLabel[id] = []; order.push(id); }
-      var prefix = shared[s.group] ? servicePrefix(s.provider) : "", short = shared[s.group] ? shortPrefix(s.provider) : "";
-      byLabel[id].push({ id: s.group + "|" + s.window, name: prefix + s.label + extra, prefix: prefix, short: short, source: source,
+      var title = groupName(shared[s.group], s.label), total = groupName(shared[s.group], s.source_label || s.label);
+      byLabel[id].push({ id: s.group + "|" + s.window, name: title.name + extra, prefix: title.prefix, short: title.short, source: source,
+        total: { name: total.name + extra, prefix: total.prefix, short: total.short },
         sub: meta ? meta.email : emailOf[s.auth_index] || s.auth_index || "", group: s.group, inactive: !meta, lastAt: lastPoint ? lastPoint[0] : null,
         points: s.points, floor: cycleFloor(s.points), resets: Array.isArray(s.resets) ? s.resets : [],
         reset: meta ? meta.reset : null, weight: meta ? meta.weight : 1, last: lastPoint ? lastPoint[1] : meta.remaining,
@@ -2554,9 +2586,10 @@
     var now = Date.now() / 1000;
     var resets = kids.map(function (k) { return k.reset; }).filter(function (t) { return t > now; });
     var weights = kids.reduce(function (sum, k) { return sum + k.weight; }, 0);
-    var named = kids.filter(function (k) { return k.prefix; })[0];
-    var prefix = named ? named.prefix : "", short = named ? named.short : "";
-    return { id: "group:" + id, name: prefix + kids[0].source, prefix: prefix, short: short, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
+    // The title of the total, as groupName gives it for the label the
+    // accounts share; an account that names its service decides.
+    var title = (kids.filter(function (k) { return k.total.prefix; })[0] || kids[0]).total;
+    return { id: "group:" + id, name: title.name, prefix: title.prefix, short: title.short, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
       last: kids.reduce(function (sum, k) { return sum + k.weight * k.last; }, 0) / weights,
       reset: resets.length ? Math.min.apply(null, resets) : null, groups: kids.map(function (k) { return k.group; }) };
   }
@@ -2739,7 +2772,7 @@
       root.appendChild(svgText({ x: g.x(t), y: 13, "text-anchor": "middle", "font-size": 11, fill: cssVar("--text-tertiary") }, ticks.label(t)));
       root.appendChild(svg("line", { x1: g.x(t), x2: g.x(t), y1: AXIS_H - 4, y2: height - 4, stroke: cssVar("--border-color"), "stroke-dasharray": "2 4" }));
     });
-    var rowY = {};
+    var rowY = {}, textWidth = textMeasure();
     flat.forEach(function (f, i) {
       var r = f.row, y0 = AXIS_H + i * (LANE + LANE_GAP);
       rowY[r.id] = y0;

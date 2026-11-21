@@ -695,7 +695,7 @@ function pageVar(name) {
 
 const EVENT_FUNCTIONS = ["groupLabel", "retryText", "cutText", "errorSummary", "notifyKind", "eventWindow", "sameSubject",
   "eventSeconds", "eventRows", "notifyTitle", "eventView", "eventParts", "eventMasked", "pushMarks", "parseTime",
-  "sharedGroups", "servicePrefix", "groupTitle", "eventTitle"];
+  "sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "eventTitle"];
 
 // Elements and text nodes as plain objects; translate shows the key and
 // its arguments.
@@ -724,7 +724,7 @@ function eventContext(globals = {}) {
     },
     ...globals,
   });
-  vm.runInContext(["EVENT_TYPES", "NOTIFY_TRIGGERS", "NOTIFY_LAG", "PAUSE_PAIR", "ERROR_CHARS", "ACCOUNT_EVENTS", "ACCOUNT_NOTIFY_KINDS"].map(pageVar).join("\n"), ctx);
+  vm.runInContext(["EVENT_TYPES", "NOTIFY_TRIGGERS", "NOTIFY_LAG", "PAUSE_PAIR", "ERROR_CHARS", "ACCOUNT_EVENTS", "ACCOUNT_NOTIFY_KINDS", "SERVICE_SHORT"].map(pageVar).join("\n"), ctx);
   return ctx;
 }
 
@@ -1586,7 +1586,7 @@ test("a quota group of an account with several names its service apart from the 
     group_order: ["GPT", "Claude", "Gemini", "Claude / GPT"],
   };
   const providerTitle = (id) => titles[id] || id;
-  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
     status, providerTitle, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
     gapLimit: () => 900, pooled: () => [],
   });
@@ -1903,4 +1903,105 @@ test("account events keep their account label, without the service in front agai
   // An account label never gets the service twice, whatever the kind.
   assert.equal(ctx.groupTitle("antigravity:4:cg", "Antigravity#main"), "Antigravity#main");
   assert.equal(ctx.groupTitle("antigravity:4:cg", "Antigravity"), "Antigravity");
+});
+
+test("a Claude account with several groups never shows Claude · Claude", () => {
+  const titles = { claude: "Claude" };
+  const win = (remaining) => [{ id: "five-hour", kind: "5h", short: "5h", remaining, reset: "" }];
+  // Two Claude accounts, each with its main group and a Fable group.
+  const status = {
+    accounts: [
+      { auth_index: "1", provider: "claude", email: "a@example.com", groups: [
+        { key: "claude:1:main", label: "Claude#rk", source_label: "Claude", windows: win(40) },
+        { key: "claude:1:fable", label: "Fable#rk", source_label: "Fable", windows: win(70) },
+      ] },
+      { auth_index: "2", provider: "claude", email: "b@example.com", groups: [
+        { key: "claude:2:main", label: "Claude#am", source_label: "Claude", windows: win(60) },
+        { key: "claude:2:fable", label: "Fable#am", source_label: "Fable", windows: win(90) },
+      ] },
+    ],
+    group_order: ["Claude", "Fable"],
+  };
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "windowKind", "cycleFloor",
+    "accountWeight", "pooledRow", "parseTime", "renderChartTable"], {
+    status, providerTitle: (id) => titles[id] || id, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
+    gapLimit: () => 900, pooled: () => [],
+  });
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
+  const now = 1795280000;
+  const series = (group, label, source, auth, value) => ({ group, label, source_label: source, provider: "claude", auth_index: auth,
+    window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  ctx.history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), series: [
+    series("claude:1:main", "Claude#rk", "Claude", "1", 40), series("claude:1:fable", "Fable#rk", "Fable", "1", 70),
+    series("claude:2:main", "Claude#am", "Claude", "2", 60), series("claude:2:fable", "Fable#am", "Fable", "2", 90),
+  ] };
+  const rows = ctx.chartRows();
+  // The totals, the rows of their accounts and the table name the main
+  // group as the service itself, and the Fable group with the service.
+  assert.deepEqual(plain(rows.map((r) => [r.name, r.prefix, r.short])), [["Claude", "", ""], ["Claude · Fable", "Claude · ", "CL · "]]);
+  assert.deepEqual(plain(rows[0].children.map((c) => [c.name, c.prefix])), [["Claude#rk", ""], ["Claude#am", ""]]);
+  assert.deepEqual(plain(rows[1].children.map((c) => c.name)), ["Claude · Fable#rk", "Claude · Fable#am"]);
+  const cells = [];
+  ctx.$ = () => ({ appendChild: (tr) => cells.push(tr.children[0]) });
+  ctx.clear = () => {};
+  ctx.el = (tag, attrs = {}, children = []) => ({ tag, ...attrs, children });
+  ctx.maskedNodes = (text) => [text];
+  ctx.pct = String;
+  ctx.fmtCountdown = String;
+  ctx.translate = (k) => k;
+  ctx.SENSITIVE = "account-sensitive";
+  ctx.renderChartTable(rows);
+  assert.deepEqual(plain(cells.map((td) => td.text || td.children[0])), ["Claude#rk", "Claude#am", "Claude · Fable#rk", "Claude · Fable#am"]);
+  // The events and the ignition table take the same titles.
+  assert.equal(ctx.groupTitle("claude:1:main", "Claude#rk"), "Claude#rk");
+  assert.equal(ctx.groupTitle("claude:1:main", "Claude"), "Claude");
+  assert.equal(ctx.groupTitle("claude:1:fable", "Fable#rk"), "Claude · Fable#rk");
+  const all = JSON.stringify(plain(rows));
+  assert.doesNotMatch(all, /Claude · Claude/);
+  // Every title comes from groupName: nothing else puts the service in front.
+  assert.equal(source.match(/servicePrefix\(/g).length, 2);
+  assert.equal(source.match(/shortPrefix\(/g).length, 2);
+});
+
+test("a label without a length limit is cut with few measurements", () => {
+  const ctx = context(["fitName"]);
+  let calls = 0;
+  const chars = (text) => { calls++; return Array.from(text).length; };
+  const long = "Antigravity · " + "Model ".repeat(2000) + "end";
+  const name = ctx.fitName(long, "Antigravity · ", 20, "AG · ", chars);
+  assert.equal(name, "AG · Model Model Mo…");
+  // The whole name, its short form, about log2(12000) halvings and the
+  // check of the candidate: not one measurement per character.
+  assert.ok(calls <= 2 + Math.ceil(Math.log2(long.length)) + 1, String(calls));
+  // Too narrow even for the service: the short form and one character.
+  assert.equal(ctx.fitName(long, "Antigravity · ", 2, "AG · ", chars), "AG · M…");
+  // A width that is not monotonic, as kerning can make it: the candidate is
+  // checked and shortened until it fits.
+  const bumpy = (text) => Array.from(text).length + (/Mod…$/.test(text) ? 5 : 0);
+  assert.equal(ctx.fitName("Model Model", "", 6, "", bumpy), "Mo…");
+});
+
+test("a redraw reads the font once and sets the canvas font only when it changes", () => {
+  let reads = 0, sets = 0, font = "";
+  const canvas = { measureText: (text) => ({ width: text.length * (font.startsWith("600 13px") ? 8 : 6) }) };
+  Object.defineProperty(canvas, "font", { get: () => font, set: (v) => { sets++; font = v; } });
+  const ctx = context(["textMeasure"], {
+    measureContext: null,
+    document: { body: {}, createElement: () => ({ getContext: () => canvas }) },
+    getComputedStyle: () => { reads++; return { fontFamily: "Inter, sans-serif" }; },
+  });
+  const width = ctx.textMeasure();
+  for (let i = 0; i < 50; i++) width("Claude · Fable", 13, 600);
+  assert.equal(width("abc", 13, 600), 24);
+  assert.equal(width("abc", 11, 400), 18);
+  assert.equal(reads, 1);
+  assert.equal(sets, 2);
+  assert.equal(font, "400 11px Inter, sans-serif");
+  // Without a canvas the width is estimated per character.
+  const none = context(["textMeasure"], { measureContext: false });
+  assert.equal(none.textMeasure()("abcd", 10, 600), 4 * 10 * 0.54);
+  // renderOverview makes one measure for all its rows.
+  const overview = source.match(/  function renderOverview\([^]*?\n  \}\n/)[0];
+  assert.equal(overview.match(/textMeasure\(\)/g).length, 1);
+  assert.doesNotMatch(overview, /getComputedStyle/);
 });
