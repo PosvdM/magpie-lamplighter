@@ -10,12 +10,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // commandTimeout bounds how long a management request waits for the loop.
@@ -34,7 +36,7 @@ type Event struct {
 	Detail string `json:"detail,omitempty"`
 	// Params holds the values of the event, such as the model or the retry
 	// delay, so the page can write the event in its own language. Message
-	// and Detail stay in Chinese for the CPA log and older events.
+	// and Detail stay in Chinese for the log and older events.
 	Params map[string]string `json:"params,omitempty"`
 	// Account is the auth index of the account an account event concerns.
 	// It is internal: MCP maps it to the current account label, and Group
@@ -46,7 +48,7 @@ func (e *Engine) addEvent(level, kind, group, message string) {
 	e.addEventDetail(level, kind, group, "", message, message, nil)
 }
 
-// addEventDetail records an event. message is the full text for the CPA log;
+// addEventDetail records an event. message is the full text for the log;
 // label and detail are the quota group and a short description for the page,
 // which shows the event type separately.
 func (e *Engine) addEventDetail(level, kind, group, label, detail, message string, params map[string]string) {
@@ -55,8 +57,13 @@ func (e *Engine) addEventDetail(level, kind, group, label, detail, message strin
 
 // addAccountEvent records an event of the account with auth index account,
 // which may have no quota group yet.
+//
+// The message, detail and params are redacted (redactEvent) before the
+// event is kept, written to the history or logged.
 func (e *Engine) addAccountEvent(account, level, kind, group, label, detail, message string, params map[string]string) {
 	now := e.now()
+	ev := redactEvent(Event{Message: message, Detail: detail, Params: params})
+	message, detail, params = ev.Message, ev.Detail, ev.Params
 	e.mu.Lock()
 	e.events = append(e.events, Event{Time: now, Level: level, Kind: kind, Group: group, Message: message, Label: label, Detail: detail, Params: params, Account: account})
 	if len(e.events) > maxEvents {
@@ -80,7 +87,7 @@ func (e *Engine) loadRecentEvents() {
 		if record.Kind != "e" {
 			continue
 		}
-		events = append(events, Event{
+		events = append(events, redactEvent(Event{
 			Time:    time.Unix(record.Time, 0).UTC(),
 			Level:   record.Level,
 			Kind:    record.Event,
@@ -90,7 +97,7 @@ func (e *Engine) loadRecentEvents() {
 			Detail:  record.Detail,
 			Params:  record.Params,
 			Account: record.Account,
-		})
+		}))
 	}
 	if len(events) > maxEvents {
 		events = events[len(events)-maxEvents:]
@@ -104,6 +111,17 @@ type command struct {
 	kind  string
 	arg   string
 	reply chan commandReply
+	// deadline is that of the request that sent the command, zero for
+	// none. The loop runs the command with its own context; a manual
+	// refresh fits its refreshes within the deadline (manualRefreshEnd).
+	deadline time.Time
+}
+
+// newCommand is a command sent by a request with ctx.
+func newCommand(ctx context.Context, kind, arg string) command {
+	cmd := command{kind: kind, arg: arg, reply: make(chan commandReply, 1)}
+	cmd.deadline, _ = ctx.Deadline()
+	return cmd
 }
 
 type commandReply struct {
@@ -113,46 +131,69 @@ type commandReply struct {
 }
 
 // ErrNotRunning means the background loop has not started yet.
-var ErrNotRunning = errors.New("Lamplighter 尚未就绪：CPA 启动后约 20 秒开始运行，或插件已在配置中停用")
+var ErrNotRunning = errors.New("Lamplighter 尚未就绪：启动后约 5 秒开始运行")
 
-func (e *Engine) send(kind, arg string) error {
-	return e.dispatch(kind, arg).err
+// ErrStopped means the engine is stopping: the process is exiting.
+var ErrStopped = errors.New("Lamplighter 正在退出")
+
+// ErrCanceled is the reply to a management request whose context ended
+// first, as when the client went away. A command the loop has already
+// taken still runs to the end.
+var ErrCanceled = errors.New("请求已取消，操作可能仍在后台完成")
+
+func (e *Engine) send(ctx context.Context, kind, arg string) error {
+	return e.dispatch(ctx, kind, arg).err
 }
 
-// dispatch hands a command to the loop and waits for its reply.
-func (e *Engine) dispatch(kind, arg string) commandReply {
+// dispatch hands a command to the loop and waits for its reply, for up to
+// commandTimeout, until ctx ends or until the engine stops. Stopping
+// wins over a free loop: a command is not handed over once Cancel has
+// been called.
+func (e *Engine) dispatch(ctx context.Context, kind, arg string) commandReply {
 	e.mu.Lock()
-	ready := e.running && e.enabled
+	ready, stopped := e.running, e.stopped
 	e.mu.Unlock()
+	if stopped {
+		return commandReply{err: ErrStopped}
+	}
 	if !ready {
 		return commandReply{err: ErrNotRunning}
 	}
-	cmd := command{kind: kind, arg: arg, reply: make(chan commandReply, 1)}
+	if ctx.Err() != nil {
+		return commandReply{err: ErrCanceled}
+	}
+	cmd := newCommand(ctx, kind, arg)
 	timer := time.NewTimer(commandTimeout)
 	defer timer.Stop()
 	select {
 	case e.cmdCh <- cmd:
 	case <-timer.C:
 		return commandReply{err: errors.New("后台任务繁忙，请稍后再试")}
+	case <-ctx.Done():
+		return commandReply{err: ErrCanceled}
 	case <-e.stopCh:
-		return commandReply{err: ErrNotRunning}
+		return commandReply{err: ErrStopped}
 	}
 	select {
 	case reply := <-cmd.reply:
 		return reply
 	case <-timer.C:
 		return commandReply{err: errors.New("操作超时")}
+	case <-ctx.Done():
+		return commandReply{err: ErrCanceled}
 	case <-e.stopCh:
-		return commandReply{err: ErrNotRunning}
+		return commandReply{err: ErrStopped}
 	}
 }
 
 // Refresh runs an active query now, for one credential or for all when
 // authIndex is empty.
-func (e *Engine) Refresh(authIndex string) error { return e.send("refresh", authIndex) }
+func (e *Engine) Refresh(ctx context.Context, authIndex string) error {
+	return e.send(ctx, "refresh", authIndex)
+}
 
 // Ignite ignites one target now.
-func (e *Engine) Ignite(key string) error { return e.send("ignite", key) }
+func (e *Engine) Ignite(ctx context.Context, key string) error { return e.send(ctx, "ignite", key) }
 
 // ChannelResult is the outcome of a test notification on one channel.
 type ChannelResult struct {
@@ -168,12 +209,18 @@ type ChannelResult struct {
 
 // TestNotify sends a test notification to each configured channel. A
 // webhook whose settings were not applied is reported as failed.
-func (e *Engine) TestNotify() ([]ChannelResult, error) {
-	reply := e.dispatch("test_notify", "")
+func (e *Engine) TestNotify(ctx context.Context) ([]ChannelResult, error) {
+	reply := e.dispatch(ctx, "test_notify", "")
 	return reply.results, reply.err
 }
 
 func (e *Engine) runCommand(ctx context.Context, cmd command) {
+	// The loop's select may take a command after Cancel, when both are
+	// ready; such a command is dropped.
+	if e.stopping() {
+		cmd.reply <- commandReply{err: ErrStopped}
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			cmd.reply <- commandReply{err: fmt.Errorf("内部错误：%v", r)}
@@ -184,16 +231,7 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 	var results []ChannelResult
 	switch cmd.kind {
 	case "refresh":
-		e.poll(ctx, cfg, e.now(), cmd.arg, true)
-		e.mu.Lock()
-		if cmd.arg != "" {
-			if text, ok := e.pollErrs[cmd.arg]; ok {
-				err = errors.New(text)
-			}
-		} else if text, ok := e.pollErrs[""]; ok {
-			err = errors.New(text)
-		}
-		e.mu.Unlock()
+		err = e.manualPoll(ctx, cfg, cmd.arg, cmd.deadline)
 	case "ignite":
 		err = errNoTarget
 		for _, t := range e.collectTargets(cfg) {
@@ -230,7 +268,7 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 	notifyErr := e.notifyErr
 	e.mu.Unlock()
 	if notifyErr != "" {
-		results = append(results, ChannelResult{Channel: "Webhook", Error: notifyErr})
+		results = append(results, ChannelResult{Channel: "Webhook", Error: redact.Text(notifyErr)})
 	}
 	var channels []notify.Channel
 	if e.alerts != nil {
@@ -257,7 +295,7 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 			result := ChannelResult{Channel: channel.Name}
 			defer func() {
 				if r := recover(); r != nil {
-					result.OK, result.Error = false, fmt.Sprintf("内部错误：%v", r)
+					result.OK, result.Error = false, redact.Text(fmt.Sprintf("内部错误：%v", r))
 				}
 				tested[i] = result
 			}()
@@ -269,8 +307,9 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 				err = channel.Sender.Send(ctx, msg)
 			}
 			result.OK = err == nil
+			result.Response = redact.Text(result.Response)
 			if err != nil {
-				result.Error = err.Error()
+				result.Error = errText(err)
 			}
 		}()
 	}
@@ -307,14 +346,10 @@ type AccountStatus struct {
 	Title     string `json:"title"`
 	Email     string `json:"email,omitempty"`
 	Name      string `json:"name"`
-	// Note is the CPA credential note, whose first line names the account.
-	Note        string `json:"note,omitempty"`
-	Unavailable bool   `json:"unavailable"`
-	// CooldownUntil is when CPA ends its cooldown of the account.
-	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
-	// StaleCooldown is true when the cooldown outlasts a recovered quota.
-	StaleCooldown bool   `json:"stale_cooldown,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// Note is the account name from account_names, else Magpie's label
+	// when it is not the email.
+	Note  string `json:"note,omitempty"`
+	Error string `json:"error,omitempty"`
 	// CredentialProblem is "auth" when the provider rejects the credential
 	// and "suspended" when it disabled the account, see
 	// store.CredentialState; empty otherwise.
@@ -333,9 +368,7 @@ type Status struct {
 	MCP                mcp.State `json:"mcp"`
 	Version            string    `json:"version"`
 	Running            bool      `json:"running"`
-	Enabled            bool      `json:"enabled"`
 	ConfigError        string    `json:"config_error,omitempty"`
-	LockError          string    `json:"lock_error,omitempty"`
 	ModelsError        string    `json:"models_error,omitempty"`
 	ListError          string    `json:"list_error,omitempty"`
 	// NotifyError is the reason the webhook settings were not applied.
@@ -359,6 +392,10 @@ type Status struct {
 	Events    []Event         `json:"events"`
 	// NextModels is the model automatic selection picks next, per provider.
 	NextModels map[string]string `json:"next_models,omitempty"`
+	// MagpieWarmup lists the pins of the accounts that Lamplighter ignites
+	// and whose 5-hour window Magpie's own warm-up starts too, so that they
+	// are ignited twice. Never null.
+	MagpieWarmup []string `json:"magpie_warmup"`
 	// Providers lists the supported providers in display order, for the
 	// settings, and GroupOrder the display order of quota groups.
 	Providers  []ProviderInfo `json:"providers"`
@@ -397,20 +434,77 @@ func providerInfos() []ProviderInfo {
 	return out
 }
 
+// warmupReader is implemented by a host that can read Magpie's warm-up
+// settings (magpie.Host.MagpieWarmup). It is no part of host.Host: a test
+// host or another host leaves the list empty.
+type warmupReader interface {
+	MagpieWarmup(accounts []host.Account) ([]string, error)
+}
+
+// magpieWarmup returns the pins of the accounts that both Lamplighter and
+// Magpie's warm-up ignite: ignition is on and a quota group of the account
+// is an ignition target by the rule of automatic ignition (ignitionTarget:
+// a 5-hour window, groupIgnitable), and Magpie's warm-up starts its 5-hour
+// window. The setting is read on every call: the user can change it
+// in Magpie at any time. An unreadable setting gives an empty list.
+func (e *Engine) magpieWarmup() []string {
+	reader, ok := e.host.(warmupReader)
+	if !ok {
+		return []string{}
+	}
+	e.mu.Lock()
+	cfg := e.cfg
+	ignited := map[string]bool{}
+	if cfg.Ignition.Enabled {
+		for _, group := range e.groups {
+			if e.creds[group.AuthIndex] != nil && ignitionTarget(cfg, group) {
+				ignited[group.AuthIndex] = true
+			}
+		}
+	}
+	accounts := make([]host.Account, 0, len(ignited))
+	for _, cred := range e.creds {
+		if !ignited[cred.AuthIndex] {
+			continue
+		}
+		provider := cred.HostProvider
+		if provider == "" {
+			provider = cred.Provider
+		}
+		accounts = append(accounts, host.Account{Pin: cred.AuthIndex, Provider: provider, Email: cred.Email, User: cred.User, On: true})
+	}
+	e.mu.Unlock()
+	if len(accounts) == 0 {
+		return []string{}
+	}
+	found, err := reader.MagpieWarmup(accounts)
+	if err != nil {
+		e.logf("debug", "读取 Magpie 预热设置失败：%v", err)
+	}
+	pins := []string{}
+	for _, pin := range found {
+		if ignited[pin] {
+			pins = append(pins, pin)
+		}
+	}
+	sort.Strings(pins)
+	return pins
+}
+
 // Status returns a snapshot for the management page. Secrets are removed
 // from the config: only whether they are set is reported.
 func (e *Engine) Status() Status {
+	warmup := e.magpieWarmup()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	cfg := e.cfg
 	cfg.MCPKeySet = cfg.MCPKey != ""
 	cfg.MCPKey = ""
+	cfg.AdminKeySet = cfg.AdminKey != ""
+	cfg.AdminKey = ""
 	cfg.AccountOrder = append([]string(nil), cfg.AccountOrder...)
 	if cfg.BarkURL != "" {
 		cfg.BarkURL = "已设置"
-	}
-	if cfg.ModelsAPIKey != "" {
-		cfg.ModelsAPIKey = "已设置"
 	}
 	// The webhook URL, headers and body can hold tokens and topic names.
 	if cfg.Webhook.URL != "" {
@@ -430,11 +524,10 @@ func (e *Engine) Status() Status {
 		ConfigAppliedToken: e.configAppliedToken,
 		Version:            e.version,
 		Running:            e.running,
-		Enabled:            e.enabled,
 		ConfigError:        e.cfgErr,
-		LockError:          e.lockErr,
 		ModelsError:        e.modelsErr,
 		NextModels:         maps.Clone(e.nextModels),
+		MagpieWarmup:       warmup,
 		ListError:          e.pollErrs[""],
 		NotifyError:        e.notifyErr,
 		Language:           notify.NormalizeLang(e.lang),
@@ -479,14 +572,13 @@ func (e *Engine) Status() Status {
 	})
 	for _, cred := range creds {
 		account := AccountStatus{
-			AuthIndex:   cred.AuthIndex,
-			Provider:    cred.Provider,
-			Title:       labelFor(providers.Title(cred.Provider), cred),
-			Email:       cred.Email,
-			Name:        cred.Name,
-			Note:        cred.Note,
-			Unavailable: cred.Unavailable,
-			Error:       e.pollErrs[cred.AuthIndex],
+			AuthIndex: cred.AuthIndex,
+			Provider:  cred.Provider,
+			Title:     labelFor(providers.Title(cred.Provider), cred),
+			Email:     cred.Email,
+			Name:      cred.Name,
+			Note:      cred.Note,
+			Error:     e.pollErrs[cred.AuthIndex],
 
 			CredentialProblem: e.credProblems[cred.AuthIndex],
 		}
@@ -504,10 +596,6 @@ func (e *Engine) Status() Status {
 			}
 			return groups[i].Key < groups[j].Key
 		})
-		if now := e.now(); cred.CooldownUntil.After(now) {
-			account.CooldownUntil = cred.CooldownUntil
-			account.StaleCooldown = staleCooldown(cred, groups, now)
-		}
 		for _, group := range groups {
 			gs := GroupStatus{Key: group.Key, Label: group.Label, SourceLabel: group.SourceLabel}
 			for _, w := range group.Windows {
@@ -536,6 +624,7 @@ func (e *Engine) Status() Status {
 	if status.Events == nil {
 		status.Events = []Event{}
 	}
+	redactStatus(&status)
 	return status
 }
 
@@ -601,9 +690,10 @@ func RangeSpan(name string, now time.Time, loc *time.Location) time.Duration {
 }
 
 // HistoryRange returns the history for a named range, see RangeSpan, and
-// the windows of one kind, see History.
-func (e *Engine) HistoryRange(name, kind string) (HistoryResponse, error) {
-	return e.History(RangeSpan(name, e.now(), e.config().Location()), kind)
+// the windows of one kind, see History. The scan of the history files ends
+// with ctx, the context of the page's request.
+func (e *Engine) HistoryRange(ctx context.Context, name, kind string) (HistoryResponse, error) {
+	return e.historyContext(ctx, RangeSpan(name, e.now(), e.config().Location()), kind, false, nil)
 }
 
 func (e *Engine) mcpHistoryRange(ctx context.Context, name, kind string, accept func(store.Record) bool) (HistoryResponse, error) {
@@ -721,10 +811,10 @@ func (e *Engine) historyContext(ctx context.Context, span time.Duration, kind st
 		}
 		if record.Kind == "e" {
 			if record.Event == "ignite" || record.Event == "ignite_manual" || record.Event == "ignite_failed" || record.Event == "ignite_paused" {
-				resp.Events = append(resp.Events, Event{
+				resp.Events = append(resp.Events, redactEvent(Event{
 					Time: time.Unix(record.Time, 0).UTC(), Level: record.Level, Kind: record.Event,
 					Group: record.Group, Message: record.Message, Label: record.Label, Detail: record.Detail, Params: record.Params,
-				})
+				}))
 			}
 			return nil
 		}
@@ -851,9 +941,11 @@ func (e *Engine) language() string {
 	return notify.NormalizeLang(e.lang)
 }
 
-// SetLanguage records the Management Center language reported by the page;
+// SetLanguage records the language the management page reports;
 // notifications use it from then on.
-func (e *Engine) SetLanguage(lang string) error { return e.send("language", lang) }
+func (e *Engine) SetLanguage(ctx context.Context, lang string) error {
+	return e.send(ctx, "language", lang)
+}
 
 // eventTime formats a time for event params; the page shows it in the
 // plugin's time zone.

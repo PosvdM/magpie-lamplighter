@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
 )
 
 // probeOffset is how long before and after every reset the engine queries

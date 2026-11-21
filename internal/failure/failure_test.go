@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// tosBody is the error CPA passed on when Google disabled an Antigravity
+// tosBody is the error Google returned when it disabled an Antigravity
 // account on 2026-11-16.
 const tosBody = `{
   "error": {
@@ -91,9 +91,9 @@ func TestDiagnoseRateLimitAndCooldown(t *testing.T) {
 	if d := Diagnose(limited); d.Reason != ReasonRateLimited || d.Code != "RESOURCE_EXHAUSTED" || d.Summary != "Resource has been exhausted (e.g. check quota)." {
 		t.Fatalf("%+v", d)
 	}
-	cooldown := &host.Error{Code: "host_call_failed", Message: `{"error":{"code":"model_cooldown","message":"All credentials for model x are cooling down","reset_seconds":5}}`, Status: 429}
-	if d := Diagnose(cooldown); d.Reason != "" {
-		t.Fatalf("CPA cooldown classified as %+v", d)
+	rest := &host.Error{Code: "gateway_http_error", Message: `{"type":"error","error":{"type":"rate_limit_error","message":"X-Magpie-Account: a@example.com rests until 2026-10-04T14:00:17Z (rate); no other account is tried in its place"}}`, Status: 429}
+	if d := Diagnose(rest); d.Reason != "" || d.Status != 429 {
+		t.Fatalf("Magpie's rest of the pinned account classified as %+v", d)
 	}
 }
 

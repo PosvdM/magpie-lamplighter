@@ -1,12 +1,11 @@
-// Package egress sends quota requests through the same network exit that CPA
-// uses for model requests of the same credential.
+// Package egress sends quota requests through the same network exit that
+// Magpie uses for the account.
 //
-// CPA's model executors pick the credential's proxy_url first, then the global
-// proxy-url, then environment proxies, then a direct connection. A credential
-// with its own proxy_url is sent through a transport built by CPA's proxyutil;
-// every other request goes through host.http.do, which applies the remaining
-// steps inside CPA. A proxy_url that cannot be parsed fails the request instead
-// of falling back to a direct connection.
+// The host fills Credential.ProxyURL with the account's proxy in Magpie,
+// else Magpie's global proxy. An empty proxy uses the environment proxy
+// (HTTPS_PROXY and the rest), and "direct" or "none" a direct connection.
+// A proxy that cannot be parsed fails the request instead of falling back
+// to another exit.
 package egress
 
 import (
@@ -15,53 +14,40 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
-
-// HostHTTP is the part of the host API used for requests without a credential proxy.
-type HostHTTP interface {
-	HTTPDo(ctx context.Context, req pluginapi.HTTPRequest, timeout time.Duration) (pluginapi.HTTPResponse, error)
-}
 
 const maxResponseBytes = 4 << 20
 
 // Egress implements quota.Doer.
 type Egress struct {
-	Host    HostHTTP
 	Timeout time.Duration
 
 	mu         sync.Mutex
 	transports map[string]*http.Transport
 }
 
-// Do sends req through the credential proxy when proxyURL is set and through
-// host.http.do otherwise.
+// SetTimeout sets the timeout of the requests sent after it returns.
+func (e *Egress) SetTimeout(d time.Duration) {
+	e.mu.Lock()
+	e.Timeout = d
+	e.mu.Unlock()
+}
+
+// Do sends req through proxyURL; see the package comment.
 func (e *Egress) Do(ctx context.Context, proxyURL string, req quota.Request) (quota.Response, error) {
+	e.mu.Lock()
 	timeout := e.Timeout
+	e.mu.Unlock()
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	proxyURL = strings.TrimSpace(proxyURL)
-	if proxyURL == "" {
-		resp, err := e.Host.HTTPDo(ctx, pluginapi.HTTPRequest{
-			Method:  req.Method,
-			URL:     req.URL,
-			Headers: req.Header,
-			Body:    req.Body,
-		}, timeout)
-		if err != nil {
-			return quota.Response{}, err
-		}
-		return quota.Response{Status: resp.StatusCode, Header: resp.Headers, Body: resp.Body}, nil
-	}
-
-	transport, err := e.transport(proxyURL)
+	transport, err := e.transport(strings.TrimSpace(proxyURL))
 	if err != nil {
 		return quota.Response{}, err
 	}
@@ -71,10 +57,12 @@ func (e *Egress) Do(ctx context.Context, proxyURL string, req quota.Request) (qu
 	if err != nil {
 		return quota.Response{}, err
 	}
-	httpReq.Header = req.Header.Clone()
+	if req.Header != nil {
+		httpReq.Header = req.Header.Clone()
+	}
 	resp, err := (&http.Client{Transport: transport}).Do(httpReq)
 	if err != nil {
-		return quota.Response{}, fmt.Errorf("经凭证代理请求失败: %w", err)
+		return quota.Response{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
@@ -90,16 +78,39 @@ func (e *Egress) transport(proxyURL string) (*http.Transport, error) {
 	if transport, ok := e.transports[proxyURL]; ok {
 		return transport, nil
 	}
-	transport, mode, err := proxyutil.BuildHTTPTransport(proxyURL)
-	if err != nil {
-		return nil, fmt.Errorf("凭证 proxy_url 无效，已跳过请求: %s", proxyutil.Redact(proxyURL))
-	}
-	if transport == nil || mode == proxyutil.ModeInherit {
-		return nil, fmt.Errorf("凭证 proxy_url 无效，已跳过请求: %s", proxyutil.Redact(proxyURL))
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	switch strings.ToLower(proxyURL) {
+	case "":
+		transport.Proxy = http.ProxyFromEnvironment
+	case "direct", "none":
+		transport.Proxy = nil
+	default:
+		parsed, err := url.Parse(proxyURL)
+		if err != nil || parsed.Host == "" {
+			return nil, fmt.Errorf("代理地址无效，已跳过请求: %s", Redact(proxyURL))
+		}
+		switch parsed.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return nil, fmt.Errorf("代理地址无效，已跳过请求: %s", Redact(proxyURL))
+		}
+		transport.Proxy = http.ProxyURL(parsed)
 	}
 	if e.transports == nil {
 		e.transports = make(map[string]*http.Transport)
 	}
 	e.transports[proxyURL] = transport
 	return transport, nil
+}
+
+// Redact hides the user name and password of a proxy address.
+func Redact(proxyURL string) string {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.Host == "" {
+		return "[invalid]"
+	}
+	if parsed.User != nil {
+		parsed.User = url.User("***")
+	}
+	return parsed.String()
 }

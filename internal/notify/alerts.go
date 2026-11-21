@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // Severities, from best to worst.
@@ -556,18 +557,6 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 	groupState.LastSeen = now.Unix()
 }
 
-// CooldownMessage is sent once when CPA keeps an account in a cooldown
-// although its quota has recovered.
-func CooldownMessage(lang, label string, until time.Time, loc *time.Location) Message {
-	return Message{
-		Kind:  KindCooldown,
-		Title: T(lang, "cooldown_title", label),
-		Body:  T(lang, "cooldown_body", until.In(loc).Format("01/02 15:04")),
-		Level: LevelTimeSensitive,
-		Label: label,
-	}
-}
-
 // PlanMessage is sent when the plan of an account changes, such as an
 // expired subscription.
 func PlanMessage(lang, label, from, to string) Message {
@@ -581,12 +570,14 @@ func PlanMessage(lang, label, from, to string) Message {
 }
 
 // CircuitMessage is sent once when ignition pauses until the next day.
-// summary is the error in one sentence, see failure.Diagnose.
+// summary is the error in one sentence, see failure.Diagnose; it is
+// redacted (redact.Text), as are the summary and the appeal link of
+// CredentialMessage.
 func CircuitMessage(lang, label string, until time.Time, summary string, loc *time.Location) Message {
 	return Message{
 		Kind:  KindCircuit,
 		Title: T(lang, "circuit_title", label),
-		Body:  T(lang, "circuit_body", until.In(loc).Format("01/02 15:04"), truncate(summary, 220)),
+		Body:  T(lang, "circuit_body", until.In(loc).Format("01/02 15:04"), truncate(redact.Text(summary), 220)),
 		Level: LevelTimeSensitive,
 		Label: label,
 	}
@@ -617,15 +608,17 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 	if p.Ignition {
 		source = T(lang, "source_ignite")
 	}
-	summary := truncate(p.Summary, 220)
+	summary := truncate(redact.Text(p.Summary), 220)
+	// The appeal link comes from the provider's error, like the summary.
+	appeal := redact.Text(p.AppealURL)
 	var title string
 	var lines []string
 	switch p.Kind {
 	case KindSuspended:
 		title = T(lang, "suspended_title", label)
 		lines = append(lines, joinNonEmpty(" · ", head, T(lang, "suspended_reason")), summary, T(lang, "line_source", source))
-		if p.AppealURL != "" {
-			lines = append(lines, T(lang, "line_appeal", p.AppealURL))
+		if appeal != "" {
+			lines = append(lines, T(lang, "line_appeal", appeal))
 		}
 	case KindRateLimited:
 		title = T(lang, "rate_limited_title", label)
@@ -645,8 +638,8 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 			msg.Body = joinNonEmpty("\n", msg.Body, line)
 		}
 	}
-	if p.Kind == KindSuspended && strings.HasPrefix(p.AppealURL, "https://") {
-		msg.JumpURL = p.AppealURL
+	if p.Kind == KindSuspended && strings.HasPrefix(appeal, "https://") {
+		msg.JumpURL = appeal
 	}
 	return msg
 }

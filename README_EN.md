@@ -1,14 +1,16 @@
 <p align="center"><img src="./assets/logo.png" alt="" width="128"></p>
 
-# Lamplighter
+# Magpie-Lamplighter
 
 [中文](./README.md)
 
 > When he lights his street lamp, it is as if he brought one more star to life, or one flower. — *The Little Prince*
 >
-> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
+> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Magpie-Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
 
-Lamplighter is a native plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA). It monitors the quota of ChatGPT (Codex), Claude, Antigravity, Kimi and Grok accounts, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and sends one minimal request after each 5-hour quota window resets so that the next window starts right away.
+Magpie-Lamplighter (Lamplighter for short below) is a plugin for [Magpie](https://github.com/yetone/magpie), published on npm as `magpie-lamplighter` and shown in Magpie as **Magpie-Lamplighter**. It monitors the quota of the ChatGPT (Codex), Claude and Antigravity subscription accounts in Magpie, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and after each 5-hour quota window resets it sends one minimal request through Magpie so that the next window starts right away. Coding agents can read the quota over MCP.
+
+The technical documents are in Chinese: [architecture](./docs/architecture.md) and [development](./docs/development.md).
 
 ![Management page: quota per account and ignition plans](./docs/images/overview.png)
 
@@ -18,24 +20,27 @@ Lamplighter is a native plugin for [CLIProxyAPI](https://github.com/router-for-m
 
 ## Features
 
-- **Quota monitoring**: queries quota on a schedule and also reads the quota that upstream providers return while CPA serves real requests.
-- **Notifications** through Bark or a webhook (Feishu, ntfy, DingTalk, Telegram and others): alerts when remaining quota drops to 50%, 20%, 10% and zero, and when the plan of an account changes, for example when a subscription expires; optional recovery and pre-reset reminders; optional forwarding of [Did Codex Reset](https://didcodexreset.com/) signals.
-- **Window ignition**: from 07:00 every day, sends a minimal request 3 seconds after each 5-hour reset, until 22:30. The request goes through CPA's own model executor and is pinned to one account.
-- **Management page**: shows quota, ignition plans, events and a quota chart in the CPA Management Center, and edits the settings.
+- **Quota monitoring**: queries each account's quota from the vendor on a schedule, and also reads the quota Magpie records while it forwards requests.
+- **Charts**: one quota card per account; the quota history chart shows each window's curve, an even-pace line, a projection at the current rate and ignition results, with a weighted total for services that have several accounts.
+- **Notifications**: through Bark or a webhook (Feishu, ntfy, DingTalk, Telegram and others). Alerts when the remaining quota falls to 50%, 20%, 10% and when it runs out, and when an account's plan changes (for example when a membership expires). Optional recovery notices and pre-reset reminders; optional forwarding of [Did Codex Reset](https://didcodexreset.com/) reset signals.
+- **Ignition** (off by default): from 07:00 each day, sends a minimal request 3 seconds after each 5-hour window resets, until 22:30. Requests go through the Magpie gateway, pinned to the account.
+- **MCP**: coding agents can read the current quota, history and events, and refresh the quota.
 
-| Service | Monitored | Ignition by default |
-| --- | --- | --- |
-| ChatGPT / Codex | 5-hour and 7-day windows | On |
-| Claude | 5-hour and 7-day windows, plus separately counted quotas such as Fable | On, 5-hour window only |
-| Antigravity | Quota groups such as Gemini and Claude / GPT | Off; when on, Gemini only |
-| Kimi | 5-hour, 7-day and other windows | Not supported: the windows switch at fixed times |
-| Grok | 7-day window | Not supported: a new period starts when the previous one ends |
+| Service | Source in Magpie | Monitored | Ignition |
+| --- | --- | --- | --- |
+| ChatGPT / Codex | Magpie's Codex accounts | 5-hour, 7-day | Supported |
+| Claude | Magpie's Claude accounts | 5-hour, 7-day, plus separately counted quotas such as Fable | Supported, 5-hour window only |
+| Antigravity | Accounts of the agy-cli plugin (`@magpie-community/opencode-agy-cli-auth`) | Gemini, Claude / GPT and other quota groups | Off by default; once on, Gemini only by default |
 
-Kimi quota queries follow the CPA Management Center; parsing is tested with a real response a user provided, but the requests have not run against a real account yet. Grok accounts billed by API usage have no quota to read and show an error. Accounts without a 5-hour window, such as ChatGPT Pro, are monitored for their other windows and not ignited.
+Lamplighter monitors only the subscription accounts of the services `codex`, `claude` and `agy-cli` in Magpie. Magpie's built-in Antigravity accounts (service `antigravity`) have no credential Lamplighter can read and are not monitored; to monitor Antigravity, add the accounts through the agy-cli plugin. Accounts without a 5-hour window (such as ChatGPT Pro) are monitored for their other windows and are not ignited. API keys in Magpie have no quota windows and are not shown.
 
-Notifications and the page name the quota group of ChatGPT accounts `GPT`, so that it does not start with the same letter as Claude. When a service has several accounts, notifications and the page tell them apart by the last two characters of the email user name, for example `GPT#rk`. A named account shows its name instead, for example `GPT#main`. To name an account, fill in "Name" in the "Accounts" section of the Lamplighter settings view, or edit the credential's "Note" in the CPA Management Center. The name is the first line of the note, cut at 20 characters. A service with one account also shows its name. When a name equals the name or email suffix of another account of the service, the email suffix follows the name. For a note with more lines, clearing the name in the Lamplighter page deletes the whole note. A note changed in the CPA Management Center takes effect after the next poll or a manual refresh. Recorded events keep their original label.
+### Account names
 
-When a service has several accounts, the total in the chart averages their remaining quota by weight; the weight says how many times the quota of the service's cheapest paid plan the account has. The default weight follows the detected plan, whose name shows at the bottom of the account card. The ChatGPT plan comes with the quota query. The Claude and Antigravity plans are read from the account profile once a day per account, and again at once when the account starts or stops reporting a quota window, for example when the 5-hour Gemini window disappears after Google AI Pro expires. A failed read keeps the plan read before, and the weight is 1 until a plan has been read. The "Weight" field in the "Accounts" section of the settings view sets a weight by hand, decimals allowed; leave it empty to restore the plan default shown in the field. Weights set by hand are saved in `account_weights` and take precedence over the defaults. A weight other than 1 shows after the account title, for example `×5`.
+In notifications and on the page, the quota group of ChatGPT accounts is named `GPT`, so its first letter differs from Claude's. When a service has several accounts, they are told apart by the last two characters of the email user name, as in `GPT#rk`. An account with a name shows the name instead, as in `GPT#main`: in Lamplighter's Settings view, fill in **Name** under **Accounts**; without one, the account's name in Magpie is used (unless it equals the email). The name is kept in Lamplighter's settings and does not change the account's name in Magpie. Only its first line is used, cut at 20 characters; a service with one account shows the name too; when the name equals another account's name or email suffix in the same service, the email suffix is added after it. Events already recorded keep their old labels.
+
+### Weights of several accounts
+
+When a service has several accounts, the chart's total is the weighted average of each account's remaining quota. The weight says how many times the quota of the cheapest paid plan of that service the account has. The default weight follows the detected plan, whose name is shown at the bottom of the account card. ChatGPT's plan comes with the quota query; for Claude and Antigravity the account profile is read once a day per account, and again at once when the account's quota windows appear or disappear, for example when Gemini's 5-hour window disappears after Google AI Pro expires. When a read fails, the last plan read is kept; an account whose plan has never been read has weight 1. To set a weight by hand, fill in **Weight** under **Accounts** in the Settings view; decimals are allowed, and an empty field restores the plan default shown as a hint. Weights set by hand are saved in `account_weights` and take precedence. A weight other than 1 is shown after the account title, as in `×5`.
 
 | Service | Plan | Default weight |
 | --- | --- | --- |
@@ -49,83 +54,201 @@ When a service has several accounts, the total in the chart averages their remai
 | Claude | Max 20x | 20 |
 | Antigravity | Free, Pro, Ultra | 1 |
 
-Other services and unknown plans default to 1.
+Unrecognized plans have a default weight of 1.
 
-When the plan of an account changes, for example when Google AI Pro expires or is renewed, the plugin sends a 🎫 notification such as `🎫 Antigravity · plan Pro → Free`. Quota alerts of the account then start over with the quota of the new plan: it is only recorded, not reported as a recovery or a drop. The first plan read for an account is only recorded. The Claude plan is read once a day; after a Claude plan changes and before the new plan is read, quota alerts still compare with the quota of the old plan. The same happens when the plan changes later than the quota windows, or when reading the plan keeps failing for more than an hour, which can send one false recovery or drop alert.
+When an account's plan changes (for example when Google AI Pro expires or is renewed), the plugin sends a 🎫 notification such as `🎫 Antigravity · Plan Pro → Free`. The account's quota alerts then start over from the new plan's quota: it is recorded, not reported as a recovery or a drop. The first plan read is only recorded. Claude's plan is read once a day, so until the new plan is read, alerts still compare against the old plan's quota. When the plan changes later than the quota windows, or reading the plan has failed for more than an hour, alerts also compare against the old plan's quota and may send one wrong recovery or drop alert.
 
 ## Requirements
 
-- CPA v8.0.4 or later with plugins enabled (`plugins.enabled: true`). The plugin is built for Linux amd64/arm64, macOS amd64/arm64 and Windows amd64; the macOS builds have not been tried on a running CPA.
-- A CPA API key reserved for Lamplighter. The plugin reads the model list with it to pick ignition models.
-- For notifications, an iPhone with Bark or a service that accepts webhooks.
+- Magpie v0.1.4634 or later. Earlier versions may lack the endpoint Lamplighter reads the account list from; v0.1.4479, for example, shows no accounts.
+- The desktop app, `magpie web` and Docker deployments all work. The plugin carries its programs for Linux, macOS and Windows on amd64 and arm64, so nothing is downloaded at install time.
+- To monitor Antigravity, install the agy-cli plugin in Magpie and add the accounts there.
+- For notifications, an iPhone with Bark, or a service that receives webhooks.
 
 ## Installation
 
-1. Download the zip for the system CPA runs on from [Releases](https://github.com/PosvdM/cpa-plugin-lamplighter/releases): on Linux, `linux_amd64` when `uname -m` prints `x86_64` and `linux_arm64` when it prints `aarch64`; `darwin_arm64` for Apple silicon Macs, `darwin_amd64` for Intel Macs; `windows_amd64` for Windows.
-2. Extract the library (`lamplighter-v<version>.so` on Linux, `.dylib` on macOS, `.dll` on Windows) into the `<os>/<arch>/` folder of the CPA plugin directory, for example `plugins/linux/arm64/` or `plugins/windows/amd64/`. In a Docker deployment the plugin directory is the host folder mounted at `/CLIProxyAPI/plugins`.
-3. Add an API key to CPA's `config.yaml` and enable the plugin:
+On Magpie's **Plugins** page, open **Discover**, enter `magpie-lamplighter` in the **Have one in mind?** field and click **Install**. Or on the command line:
 
-   ```yaml
-   access:
-     api-keys:
-       - "existing key"
-       - "new key for Lamplighter"
-   plugins:
-     enabled: true
-     configs:
-       lamplighter:
-         enabled: true
-         models_api_key: "new key for Lamplighter"
-         bark_url: "https://api.day.app/your_device_key"
-   ```
+```sh
+magpie plugin add magpie-lamplighter
+```
 
-4. Restart CPA (`docker compose restart` in a Docker deployment). The plugin runs its first query about 20 seconds after CPA starts.
-5. Open **Lamplighter** in the Management Center sidebar. If you signed in to the Management Center with "remember password", the page uses that key; otherwise it asks for one.
+In a Docker deployment, run the command in the container, for example in a container named `magpie`:
 
-The plugin checks for a new version every 6 hours and whenever the management page opens. When a new version is out, a green up arrow appears to the right of the version in the management page header; clicking it opens the release page. To upgrade, update the plugin in the plugin store of the CPA Management Center; for a manual install, put the new library in the same folder, delete the old one and restart CPA.
+```sh
+docker exec magpie magpie plugin add magpie-lamplighter
+```
 
-The plugin keeps its state and quota history in `data/lamplighter/` under the plugin directory. In a Docker deployment that directory is on the host, so recreating the container keeps the data.
+When Magpie cannot read the community plugin list, this command fails; `magpie plugin add npm:magpie-lamplighter` installs the npm package by its name directly.
+
+After installation, a **Magpie-Lamplighter** page appears in the **Plugins** group of the sidebar. Opening it starts the plugin; the first query runs about 5 seconds after the plugin starts.
+
+A new installation does not ignite. Before turning ignition on:
+
+1. Set the time zone under **Time zone** in the Settings view and click **Save**. The ignition hours and the times on the page and in notifications follow it. Until a time zone is saved, the field shows the browser's time zone, which is not saved by itself.
+2. Turn off Magpie's own warm-up; see [Conflict with Magpie's warm-up](#conflict-with-magpies-warm-up).
+3. Tick **Enable ignition** under **Ignition** in the Settings view.
+
+### Plugin options
+
+The plugin has one option, `port`: the port of the internal listener, `8317` by default. Magpie's plugin page and tools reach Lamplighter through it. When another program holds the port (see [Ports](#ports)), open **Installed** on Magpie's **Plugins** page, click **Options** on Lamplighter's row and enter:
+
+```json
+{"port": 8320}
+```
+
+Or on the command line:
+
+```sh
+magpie plugin options magpie-lamplighter '{"port": 8320}'
+```
+
+### Updates
+
+The plugin checks for a new version every 6 hours and whenever the management page opens. When one is out, an update icon appears to the right of the version number in the page header. Update it on Magpie's **Plugins** page, or run `magpie plugin update`.
+
+### Data directory
+
+The plugin's configuration (`config.json`), state and quota history are kept in:
+
+| Environment | Directory |
+| --- | --- |
+| Magpie's Docker image | `/config/state/lamplighter`, in the `/config` volume, kept across Magpie upgrades and container rebuilds |
+| Linux, macOS | `$XDG_STATE_HOME/lamplighter`, or `~/.local/state/lamplighter` when `XDG_STATE_HOME` is not set |
+| Windows | `%LOCALAPPDATA%\lamplighter` |
+
+The full rules are in [进程和数据目录](./docs/architecture.md#进程和数据目录) (Chinese).
+
+### Users of the CPA edition
+
+Lamplighter started as a plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA), in [PosvdM/cpa-plugin-lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter). After moving to Magpie, install this plugin. It does not read the CPA edition's configuration or history, so the settings have to be entered again. When both run on the same machine, mind the [ports](#ports).
+
+## Management page
+
+The page opens in two ways:
+
+- **In Magpie**: open **Magpie-Lamplighter** in the **Plugins** group of the sidebar. This works in the desktop app and in `magpie web`, and needs no key. The page follows Magpie's language and theme.
+- **Directly from outside**: turn on the public listener and reach it from other devices through a reverse proxy; see "Public access" below.
+
+### Public access
+
+The public listener lets other devices reach Lamplighter in a browser or over MCP. It is set under **Advanced** in the Settings view:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `public_listen` | `127.0.0.1:8318` | Public listen address |
+| `web_enabled` | `false` | Serve the page and API on the public listener, behind `admin_key` |
+| `admin_key` | empty | Admin key; when `web_enabled` is turned on without one, the page generates one |
+| `mcp_enabled` | `false` | Serve `/mcp` on the public listener; see [MCP](#mcp) |
+| `mcp_key` | empty | MCP key; when `mcp_enabled` is turned on without one, the page generates one |
+
+With both the page and MCP off, nothing listens. The two keys do not stand in for each other: the admin key cannot reach `/mcp`, and the MCP key cannot reach the page and API. The two keys must differ: the page refuses to save equal keys, and when equal keys are written into `config.json` by hand, the public listener serves neither the page and API nor `/mcp`, and the top of the page shows why.
+
+The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. Page preferences such as blurring accounts are also kept per browser.
+
+Listening on the public internet directly is not recommended. Keep the public listener on loopback, let a reverse proxy on the same host terminate TLS, and add a firewall or allow-list as needed. The proxy must pass the `Authorization` and `MCP-Protocol-Version` headers; `/mcp` refuses browser requests whose `Origin` is not local, which ordinary MCP agents do not send.
+
+In a Docker deployment the public listener is inside the container. Set `public_listen` to `0.0.0.0:8318`, publish the port when creating the container (for example `-p 127.0.0.1:8318:8318`), and forward to it from a reverse proxy on the host.
+
+Nginx example (replace the domain and certificate paths):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name quotas.example.com;
+    ssl_certificate /etc/letsencrypt/live/quotas.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/quotas.example.com/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8318;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_read_timeout 190s;
+    }
+}
+```
+
+Caddy example (the domain resolves to the proxy, and Caddy obtains the HTTPS certificate):
+
+```caddyfile
+quotas.example.com {
+    reverse_proxy 127.0.0.1:8318 {
+        transport http {
+            response_header_timeout 190s
+        }
+    }
+}
+```
+
+Authentication and listener details are in [对外监听](./docs/architecture.md#对外监听) (Chinese).
+
+### Page contents
+
+**Quota | Settings** at the top switches views, and the browser remembers the last one. The Quota view contains:
+
+- each account's quota windows, reset times (with the weekday), data source and plan, with a refresh per account;
+- five colors shared by the quota bars and the chart: **Full** at a raw 100%, **Empty** at 0%, and **High**, **Medium** and **Low** in between, split by the first two alert thresholds; 99.6% is not colored as full even though it shows as 100%;
+- the next ignition time and current reset time of each quota group (both with the weekday), the latest result and the failure-protection state, with **Ignite now**; this part is hidden while ignition is off;
+- the quota history chart:
+  - First pick the 5-hour or the 7-day quota. The 5-hour quota offers 1, 3, 6, 12, 24 and 26 hours (6 by default); the 7-day quota offers 1, 4, 8 and 15 days, 1 month (from this day last month) and 36 days (8 days by default). Windows of other lengths appear only on the account cards. With `remember_chart_filters` on, the page remembers the last choice.
+  - 1 and 3 hours, and 1 and 4 days, end at the current time. Longer ranges end at the reset time of the selected row's current window; 6 hours, for example, shows the current 5-hour window and the last hour of the previous one. The part after now is hatched.
+  - The upper part has one strip per service, colored like the quota bars by the lowest reading in each cycle. Rows follow the order of the account cards by default, or can be sorted by lowest remaining; a service with several accounts shows a weighted total, which expands into its accounts on click. A window an account no longer reports is marked **Inactive** and kept until its last sample leaves the range.
+  - The lower part is the selected row's curve, marking resets and ignition results, with an even-pace line that falls linearly from 100% to 0% at the scheduled reset over a 5-hour or 7-day cycle. A curve above the line means slower use than even pace. Above the curve are the current remaining, the even-pace value at this moment and the difference.
+  - When the right end is the reset time, a projection is drawn from now: if the quota runs out first, the time axis marks when; if the reset comes first, the remaining quota at the reset is labeled on the right. The 5-hour quota is projected at the current rate, so the run-out time is early in the first minutes of heavy use; the 7-day quota is projected at the cycle's daily average, which is less accurate in the first day or two of a cycle.
+  - The page reads the status every 30 seconds and updates the chart when new data arrives; while the mouse is over the chart, the update waits until it leaves.
+- recent events, in columns for time, type, quota group and details. A notification triggered by an event is marked at the end of that event's row as **Notified** or **Notification failed**. 5-hour resets are hidden by default; tick **Show 5-hour resets** to see them.
+
+How the chart is computed is in [页面功能](./docs/architecture.md#页面功能) (Chinese).
+
+The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts**, and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
+
+The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
+
+The Settings view has **Accounts**, **Notification channels**, **Alert rules**, **Time zone**, **Ignition**, **Services** and **Advanced**. Switches and checkboxes save on click; text and numbers save when the field loses focus or on Enter. The result is shown to the right of the section title: **Saved; waiting to take effect**, then **In effect** once the plugin confirms, or **Not confirmed in effect** after 15 seconds. When a save fails, the title shows the field and the reason, the field is outlined in red and the draft is kept. Under **Accounts** you can set names and weights and drag the handles to reorder accounts (saved as `account_order`); Esc cancels a drag. **Send test** under **Notification channels** sends to every configured channel once the settings are in effect and shows each result.
 
 ## How quota is read
 
-**Active queries** run every 5 minutes by default, at minutes `00 / 05 / 10 / ... / 55` of each hour. In addition, the plugin queries the account once 30 seconds before and once 30 seconds after each quota window resets: the first records what is left at the end of the cycle, the second confirms the new cycle and sends the recovery notification without waiting for the next poll. A query is skipped when a newer reading already exists. Queries use the same URLs and headers as the quota page of the CPA Management Center.
+**Active queries**: every 5 minutes by default, at fixed minutes `00 / 05 / 10 / ... / 55` of each hour. In addition, 30 seconds before and 30 seconds after each quota window resets, the plugin queries that account once more: the first records the last remaining quota of the cycle, the second confirms the new cycle and sends the recovery notice promptly. A query is skipped when a newer reading already arrived. Queries go straight to the vendor's quota endpoint, not through the Magpie gateway and not through Claude Code.
 
-**Passive data**: when a Claude or Codex model request passes through CPA, the provider returns the current quota in the response, and the plugin uses it without an extra request. Antigravity, Kimi and Grok return no such data and are only queried actively. A window that only appears in the response headers and not in the usage API is no longer shown after an active query, such as the 5-hour window of a ChatGPT Pro account.
+**Magpie's quota records**: Magpie records each account's quota while it forwards requests, and the plugin reads them every 60 seconds without sending anything to the vendor. Codex and Claude have such records; Antigravity is only queried actively. When an account has had a new reading within 60 seconds before a scheduled query, that round skips the account; one account is skipped for at most 30 minutes in a row.
 
-If an account produced passive data in the 60 seconds before a scheduled query, that query is skipped for the account. An account is skipped for at most 30 minutes in a row; after that it is queried actively, so that quotas missing from the response headers, such as an unused Claude Fable quota, stay current. The chart does not draw this planned interval as missing data.
+**Credentials**: the plugin reads each account's token from Magpie's configuration directory and uses it only in memory. Claude and Codex tokens are read and never refreshed: these services replace the refresh token on every refresh, so a refresh by the plugin would invalidate the token held by Magpie or the proxied CLI and sign the account out. While such a token has expired and Magpie has not refreshed it yet, the plugin does not query the vendor and uses Magpie's latest recorded reading instead; a manual refresh (the page's refresh buttons or MCP's `refresh_quotas`) first asks Magpie to read that account's quota again. When the refresh of one account fails, the page and `refresh_quotas` give the reason, such as the account being switched off in Magpie, Magpie not having the account, or the Magpie gateway being unavailable. When Magpie brought no new reading this time, the page shows Magpie's older reading and the refresh still fails, with a reason that starts with "Magpie 这次没有读到新额度"; `refresh_quotas` does not pass on upstream error texts, and for other errors points to `list_quotas` for each account's state. Antigravity tokens are refreshed by the plugin in memory and never written back. The rules are in [凭证](./docs/architecture.md#凭证) and [额度记录](./docs/architecture.md#额度记录) (Chinese).
 
-Claude and Codex quotas have 1% precision, whether queried or read passively. Antigravity queries return decimals, and so can Kimi, whose percentage is computed from used and limit counts.
+**Network egress**: active queries use the same egress as Magpie's requests for the same account: the proxy Magpie sets for that account or service, then Magpie's global proxy, then the system proxy Magpie uses, and a direct connection when there is none. When the proxy cannot be parsed, the plugin skips the query instead of connecting directly. See [网络出口](./docs/architecture.md#网络出口) (Chinese).
 
-When an upgrade removes a window and a downgrade brings it back, its first returning reading only establishes a new alert baseline, without recovery or pre-reset notifications. Disappearance sends no notification. Absence confirmed by an active query persists across plugin restarts. Passive response headers cannot restore an absent window; only a later successful active query can restore it. When reading an older state file, the plugin attempts to recover the last actively confirmed window set. Existing quota groups whose set cannot be recovered wait for a successful active query; response headers cannot add windows to those groups in the meantime. An absent 5-hour window is not ignited; ignition resumes automatically when it returns. History retains retired windows.
+Claude and Codex quotas are whole percentages; Antigravity's have decimals. When a window disappears on a plan upgrade and reappears after a downgrade, its first reading only sets a new alert baseline, without a recovery notice or pre-reset reminder; a window that disappears is not notified, and the history keeps it.
 
-**Network exit**: active queries leave through the same exit that CPA uses for model requests of the account: the account's `proxy_url`, then the global `proxy-url`, then proxies from environment variables, then a direct connection. When an account's `proxy_url` cannot be parsed, the plugin skips the query instead of connecting directly.
+## Ignition
 
-## Window ignition
+A 5-hour quota window starts counting from the first request after a reset. If nobody uses the account after the reset, the window does not start. With ignition on, Lamplighter sends a request right after each reset so that windows roll on back to back. The rules:
 
-A 5-hour window starts with the first request after a reset. If nobody uses the account after a reset, no window runs. Lamplighter sends a request right after each reset so that the windows follow each other. Kimi windows switch at fixed times and Grok has no 5-hour window, so neither is ignited. The rules:
+- Times follow the time zone set in the Settings view, not the time zone of the server Magpie runs on. Without one, the time zone of the system the program runs on is used, which is UTC in Magpie's Docker image.
+- The first ignition each day is at `07:00`, then 3 seconds after each reset, until `22:30`. A reset later than that waits until 07:00 the next day.
+- Requests go through the Magpie gateway, pinned to the account by a request header, so the gateway does not switch to another account. Claude requests are forwarded by Claude Code inside Magpie and carry Claude Code's own system prompt, so they use more input tokens than a direct request.
+- The request only asks the model to reply `OK` and carries no tools. The request is closed 2 seconds after the first output; the request of each candidate model takes 2 minutes at most from sending it to the end; when the gateway answers an error status, reading the error body may take up to 10 more seconds. Moving on to the next candidate and the confirmation that follows take extra time, so one ignition can take longer.
+- The ignition model is chosen automatically: the newest Luna for ChatGPT, the newest Haiku for Claude, and the newest Flash for Antigravity's Gemini group. Once Magpie lists a new model, the next ignition uses it; when the account cannot use the model, that ignition moves on to the next candidate, and a model the vendor refused is not tried again for 24 hours. A model can also be set in the configuration.
+- An ignition counts as successful only once the plugin sees the 5-hour window with a fixed reset time in the future. The Magpie gateway does not forward Codex's quota response headers, so Codex and Antigravity ignitions are confirmed by the active queries that follow: several checks whose waits add up to about 75 seconds, plus the time each query takes.
 
-- Times use the plugin time zone, which follows the CPA server by default.
-- The first ignition each day is at `07:00`; after that, 3 seconds after each reset, until `22:30`. A reset later than that waits for 07:00 the next day.
-- The request asks the model to reply `OK`, declares no tools and sets no output-token limit. The first nonempty streamed output (text, visible reasoning or tool arguments) starts an independent 2-second timer that closes the upstream stream. A stream that ends sooner is cleaned up immediately. Heartbeats and lifecycle events do not start the timer, and this deliberate cutoff does not trigger model fallback.
-- Models are picked automatically: the newest Luna for ChatGPT, the newest Haiku for Claude, and the newest Flash for Antigravity's Gemini group. A model is used from the first ignition after CPA lists it; when the provider refuses it, that ignition falls back to the next candidate; when the fallback works, an event is recorded and the quota group skips the refused model for 24 hours. They can also be set in the config.
-- An ignition counts as successful only when the 5-hour window afterwards has a fixed reset time in the future.
+The model, reply, usage and duration of each ignition are written to Magpie's log; see [调用日志](./docs/architecture.md#调用日志) (Chinese).
 
-Before the first output, waiting follows CPA's own behavior; `request_timeout_seconds` does not limit model startup. Stopping the plugin closes requests whose stream IDs are available; a request still starting must wait for CPA to return its stream ID. See [Streaming and cancellation (in Chinese)](./docs/architecture.md#流式执行与取消) for these limits.
+### Conflict with Magpie's warm-up
 
-After each model call, the CPA server log records the service, model, correlation identifiers, received text, host-reported usage and its completeness, end reason, time to first output and total duration. Text, including visible reasoning and tool arguments, is capped at 4096 Unicode characters and marked when truncated. Usage retains CPA's numbers without estimating tokens. CPA translation may fill missing counters with zeros or combine token categories, so Antigravity usage is marked partial even after a natural end. Other completeness labels describe host-protocol accounting only; they do not guarantee that all upstream usage or breakdowns were returned. Records exclude credentials, full requests and encrypted reasoning, and are not added to page events or quota history.
+Magpie's own warm-up (the built-in plugin **Warm-up and check-in**) also sends requests after a window resets or at set times, starting the 5-hour windows of Codex and Claude. Running it together with Lamplighter's ignition ignites twice. When Lamplighter's ignition is on and Magpie also warms up the 5-hour window of the same accounts, the top of the page lists those accounts; turn their warm-up off in Magpie. Warm-up only at 7-day resets does not conflict.
 
-**Failure protection**: the retry and pause rules below apply to scheduled ignition. A failed "Ignite now" request only displays the error and records an event. It does not retry automatically, count toward failure protection, or change the existing automatic schedule. Successful manual ignition is recorded as usual.
+### Failure protection
 
-- An invalid credential (such as 401) or a suspended account (such as Google's `TOS_VIOLATION`) stops scheduled ignition for that account without daily retries, with one 🔑 or ⛔ notification (the suspension notice includes the appeal link). Ignition resumes after you log in again or update the credential, or after a successful "Ignite now". Quota queries also report lasting authentication failures (3 in a row over at least 30 minutes) and suspended accounts; ignition and queries report the same problem once, also across plugin restarts. When the problem ends, a ✅ credential notification follows.
-- Rate limits (429), unavailable models, or a request that succeeded without starting the window pause ignition for that quota group until 07:00 the next day, with one notification; for rate limits it is ⏳ rate limited. Notifications carry only the first sentence of the provider's error; the full error is in the event details on the page.
-- Network and server errors are retried after 5 and 15 minutes; a third failure also pauses until the next day.
-- When the quota ran out before the reset, CPA cools the account down until a dozen or so seconds after the reset. An ignition that hits this cooldown retries as soon as it ends and is not counted as a failure.
-- When the account's 7-day quota (or another window other than the 5-hour one) is used up, scheduled ignition for the quota group stops until that window resets and a query shows the quota is back; the page shows "7 天额度已用完". "Ignite now" still works.
-- When the quota comes back early, for example after a reset card, while CPA still cools the account down until the original reset, CPA rejects every request and ignition in between. The plugin sends one ⚠️ notification and shows a note on the account card; clear the account's cooldown in the CPA Management Center.
+The retry and pause rules below apply to automatic ignition. When **Ignite now** fails, the page shows the error and an event is recorded; it does not retry, does not count as a failure and leaves the automatic schedule unchanged. A success is recorded as usual.
+
+- When the credential is invalid (401 and similar) or the account is suspended (for example Google returns `TOS_VIOLATION`), automatic ignition stops for that account and does not retry each day, and a 🔑 or ⛔ notification is sent once (the suspension notice includes the appeal link). Signing in again in Magpie resumes it; a successful **Ignite now** does too. Quota queries that keep failing authentication (3 times in a row over at least 30 minutes) or find the account suspended raise the same alert; one problem is alerted once, also across restarts. When it clears, ✅ credential restored is sent.
+- A vendor rate limit (429), an unavailable model, or a successful request that does not start the window pauses that quota group until 07:00 the next day and sends one notification; for rate limits it is ⏳ rate limited. The notification gives only the first sentence of the upstream error; the full error is in the event details on the page.
+- Network and server errors are retried after 5 and then 15 minutes; a third failure also pauses until the next day.
+- After an account is rate-limited or runs out of quota, Magpie rests it until the vendor's reset time. When an ignition hits such a rest that ends within 10 minutes, it retries once the rest ends and does not count as a failure.
+- When the 7-day quota (or another non-5-hour window) of the same account is used up, automatic ignition of that quota group stops until that window resets and a query sees the quota back; the page shows "7-day quota used up". **Ignite now** is not affected.
+
+The classification is in [失败分类和保护](./docs/architecture.md#失败分类和保护) (Chinese).
 
 ## Notification example
 
-Notifications use the Management Center language from the last time the management page was opened, Chinese or English; until the page has been opened, they are in Chinese.
+Notifications use the page language from the last time the management page was opened (Chinese or English, following Magpie), or Chinese if it has never been opened.
 
 ```text
 🟡 Claude · 7d 48% | 03d
@@ -134,126 +257,118 @@ Notifications use the Management Center language from the last time the manageme
 7d: 48% | 03d | 10/07 14:00
 ```
 
-Title icons: 🟡 remaining fell to the first threshold (50% by default), 🔴 to the second threshold (20% by default) or below, ✅ recovered, ⏰ reset reminder, 🎫 plan changed, 🔑 credential invalid, ⛔ account suspended, ⏳ rate limited, ✅ credential works again, ⚠️ a problem that needs action, such as ignition paused or a CPA cooldown that outlasts the quota. Each body line shows the window, the remaining quota, the time until reset, and the reset time. The first time the plugin sees a quota window it only records the current level and sends nothing.
+Title icons: 🟡 remaining fell to the first threshold (50% by default), 🔴 to the second (20% by default) or lower, ✅ quota recovered, ⏰ reset reminder, 🎫 plan changed, 🔑 credential invalid, ⛔ account suspended, ⏳ rate limited, ✅ credential restored, ⚠️ ignition paused or another problem that needs attention. Each body line is: window, remaining quota, time until reset, reset time. The first time a quota window is seen, its state is only recorded, not notified.
 
 ## Configuration
 
-All settings live under `plugins.configs.lamplighter` in `config.yaml`. On the management page, use the "Quota | Settings" switch at the top to open the settings view. Switches and checkboxes save when clicked; text and numbers save when you leave the field or press Enter. Save results appear to the right of section headings, or beside each group legend under "Advanced". The three alert thresholds save together and must be in descending order, with equal values allowed. Changes apply without a restart. A saved field shows "Saved; waiting to take effect", then "In effect" after the plugin confirms it; confirmation waits at most 15 seconds after the save succeeds, even if status requests hang. If still unconfirmed at the deadline, it shows "Not confirmed in effect"; a late confirmation does not change that wait result.
-
-With no failures, the heading shows the most recent save's progress. A failed save takes priority, with the field name and reason; failed controls have red borders and keep their input drafts. Saving another item cannot hide the failure; it clears only when the failed item saves successfully. For multiple failures, the latest reason is shown with the number of other failures. On narrow screens, only "Save failed" and the failure count remain visible; field names and reasons are hidden to keep long text out of the heading. Editing revokes older requests' ability to update that item's result, so late responses and confirmations cannot overwrite later edits. Unresolved failures remain visible. MCP settings also show why the endpoint failed to start.
+The configuration is kept in `config.json` in the [data directory](#data-directory). It is normally changed in the Settings view of the management page and takes effect on save, without a restart. The plugin reads the file only when it starts and afterwards overwrites it with what the page saves. To edit it by hand, switch Lamplighter off on Magpie's **Plugins** page first, edit the file, switch it on again, then open the page once.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `bark_url` | empty | Bark push URL up to the device key; empty disables Bark |
-| `bark_group` | `CPA` | Bark notification group |
-| `bark_icon` | Lamplighter logo | Notification icon |
-| `webhook` | empty | Generic webhook, see [Webhook](#webhook) |
-| `notice_threshold` | `50` | First alert level (remaining percent) |
-| `low_threshold` | `20` | Second alert level |
-| `critical_threshold` | `10` | Third alert level |
-| `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Recovery notifications, see below |
-| `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Reset reminders, see below |
-| `timezone` | empty | Time zone for displayed times and the ignition window, such as `Asia/Shanghai`; empty follows the CPA server (set by `TZ` in the official Docker image) |
-| `timezone_offset_hours` | empty | Fixed UTC offset such as `8`; used only when `timezone` is empty |
+| `bark_url` | empty | Bark push URL, up to the device key; empty means no Bark notifications |
+| `bark_group` | `Magpie` | Bark notification group |
+| `bark_icon` | Lamplighter icon | Notification icon |
+| `webhook` | empty | Generic webhook; see [Webhook](#webhook) |
+| `notice_threshold` | `50` | First alert threshold (remaining percent) |
+| `low_threshold` | `20` | Second alert threshold |
+| `critical_threshold` | `10` | Third alert threshold |
+| `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Notify when the quota recovers; see below |
+| `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Remind before a reset; see below |
+| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image). To follow the system's time zone, leave it empty; `Local` counts as an invalid name. Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup and treated as empty |
+| `timezone_offset_hours` | empty | A fixed UTC offset such as `8`; used only when `timezone` is empty |
 | `poll_interval_seconds` | `300` | Active query interval, at least 60 |
-| `request_timeout_seconds` | `20` | Timeout for HTTP requests such as quota queries and notifications; does not limit ignition model startup or time to first output |
-| `passive_skip_seconds` | `60` | Skip the query when passive data arrived this many seconds before it; `0` never skips |
-| `passive_skip_max_minutes` | `30` | Longest run of skipped queries for one account |
-| `models_api_key` | empty | CPA API key for reading the model list; without it ignition cannot pick a model. The management key does not work here; the page does not save the management key or a key CPA does not accept, and says why |
-| `cpa_base_url` | `http://127.0.0.1:8317` | Address the plugin uses to reach CPA; change it when CPA uses another port or TLS |
+| `request_timeout_seconds` | `20` | Timeout of quota queries, notifications and other HTTP requests, 5 to 120; does not limit ignition |
+| `passive_skip_seconds` | `60` | Skip the active query when Magpie has a new reading this many seconds before it; `0` never skips |
+| `passive_skip_max_minutes` | `30` | How many minutes one account may be skipped in a row |
 | `history_retention_days` | `40` | Days of quota history to keep |
-| `remember_chart_filters` | `false` | The management page remembers, in the current browser, the quota window, time range and order last chosen in the quota chart; when off, the page opens with the defaults |
-| `account_weights` | empty | The weight of each account in the total of several accounts, keyed by credential file name, a number above 0; accounts without one use the default of their plan, see above |
-| `account_order` | empty | Account order by credential file name; unlisted accounts follow in default order and missing entries are ignored |
-| `mcp_enabled` | `false` | Enable the independent MCP server, see [MCP](#mcp) |
-| `mcp_listen` | `127.0.0.1:8318` | MCP listen address |
-| `mcp_key` | empty | Dedicated MCP Bearer key; empty prevents listening |
-| `config_token` | empty | Configuration acknowledgment token generated on each page save; usually no manual setting is needed. See [Architecture (in Chinese)](./docs/architecture.md#与-cpa-的接口) |
-| `data_dir` | `data/lamplighter` in the plugin directory | State and history directory |
+| `remember_chart_filters` | `false` | Remember the quota window, range and sort last chosen in the quota history chart, in this browser |
+| `account_names` | empty | Account names, keyed by the account's identifier in Magpie (such as `codex/<id>`) |
+| `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
+| `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
+| `public_listen`, `web_enabled`, `admin_key`, `mcp_enabled`, `mcp_key` | | See [Public access](#public-access) |
+| `config_token` | empty | A confirmation token the page generates on each save; no need to set it |
 
-Alert thresholds are normalized to `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`: later levels cannot exceed earlier ones. The normalized values take effect and the adjustment is logged.
+The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.
 
-With both `bark_url` and `webhook.url` empty, notifications are off: nothing is sent and no failed notifications are logged as events. Quota alerts from that time are not sent once a URL is set; Did Codex Reset signals that have not expired are still sent.
+With both `bark_url` and `webhook.url` empty, notifications are off: nothing is sent and no delivery failure is recorded. Quota alerts from that time are not sent later when an address is filled in.
 
-Recovery notifications and reset reminders are set per window: `five_hour` for 5-hour windows and `seven_day` for 7-day windows.
+Recovery notices and pre-reset reminders are set per window: `five_hour` for the 5-hour window, `seven_day` for the 7-day window:
 
 | Key | Values | Description |
 | --- | --- | --- |
-| `recovery_notify` | `off`, `all`, `after_exhausted` | `all`: notify every time the window resets; `after_exhausted`: after the window runs out, notify once at its next reset |
-| `reset_reminder` | `off`, `all`, `has_remaining` | 5-hour windows are reminded 1 hour before the reset, 7-day windows 1 day before; `has_remaining`: remind only when more than `critical_threshold` is left |
+| `recovery_notify` | `off`, `all`, `after_exhausted` | `all`: notify on every reset; `after_exhausted`: after the window was used up, notify once at the next reset |
+| `reset_reminder` | `off`, `all`, `has_remaining` | Remind 1 hour before a 5-hour window resets and 1 day before a 7-day window resets; `has_remaining`: only while the remaining quota is above `critical_threshold` |
 
-The first line of a recovery notification is what was left when the previous cycle ended. This value comes from the active query 30 seconds before the reset; usage in those last 30 seconds is not counted. Without a reading from the last 15 minutes before the reset, the line is left out. A cycle that was never used (still 100% before the reset) is not notified. A window that is neither a 5-hour nor a 7-day window counts as a 7-day window once it was seen more than a day before its reset, and as a 5-hour window otherwise.
+The first line of a recovery notice is the remaining quota at the end of the previous cycle. It comes from the active query 30 seconds before the reset, so use in the last 30 seconds is not counted. Without a reading in the last 15 minutes before the reset, the line is left out. A cycle that was never used (still 100% before the reset) is not notified.
 
-`notify_recovery` and `notify_reset_reminders` set both windows of the matching key to `all` when `true` and to `off` when `false`. They apply only when `recovery_notify` or `reset_reminder` is absent; changing the matching notification setting on the management page replaces them with the new keys.
-
-Ignition settings live under `ignition`:
+Ignition settings are under `ignition`:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `enabled` | `true` | Enable window ignition |
+| `enabled` | `false` | Ignite automatically |
 | `start_hour` | `7` | Hour of the first ignition each day |
-| `end_hour` | `22` | Hour at which ignition stops |
-| `end_grace_minutes` | `30` | Minutes after `end_hour` that are still allowed |
-| `grace_seconds` | `3` | Seconds to wait after a reset |
-| `failure_retry_seconds` | `300` | Wait before the first retry after a transient error |
+| `end_hour` | `22` | Hour after which ignition stops each day |
+| `end_grace_minutes` | `30` | Minutes past `end_hour` still allowed |
+| `grace_seconds` | `3` | Seconds to wait after a reset before igniting |
+| `failure_retry_seconds` | `300` | Wait before the first retry after a temporary error |
 | `failure_backoff_multiplier` | `3` | Factor applied to the wait on each retry |
-| `max_transient_failures` | `3` | Transient errors that pause ignition until the next day |
-| `post_success_hold_seconds` | `60` | Minimum wait after a successful ignition |
+| `max_transient_failures` | `3` | Temporary errors after which ignition pauses until the next day |
+| `post_success_hold_seconds` | `60` | Minimum wait after a successful ignition before another |
 
-Per-service settings live under `providers`, keyed `codex`, `claude`, `antigravity`, `kimi` and `xai` (Grok). CPA can name Kimi accounts `kimi-ai` and similar; any of these keys counts as `kimi`. Kimi and Grok cannot be ignited, so `ignite` has no effect for them:
+Per-service settings are under `providers`, keyed `codex`, `claude` and `antigravity`:
 
 | Key | Description |
 | --- | --- |
-| `monitor` | Monitor this service |
-| `ignite` | Ignite this service |
-| `model` | Ignition model; empty picks one automatically. It must appear in CPA's model list |
-| `groups` | Antigravity only: quota groups to ignite, default `["Gemini"]` |
-| `models` | Antigravity only: model per quota group, for example `{"Gemini": "gemini-3.5-flash-lite"}` |
+| `monitor` | Monitor this service; on by default. A service that is not monitored is not ignited either |
+| `ignite` | Ignite automatically; on by default for `codex` and `claude`, off for `antigravity` |
+| `model` | Ignition model, chosen automatically when empty; it must be in Magpie's model list for that service, as a model name or a full ID with the service prefix, such as `agy-cli/gemini-3-flash` |
+| `groups` | Antigravity only: quota groups that may be ignited, `["Gemini"]` by default; an empty list `[]` ignites none, and the default applies when the key is absent |
+| `models` | Antigravity only: a model per quota group, such as `{"Gemini": "gemini-3-flash"}` |
 
-`codex_reset_updates` controls Did Codex Reset forwarding: `enabled` (default `false`), `poll_seconds` (default `300`, at least 300) and `notify_current_pending` (default `true`: on first enable, notify the pending scheduled reset). Only schedules that have not passed and resets completed in the last 48 hours are forwarded, and a later post about a schedule is sent as an update only when its confidence, time or plans change; schedule times are shown in the local time zone, and date-only schedules as a time range. Did Codex Reset is a third-party monitor; its signals are not official OpenAI announcements.
+`codex_reset_updates` controls Did Codex Reset forwarding: `enabled` (default `false`), `poll_seconds` (default `300`, at least 300) and `notify_current_pending` (default `true`: the first time it is turned on, send the schedule still pending). Only schedules not yet due and completions from the last 48 hours are forwarded; when several posts announce the same schedule, another notice is sent only when the confidence, time or scope changes. Did Codex Reset is a third-party monitor, and its signals are not confirmed by OpenAI.
 
-Full example:
+Example:
 
-```yaml
-plugins:
-  configs:
-    lamplighter:
-      enabled: true
-      bark_url: "https://api.day.app/your_device_key"
-      models_api_key: "new key for Lamplighter"
-      ignition:
-        enabled: true
-        start_hour: 7
-        end_hour: 22
-      providers:
-        codex:
-          ignite: true
-        claude:
-          ignite: true
-        antigravity:
-          ignite: true
-          groups: ["Gemini"]
-      codex_reset_updates:
-        enabled: true
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "bark_url": "https://api.day.app/your_device_key",
+  "ignition": {"enabled": true, "start_hour": 7, "end_hour": 22},
+  "providers": {
+    "antigravity": {"ignite": true, "groups": ["Gemini"]}
+  },
+  "codex_reset_updates": {"enabled": true}
+}
 ```
+
+Objects such as `ignition` and `providers` are saved whole per top-level key; the page builds on the object already saved.
 
 ## MCP
 
-MCP lets coding agents query quota through standard Streamable HTTP, independently of the client. The plugin listens on `127.0.0.1:8318` at `/mcp` and requires a dedicated Bearer key. The CPA management key does not authenticate this endpoint. Protocol versions `2025-03-26` and `2025-06-18` are supported; responses are JSON only, without SSE.
+MCP lets coding agents read the quota. There are two ways in:
 
-Enable MCP in the settings view; if no key is set, the page generates one in the same save. You can also generate a new key separately or configure these keys under `plugins.configs.lamplighter`:
+| Way | Address | Authentication | Tool names |
+| --- | --- | --- | --- |
+| Magpie's plugin tools | `/mcp/magpie/tools/magpie-lamplighter` on the Magpie gateway | Same as the Magpie gateway | Prefixed with `magpie-lamplighter_`, such as `magpie-lamplighter_list_quotas` |
+| Public listener | `/mcp` on the public listener, `http://127.0.0.1:8318/mcp` by default | `mcp_key` | No prefix |
 
-```yaml
-mcp_enabled: true
-mcp_listen: "127.0.0.1:8318"
-mcp_key: "<dedicated MCP key>"
+### Magpie's plugin tools
+
+Once the plugin is on, Magpie serves its tools as an MCP server; nothing needs to be turned on in Lamplighter. On Magpie's **Plugins** page, Lamplighter's row lists the tools and can copy the MCP address. Magpie also adds a server named `magpie-lamplighter` to the MCP servers in its **Library**, which agents get directly while the MCP router is on. With the gateway on its default `127.0.0.1:3425`, the address is:
+
+```text
+http://127.0.0.1:3425/mcp/magpie/tools/magpie-lamplighter
 ```
 
-Use a cryptographic random generator for the key, for example 32 random bytes encoded as base64url with an `llmcp_` prefix. An empty key prevents the listener from starting and reports the reason in management status. Changes to the switch, address or key apply automatically. Status uses `config.mcp_key_set` only to indicate whether a key is set. The top-level `config_applied_token` confirms completion of configuration application; check the listener state and error to determine whether the endpoint is usable. The original key is stored in CPA configuration and can be read by anyone with the management key. In Docker, the loopback address belongs to the CPA container. A local agent can share that network namespace; other deployments should connect a reverse proxy through a restricted container network without publishing an unencrypted MCP port.
+Requests from the same machine need no key; from other machines or from outside a Docker container they need a Magpie gateway key. Magpie gives each tool call at most 55 seconds, so `refresh_quotas` waits about 50 seconds at most this way.
 
-### Client connections
+### /mcp on the public listener
 
-The default URL within the same network namespace is `http://127.0.0.1:8318/mcp`. Replace it with an HTTPS URL for remote access. `<key>` below is the dedicated MCP key.
+Under **Advanced** in the Settings view, tick **Enable the MCP endpoint**; without a key, the page generates one in the same save, and a new key can also be generated separately. The same section gives client configurations for Claude Code, generic JSON and mcp-remote. For remote use, go through an HTTPS reverse proxy; see [Public access](#public-access).
+
+The endpoint uses Streamable HTTP with protocol versions `2025-03-26` and `2025-06-18`, and returns JSON only, without SSE. Each server instance runs at most 4 tool calls at a time; beyond that it answers at once with a JSON-RPC `-32000` busy error, and the call can be retried later. Query tools time out after 10 seconds and `refresh_quotas` after 180 seconds. Protocol details are in [MCP](./docs/architecture.md#mcp) (Chinese).
+
+In the examples below, `<key>` is the MCP key; for remote connections, use the HTTPS address instead.
 
 Claude Code:
 
@@ -261,80 +376,41 @@ Claude Code:
 claude mcp add --transport http lamplighter http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 ```
 
-Codex CLI, with the key provided through an environment variable:
+Codex CLI (key provided through an environment variable):
 
 ```sh
 export LAMPLIGHTER_MCP_KEY='<key>'
 codex mcp add lamplighter --url http://127.0.0.1:8318/mcp --bearer-token-env-var LAMPLIGHTER_MCP_KEY
 ```
 
-Generic client configuration example; check the client's documentation for its configuration format:
+Generic client configuration (check your client's documentation for the exact fields):
 
 ```json
 {"mcpServers":{"lamplighter":{"type":"http","url":"http://127.0.0.1:8318/mcp","headers":{"Authorization":"Bearer <key>"}}}}
 ```
 
-Clients that only support stdio can connect through `mcp-remote`:
+Clients that support only stdio can connect through `mcp-remote`:
 
 ```sh
 npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
-```
-
-### HTTPS reverse proxy
-
-Do not expose the listener directly to the public Internet. For remote use, keep MCP on loopback and terminate TLS with a reverse proxy on the same host. Add firewall restrictions or an allowlist as needed. Preserve the `Authorization` and `MCP-Protocol-Version` headers. Browser requests with a non-local `Origin` are rejected; ordinary MCP agents usually omit this header.
-
-Nginx example; replace the domain and certificate paths:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name quotas.example.com;
-    ssl_certificate /etc/letsencrypt/live/quotas.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/quotas.example.com/privkey.pem;
-    location = /mcp {
-        proxy_pass http://127.0.0.1:8318/mcp;
-        proxy_set_header Authorization $http_authorization;
-        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
-        proxy_read_timeout 190s;
-    }
-}
-```
-
-Caddy example; point the domain at the proxy and let Caddy obtain the HTTPS certificate:
-
-```caddyfile
-quotas.example.com {
-    reverse_proxy /mcp 127.0.0.1:8318 {
-        transport http {
-            response_header_timeout 190s
-        }
-    }
-}
 ```
 
 ### Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `list_quotas(provider?, account?, model?)` | Current windows, account plans and weights, weighted remaining quota, earliest account exhaustion, resets, forecasts, hourly consumption, seven-day even-pace budgets, freshness and source, credential authentication errors, account suspension and next ignition |
-| `get_quota_history(provider?, account?, window?, range?)` | Quota history including retired windows; at most 200 points per series and 2000 points per response |
-| `refresh_quotas(account?)` | Active query, globally limited to once per 60 seconds; returns remaining wait seconds when throttled and waits at most 180 seconds for results |
-| `get_quota_events(since?, limit?)` | Recent reset, exhaustion, ignition success/failure, and credential problem (invalid credential, suspended account, rate limit) and recovery events; `since` is an RFC3339 timestamp with timezone and `limit` an integer from 1 to 100 |
+| `list_quotas(provider?, account?, model?)` | Current windows, each account's plan and weight, weighted remaining, the account that runs out first, reset and projected run-out times, hourly use, 7-day even-pace budget, data source and freshness, invalid credentials, suspended accounts and the next ignition time |
+| `get_quota_history(provider?, account?, window?, range?)` | Quota history, including windows that have disappeared; at most 200 points per series and 2000 per call |
+| `refresh_quotas(account?)` | Active query; at most once every 60 seconds overall, returning the seconds to wait when called too soon; on failure returns `ok: false` and the reason |
+| `get_quota_events(since?, limit?)` | Recent resets, exhaustion, ignition successes and failures, invalid credentials, suspended accounts, rate limits and restored credentials; `since` is an RFC 3339 time with time zone, `limit` an integer from 1 to 100 |
 
-Each MCP server instance executes at most four tool calls concurrently, including calls within a batch. Additional calls immediately receive a JSON-RPC `-32000` busy error and may be retried later. Query tools have a 10-second timeout; `refresh_quotas` has a 180-second timeout.
+Account identifiers in tool results use the account name, with emails in it masked; without a name they are `***` plus the last two characters of the email user name, such as `***rk`. Identifiers that are equal after masking get `#1`, `#2` suffixes. Tools never return full emails, whatever the page's blur switch says. The `account` argument takes a returned identifier, the base identifier before the suffix, the original account name or the full email, all matched exactly; `refresh_quotas` needs a single match.
 
-MCP account labels use the first line of the note when present, first masking complete emails of all known accounts, then masking every remaining non-whitespace segment containing `@`. Quotes are removed from the user name before keeping its last two characters. Without a note name, the label is `***` plus the last two characters of the email user name, for example `***rk`; shorter user names keep all their characters. The domain and user-name length are not returned. Accounts without a note name or email use `account-number`. Labels that are identical after masking receive `#1`, `#2` and further suffixes, avoiding every base label and previously generated label so that each complete label identifies one account. `retired account` is reserved for retired accounts; a current account with that base label also receives a suffix. Current quotas, earliest account exhaustion, history and events all use these labels and never return full emails. This rule is independent of the page's blur switch.
-
-`account` accepts an exact complete label, the base label before the suffix, the original first note line or the full email. Complete labels take priority and select one account. Shared base labels or note names select multiple accounts, which `refresh_quotas` rejects; use a complete label or a unique email instead. `account="retired account"` selects only retired-account history; use the complete suffixed label or a unique email for a current account with that name. Omitting `account` selects all accounts.
-
-After CPA starts, the engine waits about 20 seconds before its first full poll. While the engine is not running or that poll is incomplete, the three read tools return `ready: false`, `state: "starting"`, `certain: false` and `retry_after_seconds: 30`, with an explanatory note and no data. This is not a tool error. A failed credential-list read allows the read tools to return results instead of waiting indefinitely for startup. When the plugin is disabled in the configuration, tools return `ready: false`, `state: "disabled"` and `certain: false`. `refresh_quotas` only requires a running engine and need not wait for the first full poll; non-running or disabled responses do not consume its 60-second refresh limit. Accepted refreshes on a running engine count toward the limit even if they fail.
-
-Times include both ISO timestamps with timezone and relative descriptions. Forecasts depend on continued use at the measured rate and are not guarantees; stale or unknown predictions are `null`. A `model` query returns candidate quota pools with `certain: false`: CPA also applies model aliases, credential availability, cooldowns and session routing during actual requests, so the plugin cannot guarantee which account will be selected. After a 429, refresh first and use the actual reset and CPA cooldown times to schedule a retry rather than relying only on a forecast. Events are filtered from at most 200 retained engine events of all kinds.
+The plugin waits about 5 seconds after it starts before the first round of queries. Until that round completes, the reading tools return `ready: false`, `state: "starting"` and `retry_after_seconds: 30`, without data. Times include an ISO time with time zone and a relative time. Projections depend on the rate of use and are not guaranteed. A `model` query returns candidate quota groups marked `certain: false`: Magpie picks the account for a real request by its own rules, and the plugin cannot say which one it will be. Field meanings are in [工具数据](./docs/architecture.md#工具数据) (Chinese).
 
 ## Webhook
 
-Besides Bark, you can set up one webhook to send notifications to Feishu, ntfy, DingTalk, Telegram and other services, or to your own program. With both channels set, every notification goes to both; it counts as delivered as soon as one of them accepts it and is not retried, and the channel that failed is logged as a "Notification failed" event.
+Besides Bark, a webhook can send notifications to Feishu, ntfy, DingTalk, Telegram and other services, or to your own program. With both channels configured, every notification goes to both; it counts as delivered when either succeeds and is not retried, and the failed channel is recorded as a delivery failure in the events.
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -342,100 +418,79 @@ Besides Bark, you can set up one webhook to send notifications to Feishu, ntfy, 
 | `method` | `POST` | `GET`, `POST` or `PUT` |
 | `headers` | empty | Request headers, such as `Authorization: Bearer <token>` |
 | `body` | empty | Request body; empty sends the built-in JSON message. Not allowed with `GET` |
-| `success_json` | empty | Success condition: these top-level fields of the JSON response must have the given values, such as `code: 0`; empty only requires a 2xx HTTP status |
+| `success_json` | empty | Success condition: these top-level fields of the JSON response must equal the given values, such as `{"code": 0}`; empty only requires an HTTP 2xx status |
 
-The URL, headers and body can use placeholders:
+The URL, headers and body may contain placeholders:
 
 | Placeholder | Content |
 | --- | --- |
 | `{{title}}` | Notification title |
 | `{{body}}` | Notification body |
-| `{{text}}` | Title and body, separated by a line break |
-| `{{url}}` | Link: the history page for Did Codex Reset notifications, the https appeal link for account suspension notices, empty otherwise |
-| `{{priority}}` | `high` when quota drops to the third threshold or runs out, the plan changes, ignition pauses, a credential is invalid, an account is suspended or rate limited, or a CPA cooldown is not cleared; `normal` otherwise |
-| `{{kind}}` | Notification type: `quota` quota drop, `recovery` quota recovered, `reminder` reset reminder, `plan` plan changed, `cooldown` CPA cooldown not cleared, `circuit` ignition paused, `credential` credential invalid, `suspended` account suspended, `rate_limited` rate limited, `credential_ok` credential works again, `codex_reset` Did Codex Reset, `test` test notification |
-| `{{label}}` | Quota group, such as `GPT#rk` or `GPT#main`; empty for notifications not about a quota group |
-| `{{time}}` | Time sent, in RFC 3339 format and the plugin time zone |
+| `{{text}}` | Title and body separated by a newline |
+| `{{url}}` | Link: the history page for Did Codex Reset notices, the https appeal link for suspension notices, empty otherwise |
+| `{{priority}}` | `high` when the quota falls to the third threshold or runs out, the plan changes, ignition pauses, the credential is invalid, the account is suspended or rate-limited; `normal` otherwise |
+| `{{kind}}` | Notification type: `quota` quota drop, `recovery` quota recovered, `reminder` reset reminder, `plan` plan changed, `circuit` ignition paused, `credential` credential invalid, `suspended` account suspended, `rate_limited` rate limited, `credential_ok` credential restored, `codex_reset` Did Codex Reset, `test` test notification |
+| `{{label}}` | Quota group, such as `GPT#rk` or `GPT#main`; empty for notifications not tied to a quota group |
+| `{{time}}` | Send time in RFC 3339, in the plugin's time zone |
 
-Placeholders are escaped for where they appear: URL-encoded in the URL; JSON-string-escaped in a JSON body, so put them inside quotes; form-encoded in a form body; with line breaks replaced by spaces in headers. Without a `Content-Type` header, a body that is JSON (with placeholders inside quotes) is sent as JSON and anything else as plain text.
+Placeholders are escaped for where they appear: URL-encoded in the URL; JSON-string-escaped in a JSON body, so they go inside quotes; form-encoded in a form body; newlines turned into spaces in headers. Without a `Content-Type` header, a body that is JSON (placeholders inside quotes) is sent as JSON, and anything else as plain text.
 
-Without `body`, the webhook receives this JSON:
+The JSON sent when `body` is empty:
 
 ```json
 {"source":"lamplighter","kind":"quota","title":"🔴 GPT#rk · 5h 8% | 03h","body":"5h: 8% | 03h | 10/10 19:00\n7d: 60% | 04d | 10/14 09:00","text":"…","url":"","priority":"high","label":"GPT#rk","time":"2026-10-10T16:00:00+08:00"}
 ```
 
-Settings for common services follow. They are format examples based on each service's documentation and have not all been tested.
+Formats for common services follow. They are based on each service's documentation and have not all been tested.
 
 | Service | `url` | `body` | `success_json` |
 | --- | --- | --- | --- |
-| ntfy | `https://ntfy.sh/` | `{"topic":"<topic>","title":"{{title}}","message":"{{body}}"}` | not needed |
-| Feishu / Lark | `https://open.feishu.cn/open-apis/bot/v2/hook/<token>` | `{"msg_type":"text","content":{"text":"{{text}}"}}` | `code: 0` |
-| DingTalk | `https://oapi.dingtalk.com/robot/send?access_token=<token>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `errcode: 0` |
-| WeCom | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `errcode: 0` |
-| Discord | `https://discord.com/api/webhooks/<id>/<token>` | `{"content":"{{text}}"}` | not needed |
-| Slack | `https://hooks.slack.com/services/<path>` | `{"text":"{{text}}"}` | not needed |
-| Telegram | `https://api.telegram.org/bot<token>/sendMessage` | `{"chat_id":"<chat_id>","text":"{{text}}"}` | not needed |
+| ntfy | `https://ntfy.sh/` | `{"topic":"<topic>","title":"{{title}}","message":"{{body}}"}` | Not needed |
+| Feishu | `https://open.feishu.cn/open-apis/bot/v2/hook/<token>` | `{"msg_type":"text","content":{"text":"{{text}}"}}` | `{"code":0}` |
+| DingTalk | `https://oapi.dingtalk.com/robot/send?access_token=<token>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `{"errcode":0}` |
+| WeCom | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `{"errcode":0}` |
+| Discord | `https://discord.com/api/webhooks/<id>/<token>` | `{"content":"{{text}}"}` | Not needed |
+| Slack | `https://hooks.slack.com/services/<path>` | `{"text":"{{text}}"}` | Not needed |
+| Telegram | `https://api.telegram.org/bot<token>/sendMessage` | `{"chat_id":"<chat_id>","text":"{{text}}"}` | Not needed |
 
-For Feishu, `config.yaml` looks like this. The body contains `{{`, so put it in single quotes:
+Under **Notification channels** in the Settings view, enter the `url` above in **Webhook URL**, the `body` in **Body** and the `success_json` in **Success condition (optional)**.
 
-```yaml
-plugins:
-  configs:
-    lamplighter:
-      webhook:
-        url: "https://open.feishu.cn/open-apis/bot/v2/hook/<token>"
-        body: '{"msg_type":"text","content":{"text":"{{text}}"}}'
-        success_json:
-          code: 0
-```
+- Feishu, DingTalk and WeCom return HTTP 200 even when sending fails, with the error code in the response, so set a success condition; otherwise failed notifications count as sent.
+- The plugin does not support the signature verification of Feishu and DingTalk bots. Use a custom keyword or an IP allow-list in the bot's security settings instead; with a keyword, put it in the body, for example `"text":"Lamplighter {{text}}"`.
+- **Send test** shows the result of each channel and the start of the webhook response. Without a success condition, the page notes that only the HTTP status was checked and that you should confirm receipt in the client.
+- When the webhook settings are wrong (for example a misspelled placeholder), the webhook is not enabled and the top of the page shows why; the other settings take effect as usual.
 
-- Feishu, DingTalk and WeCom answer HTTP 200 when a message fails too, with the error code in the response, so set `success_json`; otherwise failed deliveries count as successful.
-- Signature verification of Feishu and DingTalk bots is not supported. Use a custom keyword or an IP allowlist in the bot's security settings instead; with a keyword, put it in the body, such as `"text":"Lamplighter {{text}}"`.
-- "Send test" on the management page shows the result of each channel and the start of the webhook response. Without `success_json`, the page notes that only the HTTP status was checked, so confirm that the message arrived.
-- When the webhook settings are invalid, for example a misspelled placeholder, the webhook stays off and the management page shows the reason at the top; the other settings still apply.
+## Ports
 
-## Management page
+| Listener | Default address | How to change |
+| --- | --- | --- |
+| Internal listener | `127.0.0.1:8317` | Plugin option `port`; see [Plugin options](#plugin-options) |
+| Public listener | `127.0.0.1:8318`, off by default | Configuration key `public_listen` |
 
-Use the "Quota | Settings" switch at the top to change views. The browser remembers the last view. The quota view shows:
+These are the default ports of CPA and of the CPA edition of Lamplighter. When those run on the same machine as Magpie, change `port` or `public_listen`. When Magpie runs in Docker, in a network namespace of its own, they do not conflict.
 
-- the quota windows of each account with reset times (including the weekday), data sources and plan, with a button to refresh each account;
-- five color levels shared by quota bars and charts: full at a raw remaining value of 100%, empty at 0%, and high, medium and low between them, split by the first two alert thresholds; 99.6% does not use the full color even when rounded to 100% for display;
-- the next ignition and current reset (both with the weekday), last result and failure protection state of each quota group, with an "ignite now" button; hidden while ignition is off;
-- a quota chart:
-  - It shows either the 5-hour quota, over 1, 3, 6, 12, 24 or 26 hours (6 by default), or the 7-day quota, over 1, 4, 8 or 15 days, one month (from this date last month) or 36 days (8 days by default). Window kinds and chart rows include current windows and windows with samples in the selected history range. A current window without new samples in the range keeps its row, with missing intervals marked as no data. Windows of other lengths only show on the account cards. With `remember_chart_filters` on, the page keeps the last choices.
-  - 1 and 3 hours and 1 and 4 days end now. Longer ranges end at the reset of the selected row's current window; 6 hours, for example, shows the current 5-hour window and the last hour of the previous one, with the time after now hatched. When the selected row has no reset, or its reset has passed (a 5-hour window no request has opened yet), these ranges also end now.
-  - The top part has one colored band per service, colored like the quota bars by the lowest reading so far in each cycle. The default order follows the account cards: each service takes the position of its first account, and groups within the same account keep their group order. You can also sort by lowest remaining. A service with several accounts shows their weighted total and expands into one row per account.
-  - A window the account no longer reports is marked "Inactive" until its last sample leaves the selected range. It gets a separate row and is excluded from totals and lowest-first ordering. Its curve ends at the last reading, without an even-pace line or projection.
-  - The bottom part plots the selected row with its resets and ignition results. Its even-pace line uses the scheduled reset recorded at each time and a fixed 5-hour or 7-day length, falling linearly from 100% to 0% at that reset. An early reset cuts the old reference where the new reset is first observed and starts a reference for the new schedule. No reference is drawn while the reset is unknown. If the current window loses its reset time, the reference stops at the chart’s current-time boundary instead of extending toward the previous reset. The reference value is null at that boundary, and the single-account and total headers show “—” for both even pace and difference. A curve above the reference is using quota slower than an even pace. A total shows the weighted mean reference only while every account has a reference value. Its header shows the current remaining, the even-pace value now and the difference between them, green above the pace and red below. When the chart ends now, these three values also appear right of the plot, at the ends of the curve and the even-pace line. When the scheduled reset moves within a cycle, the new reference is extended back as a dash-dot line to the start of the cycle, where the quota rose back. When the chart is wide enough, its heading sits as a column in the blank left of the plot.
-  - When the chart ends at a reset, a projection starts now: if the quota runs out first, the time (and the date for the 7-day quota) is marked on the time axis; if the reset comes first, what will be left is marked right of the plot.
-    - The 5-hour quota is projected at the current rate, showing where use at that rate would lead. The rate comes from the latest stretch of steady use in this cycle, so in the first minutes of heavy use the projected time comes too early.
-    - The 7-day quota is projected at this cycle's daily average: what the cycle has used so far over the time since it began, including the time without use. In the first day or two of a cycle the projection is less accurate.
-  - The page reads the status every 30 seconds and updates the chart when there is new data; while the pointer is over the chart, the update waits until it leaves.
-- recent events in columns for time, type, quota group and detail. A notification triggered by an event shows as "Notified" or "Notification failed" at the end of that event's row instead of a row of its own. Resets of 5-hour quotas are hidden until "Show 5-hour resets" is checked; the browser keeps the choice.
+The internal listener serves Magpie only, needs no key and accepts only requests whose Host is a loopback address; API requests from a browser must come from Lamplighter's own page. The plugin starts the program with `-listen 127.0.0.1:<port>`. When the program is run directly, `-listen` must be a loopback address; with any other address the program exits with an error. Use [Public access](#public-access) from other machines.
 
-The eye buttons at the top of the page, in the cards header and in the detail-chart header share the "Blur accounts" and "Show accounts" switch. It blurs current account identifiers, including names, emails and input fields in the "Accounts" settings section, and old names retained in events and history charts, including labels of renamed or deleted accounts and internal group identifiers of history that cannot be associated with a current account. Orphan history rows are blurred in the overview, detail, data table and screenshots; screen-reader labels use account numbers. Upstream errors and older event details that cannot be reliably split are blurred as a whole. The choice is saved in the current browser and survives reloads; each computer and browser keeps its own. Confirmation dialogs, such as clearing an account name, still show the original text. Blurring affects display only and does not remove the original data from API responses or the page.
+## Known limitations
 
-Each account card places "Refresh" and the camera button at the bottom right, in that order, beside the plan information on the left. Cards without plan information show only the right-aligned buttons. The card heading contains the service label and email.
-
-Camera buttons on each account card, in the cards header and in the detail-chart header copy one card, all cards or the detail chart to the clipboard as a PNG. Screenshots retain the current theme and blur state and omit action buttons. This requires a browser with image-clipboard support, a secure context such as HTTPS or localhost, and clipboard permission. Unsupported browsers disable the buttons.
-
-The settings view contains "Accounts", "Notification channels", "Alert rules", "Ignition", "Services" and "Advanced", in that order. The "Accounts" section lists accounts in their current order. Names and weights save when you leave the field or press Enter and share the heading result with order changes; failure handling is described under [Configuration](#configuration). Drag a handle to save the order in `account_order`, which sets the default order of quota cards and charts. Press Esc during a drag to cancel.
-
-"Send test" in the notification settings waits for pending saves and then uses the configuration token to wait up to 15 seconds for the plugin to confirm application; a hanging status request does not extend this wait. After confirmation it sends to every configured channel and shows each result; on timeout it reports "The new settings are not in effect yet, so the test was not sent" and sends nothing. An empty ignition model field shows the model the next ignition will use in its hint; for Antigravity, the model of the Gemini group. Services that cannot be ignited show "No ignition". The model list is read when the plugin starts, when `cpa_base_url` or `models_api_key` changes and for every ignition, so a model newly listed by CPA shows after the next ignition, which already uses it.
-
-The page follows the language of the CPA Management Center: Chinese for Simplified or Traditional Chinese, English for every other language.
+- Lamplighter runs with Magpie's plugin host. Magpie starts the plugin host when it launches and when a plugin is called. After a plugin is installed or updated or its options change, and after the plugin host is replaced for using too much memory, Lamplighter stops with the old host and starts again only at the next plugin call; until then it does not query, ignite or notify. Opening Lamplighter's page, calling its tools, or a request served by a plugin such as agy-cli starts the plugin host, so open the page once after installing the plugin or changing its options. Running in the background needs support from Magpie, which has been requested upstream ([yetone/magpie#7114](https://github.com/yetone/magpie/issues/7114)).
+- On macOS and Windows, the credential of the first Antigravity account that agy signed in to by itself is in the system keychain. Lamplighter does not read the keychain and cannot confirm which account agy is signed in to, so the account is neither queried nor ignited, and the status shows why. Add the account again in Magpie with "Add another Google account" to query and ignite it.
+- On Linux, the first Antigravity account that agy signed in to by itself is read from agy's default credential file, which holds whichever account agy is signed in to now. When agy has signed in to another Google account, or the file or Magpie does not record the account's email, the identity does not match: the account is neither queried nor ignited, and the status shows why. When agy has signed in to another account, sign agy back in to this one. When Magpie has no email for the account, signing in to agy again does not add it (the email is recorded only when the account is signed in through Magpie); add the account again in Magpie with "Add another Google account". Do the same when the file does not record the account.
+- When an Antigravity credential's `auth_method` is neither empty nor `consumer` (a personal Google account), the quota query shows an error.
+- When Magpie's `MAGPIE_ADDR` is a LAN address, the gateway requires a gateway key and Lamplighter cannot reach it.
 
 ## Security and risk
 
-- The plugin reads the access token from the credential file into memory only to query quota, and never writes it to logs or disk. The page's data API requires the CPA management key; MCP uses its own key.
-- `bark_url`, `webhook`, `models_api_key` and `mcp_key` are stored in plain text in CPA's `config.yaml`, visible to anyone with the management key.
-- Each service restricts the use of subscription accounts through third-party tools in its own way. Using accounts through CPA, sending scheduled ignition requests and querying quota may all put accounts at risk. Use it at your own discretion.
+- The plugin reads the tokens Magpie keeps only in memory, to query quotas, and never writes them to logs or disk.
+- Before an error text is written to the log, the state, the events and the history, or shown on the page, in the API, over MCP and in notifications, emails keep only the last two characters of the user name (such as `***rk`), URLs lose their query and user info, and token-like strings become an ellipsis. The rules are in [错误文本的脱敏](./docs/architecture.md#错误文本的脱敏) (Chinese).
+- `bark_url`, `webhook`, `admin_key` and `mcp_key` are stored in plain text in `config.json` (mode 600), readable by anyone who can reach the internal listener or holds the admin key.
+- The internal listener needs no key, so any program on the same machine (in the same container for Docker) can reach it; other web pages in a browser cannot call its API.
+- Each service has its own restrictions on third-party tools using subscription accounts. Using accounts through Magpie, sending scheduled ignition requests and querying quota may all put an account at risk; judge for yourself.
 
 ## Development
 
-Plugin structure, data flow and design constraints are in [Architecture (in Chinese)](./docs/architecture.md); building, testing and releasing are in [Development (in Chinese)](./docs/development.md).
+The plugin's structure, data flow and design constraints are in the [architecture document](./docs/architecture.md); building, testing and releasing are in the [development document](./docs/development.md). Both are in Chinese.
 
 ## License
 
-[AGPL-3.0-or-later](./LICENSE). If you distribute a modified version, or let others use one over a network, you must publish its source code under the same license.
+[AGPL-3.0-or-later](./LICENSE). If you distribute a modified version, or provide a modified version to others over a network, you must publish its source code under the same license.

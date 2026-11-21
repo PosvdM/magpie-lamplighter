@@ -120,11 +120,8 @@ type State struct {
 	Groups     map[string]*GroupState  `json:"groups"`
 	Scheduler  map[string]*TargetState `json:"scheduler"`
 	CodexReset *CodexResetState        `json:"codex_reset_updates,omitempty"`
-	// CooldownNotices maps an auth index to the end of the stale CPA
-	// cooldown that was already notified, in Unix seconds.
-	CooldownNotices map[string]int64 `json:"cooldown_notices,omitempty"`
-	// Language is the notification language, the Management Center language
-	// last reported by the management page.
+	// Language is the notification language, the page language last
+	// reported by the management page.
 	Language string `json:"language,omitempty"`
 	// Plans maps an auth index to the plan last read for the account.
 	Plans map[string]*PlanState `json:"plans,omitempty"`
@@ -225,15 +222,6 @@ func (s *State) PlanFor(authIndex string) *PlanState {
 		s.Plans[authIndex] = plan
 	}
 	return plan
-}
-
-// CooldownNotice records that the stale cooldown of authIndex ending at
-// until was notified.
-func (s *State) CooldownNotice(authIndex string, until int64) {
-	if s.CooldownNotices == nil {
-		s.CooldownNotices = map[string]int64{}
-	}
-	s.CooldownNotices[authIndex] = until
 }
 
 // NewState returns an empty state.

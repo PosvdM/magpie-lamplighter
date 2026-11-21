@@ -5,10 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 func TestAbsentWindowSurvivesRestartAndFailedActiveQuery(t *testing.T) {
@@ -26,7 +25,7 @@ func TestAbsentWindowSurvivesRestartAndFailedActiveQuery(t *testing.T) {
 			cfg.ResetReminder = config.WindowModes{FiveHour: config.ReminderAll, SevenDay: config.ReminderAll}
 			e.Configure(cfg, nil)
 			e.alerts.Cfg = cfg
-			if _, err := e.loadCreds(cfg); err != nil {
+			if _, err := e.loadCreds(context.Background(), cfg); err != nil {
 				t.Fatal(err)
 			}
 			key := "codex:1:gpt"
@@ -45,7 +44,7 @@ func TestAbsentWindowSurvivesRestartAndFailedActiveQuery(t *testing.T) {
 			restarted, sent := newTestEngineIn(t, h, c, e.dataDir)
 			restarted.Configure(cfg, nil)
 			restarted.alerts.Cfg = cfg
-			h.http = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse { return pluginapi.HTTPResponse{StatusCode: 503} }
+			h.http = func(httpRequest) httpResponse { return httpResponse{StatusCode: 503} }
 			restarted.poll(context.Background(), cfg, c.t, "1", true)
 			if restarted.pollErrs["1"] == "" {
 				t.Fatal("active query must fail")
@@ -88,7 +87,7 @@ func TestAbsentWindowSurvivesRestartAndFailedActiveQuery(t *testing.T) {
 func TestPlanRebaseDoesNotMeanWindowAbsent(t *testing.T) {
 	c := &clock{t: time.Now()}
 	e, _ := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
 	e.state.Group("codex:1:gpt").Windows[quota.WindowFiveHour] = &store.WindowState{Rebase: true}

@@ -1,9 +1,24 @@
 (function () {
   "use strict";
 
-  var API = "/v0/management/lamplighter";
-  var CONFIG_API = "/v0/management/plugins/lamplighter/config";
-  var KEY_STORE = "lamplighter-management-key";
+  // Relative paths, so that the page works at the root of its own listener
+  // and behind the reverse proxy of a Magpie page service.
+  var API = "api";
+  var CONFIG_API = "api/config";
+  var KEY_STORE = "lamplighter-admin-key";
+
+  // In Magpie's sandboxed frame the page has an opaque origin, so its own
+  // api/… requests are cross-origin (Origin: null). The internal listener
+  // writes a token of its process into the page's lamplighter-page meta
+  // tag and answers such requests with CORS headers only when they carry
+  // it in X-Lamplighter-Page; another site cannot read the page to learn
+  // it. The page takes no requests from its parent, so a site embedding it
+  // cannot use the token through it.
+  function pageToken(doc) {
+    var meta = doc.querySelector('meta[name="lamplighter-page"]');
+    return (meta && meta.getAttribute("content")) || "";
+  }
+  var PAGE_TOKEN = pageToken(document);
 
   var key = "";
   var status = null;
@@ -44,41 +59,92 @@
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  // The page runs in a same-origin iframe of the Management Center, so it
-  // reads the theme from the parent document: data-theme is "dark", "white"
-  // or absent for the default light theme. Opened on its own, it falls back
-  // to the theme the Management Center stored in localStorage.
-  function parentRoot() {
-    try {
-      if (window.parent !== window) return window.parent.document.documentElement;
-    } catch (e) { /* cross-origin */ }
-    return null;
+  // ---- Magpie ----
+
+  // In Magpie the page runs in the frame of a plugin page, sandboxed to
+  // allow-scripts: an opaque origin without localStorage, clipboard,
+  // dialogs or popups. Magpie's page service adds the same sandbox when
+  // its address is opened in a tab of its own. SANDBOXED tells the page to
+  // work around the missing parts.
+  var SANDBOXED = String(window.origin) === "null";
+
+  // The frame first loads the plugin's page file, which sends it to this
+  // page. Magpie answers the messages of the frame, whatever document it
+  // holds (pluginpages.js matches ev.source), so the page speaks the
+  // protocol of Magpie's page bridge (internal/gui/pagebridge.js) itself:
+  // "hello" answers with { dark, lang, tokens, visible }, a "theme" event
+  // follows every change of theme or language, and a "visibility" event
+  // tells when the reader leaves the page and comes back. ready is set once
+  // Magpie has answered. The page never sends the "error" method, which
+  // replaces the page with Magpie's error view.
+  var magpie = { ready: false, theme: null, visible: true, calls: {}, next: 0 };
+
+  function inFrame() {
+    try { return window.parent !== window; } catch (e) { return false; }
+  }
+
+  function magpieCall(method, params) {
+    if (!inFrame()) return Promise.reject(new Error("not in Magpie"));
+    var id = ++magpie.next;
+    return new Promise(function (resolve, reject) {
+      magpie.calls[id] = { resolve: resolve, reject: reject };
+      window.parent.postMessage({ magpie: 1, id: id, method: method, params: params }, "*");
+    });
+  }
+
+  function magpieMessage(e) {
+    if (!inFrame() || e.source !== window.parent) return;
+    var m = e.data;
+    if (!m || typeof m !== "object" || m.magpie !== 1) return;
+    if (m.event === "theme") { magpieTheme(m.data); return; }
+    if (m.event === "visibility") { magpieVisible(!(m.data && m.data.visible === false)); return; }
+    var call = magpie.calls[m.id];
+    if (!call) return;
+    delete magpie.calls[m.id];
+    if (m.error) call.reject(new Error(String(m.error)));
+    else call.resolve(m.result);
+  }
+
+  function magpieTheme(theme) {
+    magpie.theme = theme && typeof theme === "object" ? { dark: theme.dark, lang: theme.lang } : null;
+    applyTheme();
+    applyLanguage();
+    if (status && history) renderChart();
+  }
+
+  // Coming back to the page refreshes it at once; while away it skips the
+  // periodic refresh.
+  function magpieVisible(visible) {
+    var back = visible && !magpie.visible;
+    magpie.visible = visible;
+    if (back && status) loadStatus().then(refreshHistory).catch(function () {});
+  }
+
+  function magpieHello() {
+    if (!inFrame()) return;
+    window.addEventListener("message", magpieMessage);
+    magpieCall("hello").then(function (answer) {
+      magpie.ready = true;
+      if (answer && answer.visible === false) magpie.visible = false;
+      magpieTheme(answer);
+      // Screenshots go through Magpie now that it answers.
+      renderCardsSnapshot();
+      if (status) renderStatus();
+    }).catch(function () { /* not Magpie: the browser's settings stay */ });
+  }
+
+  // The theme follows Magpie, whose theme is light or dark, and the
+  // browser when the page is opened on its own.
+  function pageTheme(magpieTheme, browserDark) {
+    if (magpieTheme && typeof magpieTheme.dark === "boolean") return magpieTheme.dark ? "dark" : "light";
+    return browserDark ? "dark" : "light";
   }
 
   function applyTheme() {
-    var theme = "light";
-    var root = parentRoot();
-    if (root) {
-      var value = root.getAttribute("data-theme");
-      if (value === "dark" || value === "white") theme = value;
-    } else {
-      var stored = "auto";
-      try {
-        var parsed = JSON.parse(localStorage.getItem("cli-proxy-theme") || "null");
-        stored = (parsed && parsed.state && parsed.state.theme) || (parsed && parsed.theme) || stored;
-      } catch (e) { /* use auto */ }
-      if (stored === "dark" || stored === "white") theme = stored;
-      if (stored === "auto" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) theme = "dark";
-    }
+    var dark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var theme = pageTheme(magpie.theme, dark);
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);
-  }
-
-  function watchParent() {
-    var root = parentRoot();
-    if (!root || !window.MutationObserver) return;
-    new MutationObserver(function () { applyTheme(); applyLanguage(); renderChart(); })
-      .observe(root, { attributes: true, attributeFilter: ["data-theme", "lang"] });
   }
 
   // ---- Language ----
@@ -89,10 +155,10 @@
   var I18N = {
     zh: {
       app_sub: "点灯人", repo_hint: "在 GitHub 上查看",
-      update_hint: "有新版本 v{0}，可在 CPA 插件商店更新",
+      update_hint: "有新版本 v{0}，可在 Magpie 的插件页面更新",
       key_title: "需要管理密钥",
-      key_hint: "在管理中心登录时勾选“记住密码”，此页面会直接使用该密钥；否则请在这里输入，密钥只保存在当前标签页。",
-      key_placeholder: "CPA 管理密钥",
+      key_hint: "通过对外地址访问时需要 Lamplighter 的管理密钥（设置中的 admin_key），密钥保存在当前浏览器中。",
+      key_placeholder: "Lamplighter 管理密钥",
       key_submit: "确定",
       key_invalid: "管理密钥无效，请重新输入。",
       refresh_all: "立即刷新全部",
@@ -139,12 +205,14 @@
       reminder_all_title: "每次重置前都提醒", reminder_has_remaining_title: "剩余高于告急阈值时才提醒",
       notify_modes_hint: "“用完后”：窗口用完后，在下一次重置时通知一次。“有余量”：剩余高于告急阈值时才提醒。重置前提醒在 5 小时窗口重置前 1 小时、7 天窗口重置前 1 天发送。恢复通知附带上一周期的剩余额度，取自每次重置前 30 秒的查询。",
       quota_queries: "额度查询",
-      models_api_key: "模型列表 API key",
-      models_api_key_hint: "插件用这个 key 从 CPA 读取模型列表，为自动点火选择模型；不使用自动点火时可以留空。请在 CPA 的 access.api-keys 中新建一个专用 key，不要填管理密钥。",
       poll_interval: "查询间隔（秒）", request_timeout: "请求超时（秒）", history_retention: "历史保留（天）",
       passive_skip: "被动数据跳过窗口（秒）", passive_skip_max: "最多连续跳过（分钟）",
       passive_skip_hint: "整点前这段时间内已有被动数据的账号跳过本轮主动查询；设为 0 则每轮都主动查询。",
       ignition_enabled: "启用自动点火",
+      ignition_enable_hint: "开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。",
+      timezone: "时区", timezone_name: "IANA 时区名称", timezone_save: "保存",
+      timezone_unsaved: "时区尚未保存，确认输入框中的时区后点“保存”。",
+      timezone_hint: "点火时间、通知和页面中的时间按这个时区计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。尚未保存时，输入框中预填浏览器的时区。",
       start_hour: "每日开始（时）", end_hour: "每日结束（时）", end_grace: "结束后宽限（分钟）",
       grace: "重置后延迟（秒）", failure_retry: "失败重试间隔（秒）", max_transient: "临时错误上限（次）",
       services: "服务", col_service: "服务", col_ignition_model: "点火模型",
@@ -154,33 +222,29 @@
       codex_reset_pending: "首次开启时推送当前待生效的排期",
       chart_prefs: "额度图表", remember_chart_filters: "记住筛选条件",
       remember_chart_filters_hint: "在当前浏览器中记住上次选择的额度窗口、时间范围和排序；关闭后每次打开页面都使用默认选择。",
-      save_hint: "修改后自动保存到 CPA 的 config.yaml，插件几秒内应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。",
-      language_note: "通知语言跟随最近打开此页面时管理中心的语言，当前为{0}。",
+      save_hint: "修改后自动保存到 Lamplighter 的 config.json 并立即应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。",
+      language_note: "通知语言跟随最近一次打开此页面时的页面语言，当前为{0}。",
       lang_zh: "中文", lang_en: "English",
       due: "已到", minutes: "{0} 分钟", hours_minutes: "{0} 小时 {1} 分", days: "{0} 天",
       soon: "即将", in_time: "{0}后", just_now: "刚刚", ago: "{0}前",
       reset_now: "已重置",
-      state_disabled: "已停用", state_starting: "启动中", state_running: "运行中",
+      state_starting: "启动中", state_running: "运行中",
       last_poll: "上次查询 {0}（{1}）", next_poll: "下次 {0}（{1}）",
       config_error: "配置无法解析，仍在使用上一份配置：{0}",
       models_error: "模型列表不可用：{0}",
       notify_off: "未设置 Bark 推送地址或 Webhook 地址，通知已关闭。",
       notify_error: "Webhook 设置无效，未启用：{0}",
-      no_models_key: "未设置模型列表 API key，自动点火无法选择模型。",
       remaining_aria: "{0} {1} 剩余",
       source_passive: "被动", source_active: "主动", updated: "更新于 {0}",
       no_accounts: "没有可监控的 {0} 凭证。",
-      first_query: "CPA 启动约 20 秒后开始第一次查询。",
+      first_query: "启动约 5 秒后开始第一次查询。",
       refresh: "刷新", refreshed: "已刷新 {0}",
       account_settings: "账号", rename: "名称",
-      rename_hint: "名称写入 CPA 凭证备注的第一行，保留其余各行。留空则按邮箱区分账号；备注有多行时，清空名称须确认删除整条备注。",
+      rename_hint: "名称保存在 Lamplighter 的设置中，不修改 Magpie 的账号名称。留空则显示 Magpie 中的账号名称或按邮箱区分账号。",
       account_order_hint: "拖动手柄调整顺序，额度卡片和图表默认顺序随之调整。拖动时按 Esc 可取消。",
       account_name_aria: "{0} 的名称", account_weight_aria: "{0} 的权重", weight_default: "套餐默认值 {0}",
-      rename_clear_note: "这个账号的备注还有其他内容。清空名称会删除整条备注，继续吗？",
       weight: "权重", weight_hint: "同一服务有多个账号时，可设置各账号的权重，合计按权重平均剩余额度。权重须大于 0，可带小数；留空使用输入框中提示的套餐默认值。",
       plan: "套餐：{0}", weight_invalid: "权重必须是大于 0 的数字",
-      cooldown_stale: "额度已恢复，但 CPA 仍冷却到 {0}，期间的请求和点火都会被拒绝；在 CPA 管理中心清除这个账号的冷却。",
-      cooldown: "CPA 冷却到 {0}（{1}）",
       blocked_5h: "5 小时额度已用完", blocked_7d: "7 天额度已用完", blocked_other: "{0}额度已用完",
       blocked_until: "{0} 重置后恢复点火", blocked_wait: "额度恢复后恢复点火",
       paused_until: "暂停至 {0}", failures: "失败 {0} 次", rolling: "窗口未开始", normal: "正常",
@@ -190,15 +254,14 @@
       ignite_confirm: "立即向 {0} 发送一次点火请求？这会开始一个新的 5 小时窗口。",
       ignited: "{0} 点火成功",
       ev_ignite: "点火成功", ev_ignite_manual: "手动点火", ev_ignite_failed: "点火失败", ev_ignite_paused: "点火暂停", ev_model_refused: "模型被拒",
-      ev_cooldown_stale: "冷却未解除", ev_plan_change: "套餐变化", ev_notify: "已推送", ev_notify_failed: "推送失败", ev_codex_reset: "重置信号", ev_error: "错误",
+      ev_plan_change: "套餐变化", ev_notify: "已推送", ev_notify_failed: "推送失败", ev_codex_reset: "重置信号", ev_error: "错误",
       ev_ignited: "{0} · 下次重置 {1}",
-      ev_retry: "{0}后重试：{1}", ev_retry_cooldown: "CPA 冷却结束，{0}后重试：{1}",
+      ev_retry: "{0}后重试：{1}", ev_retry_cooldown: "冷却结束，{0}后重试：{1}",
       ev_seconds: "{0} 秒", ev_minutes: "{0} 分钟",
       ev_paused: "暂停到 {0}：{1}",
       ev_paused_auth: "暂停，等待更新凭证：{0}", ev_paused_suspended: "暂停，账号已停用：{0}",
       ev_refused: "{0} 被上游拒绝，改用 {1}，{2} 小时内不再尝试",
       ev_notify_failed_detail: "{0}：{1}",
-      ev_cooldown: "额度已恢复，CPA 仍冷却到 {0}",
       ev_codex_sent: "已发送 {0} 条通知",
       ev_reset: "额度重置", ev_exhausted: "额度耗尽", ev_credential_invalid: "凭证失效", ev_credential_suspended: "账号停用",
       ev_credential_rate_limited: "被限流", ev_credential_restored: "凭证恢复", ev_notify_quota: "额度提醒", ev_notify_reminder: "重置提醒",
@@ -221,11 +284,9 @@
       quota_reset: "额度重置",
       loading: "加载中…", no_history: "这个范围内还没有额度数据。",
       history_failed: "读取历史失败：{0}",
-      tz_config: "配置中指定", tz_cpa: "跟随 CPA 服务器",
+      tz_config: "配置中指定", tz_server: "跟随服务器",
       tz_note: "通知和页面中的时间使用 {0}，{1}。",
       save_failed: "保存失败：{0}",
-      management_key_refused: "这是 CPA 管理密钥，未保存。请填写 access.api-keys 中的 key",
-      api_key_refused: "CPA 不接受这个 key，未保存。请填写 access.api-keys 中的 key",
       load_failed: "加载失败：{0}",
       refreshed_all: "已刷新全部额度", test_sent: "测试通知已发送",
       level_full: "满", level_high: "高", level_medium: "中", level_low: "低", level_empty: "空",
@@ -236,34 +297,42 @@
       view_nav: "页面", advanced: "高级",
       notify_channels: "通知渠道", webhook_advanced: "高级：请求方法、请求头、请求体和成功条件", alert_rules: "提醒规则",
       ignition_off: "自动点火已关闭，这些设置暂不生效。",
-      ignition_models_hint: "选择点火模型需要“高级”中的模型列表 API key。",
       monitor_hint: "勾选要监控额度的服务。",
       save_saved: "已保存", save_saving: "保存中…",
       save_field_failed: "✕ {0}保存失败", save_failure_reason: "：{0}", save_failed_compact: "✕ 保存失败", save_more_failed: "（另有 {0} 项失败）", save_order: "排序",
       save_waiting: "已保存，等待生效", save_applied: "已生效", save_unconfirmed: "未确认生效",
-      save_applied_verified: "已生效，验证通过", save_applied_unverified: "已生效，未能验证：{0}", network_error: "网络错误",
+     
       mask_on: "打码账号", mask_off: "显示账号", account_n: "账号 {0}",
       weekdays: "周日,周一,周二,周三,周四,周五,周六",
       snapshot_card: "复制这张卡片的截图", snapshot_cards: "复制所有卡片的截图", snapshot_detail: "复制曲线详情图的截图",
       snapshot_copied: "已复制截图", snapshot_failed: "截图复制失败：{0}", snapshot_unsupported: "当前浏览器不支持复制图片",
       mcp_hint: "AI 客户端（如 Claude Code）可以通过 MCP 查询额度、历史和事件，并刷新额度。",
-      mcp_enabled: "启用 MCP 接口", mcp_listen: "监听地址", mcp_key: "密钥", mcp_key_unset: "未设置",
+      mcp_enabled: "启用 MCP 接口", public_listen: "对外监听地址", mcp_key: "密钥", mcp_key_unset: "未设置",
       mcp_show: "显示", mcp_hide: "隐藏", copy: "复制", copied: "已复制", copy_failed: "无法复制，请手动选择文本复制",
       mcp_generate: "生成新密钥", mcp_regenerate_confirm: "生成新密钥？旧密钥会立即失效，使用它的客户端需要换成新密钥。",
       mcp_status: "状态", mcp_unknown: "未知", mcp_running: "运行中", mcp_stopped: "未启动",
       mcp_public_url: "对外地址（可选）",
       mcp_public_hint: "对外开放时请使用反向代理并配置 HTTPS，然后在这里填写对外地址，下面的配置随之更新。这个地址只保存在当前浏览器。",
       mcp_snippets: "客户端配置", mcp_claude: "Claude Code", mcp_json: "通用 JSON", mcp_stdio: "只支持 stdio 的客户端（mcp-remote）",
-      mcp_no_key: "先生成密钥，配置中的 <key> 会换成实际的密钥。", mcp_error: "MCP 接口未启动：{0}"
+      mcp_no_key: "先生成密钥，配置中的 <key> 会换成实际的密钥。", mcp_error: "MCP 接口未启动：{0}",
+      copy_failed_sandbox: "Magpie 中的页面不能写入剪贴板。请选中文本手动复制，或通过对外地址在浏览器中打开页面后复制",
+      confirm_again: "{0} 再点一次确认。",
+      public_access: "对外访问",
+      public_hint: "内部监听只供 Magpie 使用，不需要密钥。对外监听让其他设备通过浏览器或 MCP 访问 Lamplighter：页面和接口需要管理密钥，MCP 需要 MCP 的密钥。两者都关闭时不监听。",
+      web_enabled: "在对外监听上提供页面和接口", admin_key: "管理密钥",
+      admin_regenerate_confirm: "生成新的管理密钥？旧密钥会立即失效，通过对外地址打开的页面需要输入新密钥。",
+      public_status: "状态", public_off: "未启用", public_web: "页面和接口", public_mcp: "MCP",
+      public_error: "对外监听未启动：{0}",
+      warmup_notice: "Magpie 为这些账号开启了预热：{0}。预热和 Lamplighter 的自动点火会重复点火，请在 Magpie 中关闭这些账号的预热。"
     },
     en: {
       app_sub: "", repo_hint: "View on GitHub",
-      update_hint: "v{0} is available; update it in the CPA plugin store",
-      key_title: "Management key required",
-      key_hint: "If you checked \"remember password\" when signing in to the Management Center, this page uses that key. Otherwise enter it here; it is kept in this tab only.",
-      key_placeholder: "CPA management key",
+      update_hint: "v{0} is available; update it on the Plugins page of Magpie",
+      key_title: "Admin key required",
+      key_hint: "Access through the public address needs the Lamplighter admin key (admin_key in the settings). The key is kept in this browser.",
+      key_placeholder: "Lamplighter admin key",
       key_submit: "OK",
-      key_invalid: "The management key is not valid. Enter it again.",
+      key_invalid: "The admin key is not valid. Enter it again.",
       refresh_all: "Refresh all",
       quota: "Quota",
       ignition: "Ignition",
@@ -308,12 +377,14 @@
       reminder_all_title: "Remind before every reset", reminder_has_remaining_title: "Remind only when more than the Critical threshold is left",
       notify_modes_hint: "\"After out\": after the window runs out, notify once at its next reset. \"If left\": remind only when more than the Critical threshold is left. Reminders are sent 1 hour before a 5-hour window resets and 1 day before a 7-day window resets. Recovery notifications include what was left of the ended cycle, from the query 30 seconds before every reset.",
       quota_queries: "Quota queries",
-      models_api_key: "Model list API key",
-      models_api_key_hint: "The plugin reads CPA's model list with this key to pick ignition models; without ignition it can stay empty. Create a dedicated key in CPA's access.api-keys rather than using the management key.",
       poll_interval: "Query interval (s)", request_timeout: "Request timeout (s)", history_retention: "History retention (days)",
       passive_skip: "Passive data window (s)", passive_skip_max: "Longest skip (min)",
       passive_skip_hint: "Accounts with passive data within this time before a slot skip that active query; 0 queries every time.",
       ignition_enabled: "Enable ignition",
+      ignition_enable_hint: "Before turning it on, set the time zone and turn off warm-up in Magpie, so that windows are not ignited twice.",
+      timezone: "Time zone", timezone_name: "IANA time zone name", timezone_save: "Save",
+      timezone_unsaved: "The time zone is not saved yet. Check the time zone in the field and click Save.",
+      timezone_hint: "Ignition, notifications and this page use this time zone, whatever the server's time zone is (UTC in Magpie's Docker image). Until one is saved, the field shows this browser's time zone.",
       start_hour: "Daily start (hour)", end_hour: "Daily end (hour)", end_grace: "Grace after end (min)",
       grace: "Delay after reset (s)", failure_retry: "Retry after failure (s)", max_transient: "Transient error limit",
       services: "Services", col_service: "Service", col_ignition_model: "Ignition model",
@@ -323,33 +394,29 @@
       codex_reset_pending: "When first turned on, send the pending schedule",
       chart_prefs: "Quota chart", remember_chart_filters: "Remember the filters",
       remember_chart_filters_hint: "This browser remembers the last quota window, time range and order. When off, the page opens with the default choices.",
-      save_hint: "Changes save to CPA's config.yaml automatically, and the plugin applies them within a few seconds. Text and numbers save when you leave the field or press Enter. Save results appear beside section headings or advanced group legends.",
-      language_note: "Notifications use the Management Center language from the last time this page was opened, now {0}.",
+      save_hint: "Changes save to Lamplighter's config.json automatically and apply at once. Text and numbers save when you leave the field or press Enter. Save results appear beside section headings or advanced group legends.",
+      language_note: "Notifications use the language of this page from the last time it was opened, now {0}.",
       lang_zh: "中文", lang_en: "English",
       due: "due", minutes: "{0} min", hours_minutes: "{0} h {1} min", days: "{0} days",
       soon: "soon", in_time: "in {0}", just_now: "just now", ago: "{0} ago",
       reset_now: "reset",
-      state_disabled: "Disabled", state_starting: "Starting", state_running: "Running",
+      state_starting: "Starting", state_running: "Running",
       last_poll: "last query {0} ({1})", next_poll: "next {0} ({1})",
       config_error: "The config cannot be parsed; the previous config stays in use: {0}",
       models_error: "Model list unavailable: {0}",
       notify_off: "No Bark push URL or webhook URL is set, so notifications are off.",
       notify_error: "The webhook settings are invalid, so the webhook is off: {0}",
-      no_models_key: "No model list API key is set, so ignition cannot pick a model.",
       remaining_aria: "{0} {1} remaining",
       source_passive: "passive", source_active: "active", updated: "updated {0}",
       no_accounts: "No {0} credentials to monitor.",
-      first_query: "The first query runs about 20 seconds after CPA starts.",
+      first_query: "The first query runs about 5 seconds after the start.",
       refresh: "Refresh", refreshed: "Refreshed {0}",
       account_settings: "Accounts", rename: "Name",
-      rename_hint: "Names are saved as the first line of the CPA credential note; other lines are kept. Leave the name empty to distinguish accounts by email. Clearing a name on a multiline note requires confirmation to delete the whole note.",
+      rename_hint: "Names are saved in the Lamplighter settings and do not change the account names in Magpie. Leave the name empty to show the Magpie account name or distinguish accounts by email.",
       account_order_hint: "Drag a handle to set the default order of quota cards and charts. Press Esc during a drag to cancel.",
       account_name_aria: "Name of {0}", account_weight_aria: "Weight of {0}", weight_default: "Plan default: {0}",
-      rename_clear_note: "The note of this account has more lines. Clearing the name deletes the whole note. Continue?",
       weight: "Weight", weight_hint: "For services with several accounts, the total averages their remaining quota by weight. Weights must be above 0; decimals are allowed. Leave a field empty to use the plan default shown in it.",
       plan: "Plan: {0}", weight_invalid: "The weight must be a number above 0",
-      cooldown_stale: "Quota is back, but CPA cools this account down until {0} and rejects requests and ignition until then. Clear the cooldown in the CPA Management Center.",
-      cooldown: "CPA cooldown until {0} ({1})",
       blocked_5h: "5-hour quota used up", blocked_7d: "7-day quota used up", blocked_other: "{0} quota used up",
       blocked_until: "Ignition resumes after the reset at {0}", blocked_wait: "Ignition resumes when the quota recovers",
       paused_until: "Paused until {0}", failures: "{0} failures", rolling: "Window not started", normal: "Normal",
@@ -359,15 +426,14 @@
       ignite_confirm: "Send an ignition request to {0} now? This starts a new 5-hour window.",
       ignited: "{0} ignited",
       ev_ignite: "Ignited", ev_ignite_manual: "Manual ignition", ev_ignite_failed: "Ignition failed", ev_ignite_paused: "Ignition paused", ev_model_refused: "Model refused",
-      ev_cooldown_stale: "Cooldown not cleared", ev_plan_change: "Plan changed", ev_notify: "Notified", ev_notify_failed: "Notification failed", ev_codex_reset: "Reset signal", ev_error: "Error",
+      ev_plan_change: "Plan changed", ev_notify: "Notified", ev_notify_failed: "Notification failed", ev_codex_reset: "Reset signal", ev_error: "Error",
       ev_ignited: "{0} · next reset {1}",
-      ev_retry: "Retrying in {0}: {1}", ev_retry_cooldown: "Retrying when the CPA cooldown ends, in {0}: {1}",
+      ev_retry: "Retrying in {0}: {1}", ev_retry_cooldown: "Retrying when the cooldown ends, in {0}: {1}",
       ev_seconds: "{0} s", ev_minutes: "{0} min",
       ev_paused: "Paused until {0}: {1}",
       ev_paused_auth: "Paused until the credential is updated: {0}", ev_paused_suspended: "Paused, account suspended: {0}",
       ev_refused: "{0} was refused upstream; used {1}, not tried again for {2} hours",
       ev_notify_failed_detail: "{0}: {1}",
-      ev_cooldown: "Quota is back, but CPA cools down until {0}",
       ev_codex_sent: "Sent {0} notifications",
       ev_reset: "Quota reset", ev_exhausted: "Quota exhausted", ev_credential_invalid: "Credential invalid", ev_credential_suspended: "Account suspended",
       ev_credential_rate_limited: "Rate limited", ev_credential_restored: "Credential restored", ev_notify_quota: "Quota alert", ev_notify_reminder: "Reset reminder",
@@ -390,11 +456,9 @@
       quota_reset: "quota reset",
       loading: "Loading…", no_history: "No quota data in this range yet.",
       history_failed: "Could not read the history: {0}",
-      tz_config: "set in the config", tz_cpa: "following the CPA server",
+      tz_config: "set in the config", tz_server: "following the server",
       tz_note: "Notifications and this page show times in {0}, {1}.",
       save_failed: "Could not save: {0}",
-      management_key_refused: "This is the CPA management key, so it was not saved. Enter a key from access.api-keys",
-      api_key_refused: "CPA does not accept this key, so it was not saved. Enter a key from access.api-keys",
       load_failed: "Could not load: {0}",
       refreshed_all: "Refreshed all quota", test_sent: "Test notification sent",
       level_full: "Full", level_high: "High", level_medium: "Medium", level_low: "Low", level_empty: "Empty",
@@ -405,25 +469,33 @@
       view_nav: "Page", advanced: "Advanced",
       notify_channels: "Notification channels", webhook_advanced: "Advanced: method, headers, body and success condition", alert_rules: "Alert rules",
       ignition_off: "Ignition is off, so these settings do not apply for now.",
-      ignition_models_hint: "Picking ignition models needs the model list API key under Advanced.",
       monitor_hint: "Check the services whose quota to monitor.",
       save_saved: "Saved", save_saving: "Saving…",
       save_field_failed: "✕ {0} save failed", save_failure_reason: ": {0}", save_failed_compact: "✕ Save failed", save_more_failed: " ({0} more failed)", save_order: "Order",
       save_waiting: "Saved; waiting to take effect", save_applied: "In effect", save_unconfirmed: "Not confirmed in effect",
-      save_applied_verified: "In effect; CPA accepts the key", save_applied_unverified: "In effect, but could not verify: {0}", network_error: "network error",
+     
       mask_on: "Blur accounts", mask_off: "Show accounts", account_n: "Account {0}",
       weekdays: "Sun,Mon,Tue,Wed,Thu,Fri,Sat",
       snapshot_card: "Copy a screenshot of this card", snapshot_cards: "Copy a screenshot of all cards", snapshot_detail: "Copy a screenshot of the detail chart",
       snapshot_copied: "Screenshot copied", snapshot_failed: "Could not copy the screenshot: {0}", snapshot_unsupported: "This browser cannot copy images",
       mcp_hint: "AI clients such as Claude Code can read quota, history and events and refresh quota over MCP.",
-      mcp_enabled: "Enable the MCP endpoint", mcp_listen: "Listen address", mcp_key: "Key", mcp_key_unset: "Not set",
+      mcp_enabled: "Enable the MCP endpoint", public_listen: "Public listen address", mcp_key: "Key", mcp_key_unset: "Not set",
       mcp_show: "Show", mcp_hide: "Hide", copy: "Copy", copied: "Copied", copy_failed: "Could not copy; select the text and copy it",
       mcp_generate: "Generate new key", mcp_regenerate_confirm: "Generate a new key? The old key stops working at once, and clients using it need the new one.",
       mcp_status: "Status", mcp_unknown: "Unknown", mcp_running: "Running", mcp_stopped: "Not running",
       mcp_public_url: "Public address (optional)",
       mcp_public_hint: "To open it to other machines, put a reverse proxy with HTTPS in front and enter its address here; the configs below follow it. The address is kept in this browser only.",
       mcp_snippets: "Client configuration", mcp_claude: "Claude Code", mcp_json: "Generic JSON", mcp_stdio: "stdio-only clients (mcp-remote)",
-      mcp_no_key: "Generate a key first; it replaces <key> in the configs.", mcp_error: "The MCP endpoint is not running: {0}"
+      mcp_no_key: "Generate a key first; it replaces <key> in the configs.", mcp_error: "The MCP endpoint is not running: {0}",
+      copy_failed_sandbox: "Pages in Magpie cannot write to the clipboard. Select the text and copy it, or open the page through the public address in a browser",
+      confirm_again: "{0} Click again to confirm.",
+      public_access: "Public access",
+      public_hint: "The internal listener serves Magpie only and needs no key. The public listener lets other devices reach Lamplighter in a browser or over MCP: the page and API need the admin key, MCP needs its own key. With both off, nothing listens.",
+      web_enabled: "Serve the page and API on the public listener", admin_key: "Admin key",
+      admin_regenerate_confirm: "Generate a new admin key? The old key stops working at once, and pages opened through the public address need the new one.",
+      public_status: "Status", public_off: "Off", public_web: "Page and API", public_mcp: "MCP",
+      public_error: "The public listener is not running: {0}",
+      warmup_notice: "Magpie warms up these accounts: {0}. Its warm-up and Lamplighter's ignition would both start the window; turn warm-up off for these accounts in Magpie."
     }
   };
 
@@ -435,24 +507,16 @@
     return text;
   }
 
-  // The language follows the Management Center: the lang attribute of the
-  // parent page, which it updates on every switch, or the language it stored
-  // when the page is opened on its own. Chinese variants show Chinese and
-  // every other language English.
-  function centerLanguage() {
-    var root = parentRoot();
-    var value = root ? root.getAttribute("lang") || "" : "";
-    if (!value) {
-      try {
-        var raw = localStorage.getItem("cli-proxy-language") || "";
-        try {
-          var parsed = JSON.parse(raw);
-          value = (parsed && parsed.state && parsed.state.language) || (parsed && parsed.language) || (typeof parsed === "string" ? parsed : "");
-        } catch (e) { value = raw; }
-      } catch (e) { /* no storage */ }
-    }
-    if (!value) value = navigator.language || "";
+  // The language follows Magpie's ("zh", "zh-TW", "en", …), and the
+  // browser's when the page is opened on its own. Chinese variants show
+  // Chinese and every other language English.
+  function pageLanguage(magpieTheme, browser) {
+    var value = (magpieTheme && typeof magpieTheme.lang === "string" && magpieTheme.lang) || browser || "";
     return /^zh/i.test(value) ? "zh" : "en";
+  }
+
+  function browserLanguage() {
+    return (navigator.languages && navigator.languages[0]) || navigator.language || "";
   }
 
   function applyStaticText() {
@@ -468,7 +532,7 @@
 
   var languageApplied = false;
   function applyLanguage() {
-    var next = centerLanguage();
+    var next = pageLanguage(magpie.theme, browserLanguage());
     if (languageApplied && next === lang) return;
     lang = next;
     languageApplied = true;
@@ -500,33 +564,12 @@
     $("language-note").textContent = translate("language_note", translate("lang_" + (status.language || "zh")));
   }
 
-  // With "remember password" on, the Management Center stores the key in
-  // localStorage, XOR-obfuscated with the host (v2) or host and user agent (v1).
-  // Unprefixed plaintext JSON is also supported.
-  function centerKey() {
-    try {
-      var raw = localStorage.getItem("cli-proxy-auth");
-      if (!raw) return "";
-      var legacy = raw.indexOf("enc::v1::") === 0;
-      var prefix = legacy ? "enc::v1::" : "enc::v2::";
-      if (raw.indexOf(prefix) === 0) {
-        var data = atob(raw.slice(prefix.length));
-        var mask = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + (legacy ? "|" + navigator.userAgent : ""));
-        var bytes = new Uint8Array(data.length);
-        for (var i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) ^ mask[i % mask.length];
-        raw = new TextDecoder().decode(bytes);
-      }
-      var parsed = JSON.parse(raw);
-      var stored = parsed && parsed.state ? parsed.state : parsed;
-      return stored && typeof stored.managementKey === "string" ? stored.managementKey : "";
-    } catch (e) {
-      return "";
-    }
-  }
-
   // timeout, in milliseconds, aborts a request that takes longer.
   function api(method, path, body, timeout) {
-    var opts = { method: method, headers: { "Authorization": "Bearer " + key, "Accept": "application/json" } };
+    var opts = { method: method, headers: { "Accept": "application/json" } };
+    var sentKey = key;
+    if (key) opts.headers.Authorization = "Bearer " + key;
+    if (PAGE_TOKEN) opts.headers["X-Lamplighter-Page"] = PAGE_TOKEN;
     if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
@@ -545,7 +588,9 @@
         return {};
       }).then(function (data) {
         if (res.status === 401) {
-          askForKey(translate("key_invalid"));
+          // A request sent before this page saved a new admin key does not
+          // make the new key invalid.
+          if (sentKey === key) askForKey(sentKey ? translate("key_invalid") : "");
           throw new Error("unauthorized");
         }
         if (!res.ok) throw new Error(data.error || data.message || ("HTTP " + res.status));
@@ -554,13 +599,35 @@
     }).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
   }
 
+  // After the page saves a new admin key, a page that sends a key sends the
+  // new one.
+  function useKey(secret) {
+    if (!key) return;
+    key = secret;
+    try { localStorage.setItem(KEY_STORE, secret); } catch (err) {}
+  }
+
   function askForKey(message) {
     key = "";
-    sessionStorage.removeItem(KEY_STORE);
+    try { localStorage.removeItem(KEY_STORE); } catch (err) {}
     $("app").hidden = true;
     $("key-section").hidden = false;
     $("key-error").hidden = !message;
     $("key-error").textContent = message || "";
+  }
+
+  // Magpie's sandbox has no dialogs: confirm() returns false there without
+  // asking. Sandboxed, the action asks in a toast and runs on a second click
+  // of the same button within 5 seconds.
+  function confirmed(button, message) {
+    if (!SANDBOXED) return confirm(message);
+    if (button.confirmUntil && Date.now() < button.confirmUntil) {
+      button.confirmUntil = 0;
+      return true;
+    }
+    button.confirmUntil = Date.now() + 5000;
+    toast(translate("confirm_again", message));
+    return false;
   }
 
   var toastTimer = null;
@@ -829,9 +896,11 @@
   // drawn with the page's style sheet through an SVG foreignObject on a
   // canvas, at the screen's pixel ratio. Animations, transitions and hover
   // styles are left out. Nothing outside the page is loaded, so the canvas
-  // stays readable.
+  // stays readable. In Magpie the sandbox has no clipboard, and Magpie
+  // copies the PNG for the page (the bridge's image.copy).
   function canCopyImage() {
-    return !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext);
+    if (magpie.ready) return true;
+    return !SANDBOXED && !!(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext);
   }
 
   // A PNG blob of the nodes side by side in a frame width pixels wide. The
@@ -887,7 +956,8 @@
     var png;
     try { png = snapshotPng(nodes, Math.ceil(width) + 24); } catch (err) { png = Promise.reject(err); }
     var write;
-    try { write = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); } catch (err) { write = Promise.reject(err); }
+    if (magpie.ready) write = png.then(function (blob) { return magpieCall("image.copy", { png: blob }); });
+    else try { write = navigator.clipboard.write([new ClipboardItem({ "image/png": png })]); } catch (err) { write = Promise.reject(err); }
     png.catch(function () {});
     write.then(function () { toast(translate("snapshot_copied")); }, function (err) {
       toast(translate("snapshot_failed", (err && (err.message || err.name)) || String(err)));
@@ -923,8 +993,7 @@
   function renderHeader() {
     var state = $("state");
     clear(state);
-    if (!status.enabled) state.appendChild(badge("muted", translate("state_disabled")));
-    else if (!status.running) state.appendChild(badge("warning", translate("state_starting")));
+    if (!status.running) state.appendChild(badge("warning", translate("state_starting")));
     else state.appendChild(badge("success", translate("state_running")));
     var parts = [];
     var last = parseTime(status.last_poll), next = parseTime(status.next_poll);
@@ -953,21 +1022,36 @@
     return el("div", { class: "notice" }, [el("span", { class: "notice-icon", text: "!" }), el("span", {}, maskedNodes(text))]);
   }
 
+  // The accounts Magpie warms up (status.magpie_warmup, a list of pins), by
+  // the names the page shows: the service and the account name, else the
+  // email; an account the status does not list by its name in
+  // account_names, else its pin.
+  function warmupNames(pins, accounts, names, titleOf) {
+    if (!Array.isArray(pins)) return [];
+    return pins.filter(function (pin) { return typeof pin === "string" && pin; }).map(function (pin) {
+      var account = (accounts || []).filter(function (a) { return a.auth_index === pin; })[0];
+      var saved = names && typeof names[pin] === "string" ? names[pin].split(/\r?\n/)[0].trim() : "";
+      if (!account) return saved || pin;
+      var name = (account.note || "").split(/\r?\n/)[0].trim() || account.email || saved || pin;
+      return titleOf(account.provider) + " " + name;
+    });
+  }
+
   function renderNotices() {
     var box = $("notices");
     clear(box);
     if (status.config_error) box.appendChild(notice(translate("config_error", status.config_error)));
-    if (status.lock_error) box.appendChild(notice(status.lock_error));
     if (status.list_error) box.appendChild(notice(status.list_error));
     if (status.models_error) box.appendChild(notice(translate("models_error", status.models_error)));
     if (status.notify_error) box.appendChild(notice(translate("notify_error", status.notify_error)));
-    if (status.mcp && status.mcp.enabled && !status.mcp.running && status.mcp.error) box.appendChild(notice(translate("mcp_error", status.mcp.error)));
+    if (status.public) {
+      if (!status.public.running && status.public.error) box.appendChild(notice(translate("public_error", status.public.error)));
+    } else if (status.mcp && status.mcp.enabled && !status.mcp.running && status.mcp.error) box.appendChild(notice(translate("mcp_error", status.mcp.error)));
+    var warmup = warmupNames(status.magpie_warmup, status.accounts, rawConfig.account_names, providerTitle);
+    if (warmup.length) box.appendChild(notice(translate("warmup_notice", warmup.join(lang === "zh" ? "、" : ", "))));
     // No channel is how notifications are turned off, so it is a hint in the
     // settings rather than a notice.
     $("notify-off").hidden = !(status.config && !status.config.bark_url && !(status.config.webhook && status.config.webhook.url));
-    if (status.config && status.config.ignition && status.config.ignition.enabled && !status.config.models_api_key) {
-      box.appendChild(notice(translate("no_models_key")));
-    }
   }
 
   // An empty window shows no fill: its whole track turns dark red and
@@ -1278,12 +1362,6 @@
         if (foot) block.appendChild(foot);
         card.appendChild(block);
       });
-      var cooldown = parseTime(account.cooldown_until);
-      if (cooldown && account.stale_cooldown) {
-        card.appendChild(el("div", { class: "error-text", text: translate("cooldown_stale", fmtDateTime(cooldown)) }));
-      } else if (cooldown) {
-        card.appendChild(el("div", { class: "cell-note", text: translate("cooldown", fmtDateTime(cooldown), fmtIn(cooldown)) }));
-      }
       if (account.error) card.appendChild(el("div", { class: "error-text" }, maskedNodes(account.error)));
       card.appendChild(el("div", { class: "account-head cell-note" }, [
         el("span", { class: "cell-note", text: account.plan ? translate("plan", account.plan) : "" }),
@@ -1324,7 +1402,7 @@
     status.targets.forEach(function (t) {
       var st = targetStatus(t);
       var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), onclick: function () {
-        if (!confirm(translate("ignite_confirm", t.label))) return;
+        if (!confirmed(button, translate("ignite_confirm", t.label))) return;
         runAction(button, API + "/ignite", { target: t.key }, translate("ignited", t.label));
       } });
       var next = parseTime(t.next_due), reset = parseTime(t.reset), last = parseTime(t.last_success);
@@ -1347,7 +1425,7 @@
   // Badge style per event type; the label is ev_<kind> in the dictionary.
   var EVENT_TYPES = {
     ignite: "success", ignite_manual: "success", ignite_failed: "warning", ignite_paused: "failure", model_refused: "warning",
-    cooldown_stale: "warning", plan_change: "warning", notify: "muted", notify_failed: "warning", codex_reset: "muted", error: "failure",
+    plan_change: "warning", notify: "muted", notify_failed: "warning", codex_reset: "muted", error: "failure",
     reset: "success", exhausted: "warning", credential_invalid: "failure", credential_restored: "success"
   };
   var EVENTS_COLLAPSED = 12, EVENTS_MAX = 100;
@@ -1362,7 +1440,7 @@
   // sent within NOTIFY_LAG of such an event of the same quota group shows
   // as a mark on that event's row instead of a row of its own.
   var NOTIFY_TRIGGERS = {
-    recovery: ["reset"], circuit: ["ignite_paused"], cooldown: ["cooldown_stale"], plan: ["plan_change"],
+    recovery: ["reset"], circuit: ["ignite_paused"], plan: ["plan_change"],
     credential: ["credential_invalid"], suspended: ["credential_invalid"], rate_limited: ["credential_invalid"],
     credential_ok: ["credential_restored"], codex_reset: ["codex_reset"]
   };
@@ -1371,7 +1449,7 @@
   // an hour, so most kinds allow 70 minutes. Did Codex Reset records its
   // event after sending, so its notifications come a little before it.
   var NOTIFY_LAG = {
-    recovery: [0, 4200], circuit: [0, 4200], cooldown: [0, 4200], plan: [0, 4200], credential: [0, 4200],
+    recovery: [0, 4200], circuit: [0, 4200], plan: [0, 4200], credential: [0, 4200],
     suspended: [0, 4200], rate_limited: [0, 4200], credential_ok: [0, 4200], codex_reset: [-300, 300]
   };
   // An ignition pause this many seconds from a credential problem of the
@@ -1445,7 +1523,6 @@
     if (starts("✅")) return "recovery";
     if (title.indexOf("点火已暂停") >= 0 || title.indexOf("ignition paused") >= 0) return "circuit";
     if (starts("🎫")) return "plan";
-    if (title.indexOf("CPA 仍在冷却") >= 0 || title.indexOf("CPA still cooling down") >= 0) return "cooldown";
     if (starts("🟡") || starts("🔴")) return "quota";
     if (starts("⏰")) return "reminder";
     return "";
@@ -1617,9 +1694,6 @@
           view.detail = translate("ev_notify_failed_detail", title, error("", p.error));
           view.tip = translate("ev_notify_failed_detail", p.title || "", p.error || "");
         }
-        break;
-      case "cooldown_stale":
-        view.detail = translate("ev_cooldown", time(p.until));
         break;
       case "plan_change":
         view.detail = p.from + " → " + p.to;
@@ -1824,17 +1898,20 @@
     }).then(function () { button.disabled = false; });
   }
 
-  // The account name is the first line of the CPA credential note. Renaming
-  // replaces that line and keeps the rest of the note. CPA trims the note, so
-  // a note whose first line is empty takes its name from the next line;
-  // clearing the name of a note with more lines therefore deletes the note,
-  // after a confirmation. The account is then refreshed so that the plugin
-  // reads the new note at once. The quota query of the refresh can fail for
-  // reasons unrelated to the name, which the plugin applies anyway, so its
-  // result only updates the page.
-  function saveAccountName(account, note) {
-    return api("PATCH", "/v0/management/auth-files/fields", { name: account.name, note: note }).then(function () {
-      (status.accounts || []).forEach(function (a) { if (a.name === account.name) a.note = note; });
+  // Account names are saved in account_names of the config, keyed by the
+  // account's pin (auth_index), since Magpie has no API for plugins to rename
+  // an account. An empty name removes the entry, and the account shows its
+  // Magpie label again. The account is then refreshed so that the status
+  // shows the new name at once. The quota query of the refresh can fail for
+  // reasons unrelated to the name, so its result only updates the page.
+  function saveAccountName(account, name) {
+    var latest = rawConfig.account_names;
+    var names = latest && typeof latest === "object" ? JSON.parse(JSON.stringify(latest)) : {};
+    if (name) names[account.auth_index] = name; else delete names[account.auth_index];
+    return patchConfig({ account_names: Object.keys(names).length ? names : null }).then(function () {
+      return loadConfig();
+    }).then(function () {
+      (status.accounts || []).forEach(function (a) { if (a.auth_index === account.auth_index) a.note = name; });
       return api("POST", API + "/refresh", { auth_index: account.auth_index }).then(function (data) {
         if (data.status) { status = data.status; renderStatus(); }
       }, function () { /* the name shows after the next poll */ }).then(function () { loadHistory(true); });
@@ -1843,15 +1920,11 @@
 
   function fmtWeight(weight) { return String(Math.round(weight * 100) / 100); }
 
-  function accountNote(note, name) {
-    var rest = (note || "").split(/\r?\n/).slice(1).join("\n").trim();
-    return name ? (name + "\n" + rest).trim() : "";
-  }
-
   function accountFieldHost(input) { return saveHost(input); }
 
-  // Account fields have no config input name: names go to CPA credentials,
-  // and weights patch a shared map built from the preceding queued save.
+  // Account fields have no config input name: names and weights patch the
+  // shared maps account_names and account_weights, built from the preceding
+  // queued save.
   // Dirty or pending fields survive polling, sorting and earlier saves.
   // Each field owns its result; the heading summarizes failures and progress.
   function saveAccountField(input, row) {
@@ -1868,16 +1941,10 @@
       input.accountDirty = false;
       return;
     }
-    if (!weight && !answer && (account.note || "").split(/\r?\n/).slice(1).join("\n").trim() && !confirm(translate("rename_clear_note"))) {
-      input.value = input.accountSaved;
-      input.accountDirty = false;
-      return;
-    }
-    var note = !weight ? accountNote(account.note, answer) : "";
     var say = claimState(host, input);
     input.accountPending = (input.accountPending || 0) + 1;
     saveQueue = saveQueue.then(function () {
-      if (!weight) return saveAccountName(account, note).then(function () { say("saved", translate("save_saved")); });
+      if (!weight) return saveAccountName(account, answer).then(function () { say("saved", translate("save_saved")); });
       var latest = rawConfig.account_weights;
       var weights = latest && typeof latest === "object" ? JSON.parse(JSON.stringify(latest)) : {};
       if (answer === "") delete weights[account.name]; else weights[account.name] = value;
@@ -3140,6 +3207,7 @@
       overview.appendChild(el("div", { class: "empty", text: historyFailed ? translate("history_failed", historyFailed) : translate("loading") }));
       return;
     }
+    $("legend-projection").textContent = translate("legend_projection_" + historyWindow);
     var rows = chartRows();
     if (!rows.length) {
       overview.appendChild(el("div", { class: "empty", text: translate("no_history") }));
@@ -3152,7 +3220,6 @@
     renderDetail(selected, head, detail);
     placeDetailHead($("chart-detail-wrap"), head, detail, chartView);
     renderChartTable(rows);
-    $("legend-projection").textContent = translate("legend_projection_" + historyWindow);
   }
 
   // The buttons are rebuilt only when the window or the language changes;
@@ -3401,7 +3468,7 @@
     var name = status && status.timezone && status.timezone !== "Local" ? status.timezone : "";
     var sign = offset >= 0 ? "+" : "-";
     var utc = "UTC" + sign + Math.abs(offset);
-    var source = rawConfig.timezone || rawConfig.timezone_offset_hours !== undefined ? translate("tz_config") : translate("tz_cpa");
+    var source = rawConfig.timezone || rawConfig.timezone_offset_hours !== undefined ? translate("tz_config") : translate("tz_server");
     return translate("tz_note", name ? name + " (" + utc + ")" : utc, source);
   }
 
@@ -3412,7 +3479,6 @@
   function effectiveConfig() {
     var effective = JSON.parse(JSON.stringify(status.config || {}));
     effective.bark_url = rawConfig.bark_url || "";
-    effective.models_api_key = rawConfig.models_api_key || "";
     var webhook = rawConfig.webhook || {};
     effective.webhook = effective.webhook || {};
     effective.webhook.url = webhook.url || "";
@@ -3420,8 +3486,45 @@
     effective.webhook.headers = webhook.headers || {};
     // Plugins without MCP report neither field.
     if (effective.mcp_enabled === undefined) effective.mcp_enabled = !!rawConfig.mcp_enabled;
-    if (!effective.mcp_listen) effective.mcp_listen = rawConfig.mcp_listen || MCP_LISTEN;
+    if (effective.web_enabled === undefined) effective.web_enabled = !!rawConfig.web_enabled;
+    if (!effective.public_listen) effective.public_listen = rawConfig.public_listen || MCP_LISTEN;
+    // The saved time zone and ignition switch come from GET /api/config,
+    // which the page reads after each save; a key the file lacks takes the
+    // plugin's value from the status, so the page assumes no default.
+    effective.timezone = typeof rawConfig.timezone === "string" ? rawConfig.timezone : "";
+    var ignition = rawConfig.ignition;
+    if (ignition && typeof ignition.enabled === "boolean") {
+      effective.ignition = effective.ignition || {};
+      effective.ignition.enabled = ignition.enabled;
+    }
     return effective;
+  }
+
+  function browserTimezone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (err) { return ""; }
+  }
+
+  // The IANA names the browser knows, for the datalist of the time zone
+  // field; none where the browser cannot list them, leaving the field to
+  // typing. The plugin checks the name when it is saved.
+  function timezoneOptions() {
+    var names = [];
+    try { if (typeof Intl.supportedValuesOf === "function") names = Intl.supportedValuesOf("timeZone").slice(); } catch (err) { names = []; }
+    if (names.length && names.indexOf("UTC") < 0) names.push("UTC");
+    return names;
+  }
+
+  // Without a saved time zone the field shows the browser's, marked as not
+  // saved. Only the user saves it, by editing the field or with the button
+  // in the mark, so the page never writes a time zone on its own. A draft,
+  // a failed value or the field being edited stays as it is.
+  function renderTimezone() {
+    var input = $("settings").elements.timezone;
+    var saved = typeof rawConfig.timezone === "string" && rawConfig.timezone.trim() !== "";
+    if (!saved && !input.value && !input.settingsDirty && !input.hasAttribute("aria-invalid") && document.activeElement !== input) {
+      input.value = browserTimezone();
+    }
+    $("timezone-unsaved").hidden = saved || !input.value.trim();
   }
 
   // Fields with data-format edit an object as text: "headers" as one
@@ -3485,6 +3588,7 @@
       }
     });
     settingsFilled = true;
+    renderTimezone();
     $("timezone-note").textContent = timezoneText();
     renderIgnitionOff();
     renderMcp();
@@ -3578,7 +3682,8 @@
     return intent;
   }
 
-  // The patch for one top-level key. CPA merges top-level keys only, so
+  // The patch for one top-level key. PATCH /api/config replaces top-level
+  // keys whole, so
   // objects are sent whole, starting from the saved object to keep keys the
   // page does not show. intent, from captureIntent, holds the values to
   // save; without it the inputs are read as they are now.
@@ -3633,16 +3738,12 @@
     // Turning MCP on without a key also saves a new key, since the plugin
     // does not listen without one.
     if (top === "mcp_enabled" && patch.mcp_enabled && !mcpKey().trim()) patch.mcp_key = newMcpKey();
+    // Likewise the page and API need an admin key on the public listener.
+    if (top === "web_enabled" && patch.web_enabled && !adminKey().trim()) patch.admin_key = newAdminKey();
     // Save the same URL and listen defaults that config.Parse applies, so
     // status comparisons do not wait on a trailing slash or an empty field.
-    if (top === "bark_url" || top === "cpa_base_url") patch[top] = patch[top].replace(/\/+$/, "");
-    if (top === "cpa_base_url" && !patch[top]) patch[top] = "http://127.0.0.1:8317";
-    if (top === "mcp_listen" && !patch[top]) patch[top] = "127.0.0.1:8318";
-    // A fixed offset from older versions is removed so the time zone follows CPA.
-    if (rawConfig.timezone_offset_hours !== undefined) patch.timezone_offset_hours = null;
-    // The single switches are replaced by recovery_notify and reset_reminder.
-    if (top === "recovery_notify" && rawConfig.notify_recovery !== undefined) patch.notify_recovery = null;
-    if (top === "reset_reminder" && rawConfig.notify_reset_reminders !== undefined) patch.notify_reset_reminders = null;
+    if (top === "bark_url") patch[top] = patch[top].replace(/\/+$/, "");
+    if (top === "public_listen" && !patch[top]) patch[top] = "127.0.0.1:8318";
     return patch;
   }
 
@@ -3675,6 +3776,7 @@
     var kind = input.getAttribute("data-account-field");
     if (kind) return translate(kind === "name" ? "rename" : "weight");
     if (input.id === "mcp-key-new") return translate("mcp_key");
+    if (input.id === "admin-key-new") return translate("admin_key");
     if (input.closest(".thresholds")) return translate("thresholds");
     var mode = input.closest(".mode-switch");
     if (mode) return mode.getAttribute("aria-label");
@@ -3714,8 +3816,8 @@
   // and browser validation messages remain verbatim.
   function saveText(text) {
     var keys = ["save_saved", "save_saving", "save_waiting", "save_applied", "save_unconfirmed",
-      "save_applied_verified", "save_applied_unverified", "mcp_error", "weight_invalid",
-      "thresholds_order", "management_key_refused", "api_key_refused", "headers_invalid", "json_invalid"];
+      "mcp_error", "public_error", "weight_invalid",
+      "thresholds_order", "headers_invalid", "json_invalid"];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i], languages = Object.keys(I18N);
       for (var j = 0; j < languages.length; j++) {
@@ -3842,24 +3944,16 @@
     if (!top) return;
     var host = saveHost(input);
     var tops = [top];
-    // Browsers fill the password saved for this site, usually the management
-    // key, into password fields. A value the browser fills in while the field
-    // is not focused comes from autofill on page load; it is not saved, and
-    // the field shows the saved value again. The management key is refused
-    // with a message. Other new keys are checked against /v1/models before
-    // saving; refusals retain the draft and inconclusive checks allow saving.
-    var checked = Promise.resolve(null);
+    // Browsers fill the password saved for this site, usually the admin key,
+    // into password fields. A value the browser fills in while the field is
+    // not focused comes from autofill on page load; it is not saved, and the
+    // field shows the saved value again.
     if (input.type === "password") {
       var value = input.value.trim();
       if (autofilled(input) && document.activeElement !== input) {
         fillInput(input, effectiveConfig());
         return;
       }
-      if (key && value === key) {
-        setSaveState(host, "failed", translate("management_key_refused"), input);
-        return;
-      }
-      if (value) checked = checkKey(value);
     }
     if (input.type === "number") {
       if (!input.checkValidity()) {
@@ -3889,13 +3983,7 @@
     var say = claimState(host, input);
     noteEdit(input);
     var intent = captureIntent(tops);
-    saveQueue = saveQueue.then(function () { return checked; }).then(function (check) {
-      // A key edited again during the check is checked by its own change event.
-      if (input.type === "password" && input.value.trim() !== value) return;
-      if (check && check.refused) {
-        say("failed", translate("api_key_refused"));
-        return;
-      }
+    saveQueue = saveQueue.then(function () {
       var patch = {};
       tops.forEach(function (name) {
         var part = buildPatch(name, intent);
@@ -3903,24 +3991,12 @@
       });
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
-        showApplied(say, token, check, /^mcp_/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
+        showApplied(say, token, /^(mcp_|public_listen$|web_enabled$|admin_key$)/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
         return loadConfig();
       }).catch(function (err) {
         say("failed", err.message);
       });
     });
-  }
-
-  // checkKey asks CPA whether it accepts value as an API key for /v1/models,
-  // the request the plugin makes with models_api_key. It resolves to ok when
-  // CPA answers the request, refused on HTTP 401 and 403, and neither, with
-  // the reason, when the check could not tell: then the key is saved anyway.
-  function checkKey(value) {
-    return fetch("/v1/models", { headers: { "Authorization": "Bearer " + value, "Accept": "application/json" } }).then(function (res) {
-      if (res.status === 401 || res.status === 403) return { refused: true };
-      if (res.ok) return { ok: true };
-      return { reason: "HTTP " + res.status };
-    }, function () { return { reason: translate("network_error") }; });
   }
 
   // ---- Applied config ----
@@ -3954,7 +4030,7 @@
   }
 
   // Writes a patch of the plugin config with a new token, and resolves to
-  // the token once CPA has saved it.
+  // the token once it is saved.
   function patchConfig(patch) {
     var token = newConfigToken(), body = {};
     Object.keys(patch).forEach(function (name) { body[name] = patch[name]; });
@@ -4024,20 +4100,21 @@
     };
   }
 
-  // The save state of a field after CPA saved it, through say from
+  // The save state of a field after it is saved, through say from
   // claimState: waiting until the plugin applies it, then applied, or
   // unconfirmed after the timeout. A change of MCP settings shows the MCP
-  // error instead when the endpoint does not start. check is the result of
-  // checkKey for an API key. The save waits for its token even when a newer
-  // save owns the field's state.
-  function showApplied(say, token, check, mcp) {
+  // error instead when the endpoint does not start. The save waits for its
+  // token even when a newer save owns the field's state.
+  // listener is set for the settings of the public listener, whose error
+  // after the save is a failure.
+  function showApplied(say, token, listener) {
     say("waiting", translate("save_waiting"));
     return whenApplied(token).then(function (applied) {
-      var error = mcp && status && status.mcp && status.mcp.enabled && status.mcp.error;
+      var pub = status && status.public, error = "";
+      if (listener && pub) error = !pub.running && pub.error;
+      else if (listener) error = status && status.mcp && status.mcp.enabled && status.mcp.error;
       if (!applied) say("unverified", translate("save_unconfirmed"));
-      else if (error) say("failed", translate("mcp_error", error));
-      else if (check && check.ok) say("verified", translate("save_applied_verified"));
-      else if (check) say("unverified", translate("save_applied_unverified", check.reason));
+      else if (error) say("failed", translate(pub ? "public_error" : "mcp_error", error));
       else say("saved", translate("save_applied"));
       return applied;
     });
@@ -4058,16 +4135,61 @@
   var MCP_URL_STORE = "lamplighter-mcp-url";
   var mcpKeyShown = false;
 
-  // 32 random bytes in base64url after the llmcp_ prefix.
-  function newMcpKey() {
+  var adminKeyShown = false;
+
+  // 32 random bytes in base64url after the prefix.
+  function newSecret(prefix) {
     var bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
     var text = "";
     for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
-    return "llmcp_" + btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return prefix + btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
+  function newMcpKey() { return newSecret("llmcp_"); }
+
+  function newAdminKey() { return newSecret("lladm_"); }
+
   function mcpKey() { return typeof rawConfig.mcp_key === "string" ? rawConfig.mcp_key : ""; }
+
+  function adminKey() { return typeof rawConfig.admin_key === "string" ? rawConfig.admin_key : ""; }
+
+  // The public listener's state: status.public, else the MCP state, which
+  // shares the listener, with what it serves unknown.
+  function publicState(st) {
+    if (!st) return null;
+    if (st.public) return st.public;
+    if (!st.mcp) return null;
+    return { listen: st.mcp.listen || "", running: !!st.mcp.running, error: st.mcp.error || "", web: null, mcp: !!st.mcp.running };
+  }
+
+  // The admin key and the state of the public listener.
+  function renderPublic() {
+    if (!$("admin-key-view")) return;
+    var secret = adminKey();
+    var view = $("admin-key-view");
+    view.textContent = secret ? (adminKeyShown ? secret : maskedKey(secret)) : translate("mcp_key_unset");
+    view.classList.toggle("muted", !secret);
+    $("admin-key-show").hidden = !secret;
+    $("admin-key-show").textContent = translate(adminKeyShown ? "mcp_hide" : "mcp_show");
+    $("admin-key-copy").hidden = !secret;
+
+    var box = $("public-status");
+    clear(box);
+    var state = publicState(status);
+    if (!state) box.appendChild(badge("muted", translate("mcp_unknown")));
+    else if (state.running) {
+      box.appendChild(badge("success", translate("mcp_running")));
+      var serves = [];
+      if (state.web) serves.push(translate("public_web"));
+      if (state.mcp) serves.push(translate("public_mcp"));
+      box.appendChild(el("span", { class: "mono", text: state.listen || "" }));
+      if (serves.length) box.appendChild(el("span", { text: serves.join(" · ") }));
+    } else {
+      box.appendChild(badge(state.error ? "failure" : "muted", translate(state.error ? "mcp_stopped" : "public_off")));
+      if (state.error) box.appendChild(el("span", { class: "error-text", text: state.error }));
+    }
+  }
 
   function maskedKey(value) { return value ? value.slice(0, 6) + "••••••••••••" + value.slice(-4) : ""; }
 
@@ -4079,8 +4201,9 @@
     try { stored = localStorage.getItem(MCP_URL_STORE) || ""; } catch (err) {}
     stored = stored.trim().replace(/\/+$/, "").replace(/\/mcp$/, "");
     if (stored) return /^[a-z][a-z0-9+.-]*:\/\//i.test(stored) ? stored : "https://" + stored;
-    var input = $("settings").elements["mcp_listen"];
-    var listen = (input && input.value.trim()) || (status && status.mcp && status.mcp.listen) || MCP_LISTEN;
+    var input = $("settings").elements["public_listen"];
+    var state = publicState(status);
+    var listen = (input && input.value.trim()) || (state && state.listen) || MCP_LISTEN;
     var at = listen.lastIndexOf(":");
     var host = at >= 0 ? listen.slice(0, at) : listen, port = at >= 0 ? listen.slice(at) : "";
     if (!host || host === "0.0.0.0" || host === "[::]" || host === "::") host = location.hostname || "127.0.0.1";
@@ -4133,6 +4256,7 @@
       ]));
     });
     if (!secret) snippets.appendChild(el("p", { class: "hint", text: translate("mcp_no_key") }));
+    renderPublic();
   }
 
   // Copies text, through a selected text area where the Clipboard API is
@@ -4147,19 +4271,37 @@
       var ok = false;
       try { ok = document.execCommand("copy"); } catch (err) {}
       document.body.removeChild(area);
-      if (ok) done(); else toast(translate("copy_failed"));
+      if (ok) done(); else toast(translate(SANDBOXED ? "copy_failed_sandbox" : "copy_failed"));
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    if (!SANDBOXED && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
     else fallback();
   }
 
   // A new key replaces the old one at once; replacing a key asks first.
   function generateMcpKey() {
-    if (mcpKey() && !confirm(translate("mcp_regenerate_confirm"))) return;
-    var button = $("mcp-key-new"), say = claimState(saveHost(button), button), secret = newMcpKey();
+    var button = $("mcp-key-new");
+    if (mcpKey() && !confirmed(button, translate("mcp_regenerate_confirm"))) return;
+    var say = claimState(saveHost(button), button), secret = newMcpKey();
     saveQueue = saveQueue.then(function () {
       return patchConfig({ mcp_key: secret }).then(function (token) {
-        showApplied(say, token, null, true);
+        showApplied(say, token, true);
+        return loadConfig();
+      }).catch(function (err) {
+        say("failed", err.message);
+      });
+    });
+  }
+
+  // A page opened through the public listener sends the admin key; after
+  // replacing it, the page sends the new one.
+  function generateAdminKey() {
+    var button = $("admin-key-new");
+    if (adminKey() && !confirmed(button, translate("admin_regenerate_confirm"))) return;
+    var say = claimState(saveHost(button), button), secret = newAdminKey();
+    saveQueue = saveQueue.then(function () {
+      return patchConfig({ admin_key: secret }).then(function (token) {
+        useKey(secret);
+        showApplied(say, token, true);
         return loadConfig();
       }).catch(function (err) {
         say("failed", err.message);
@@ -4193,6 +4335,7 @@
       rawConfig = data || {};
       if (pendingOrder) rawConfig.account_order = pendingOrder.slice();
       renderMcp();
+      if (settingsFilled) renderTimezone();
     });
   }
 
@@ -4223,18 +4366,24 @@
     });
     clearInterval(refreshTimer);
     refreshTimer = setInterval(function () {
-      if (document.hidden) return;
+      if (document.hidden || !magpie.visible) return;
       loadStatus().then(refreshHistory).catch(function () {});
     }, 30000);
   }
 
-  $("key-form").addEventListener("submit", function (e) {
+  // Magpie's sandbox blocks form submission without a submit event, so the
+  // key is also taken on Enter and on a click of the button. Without
+  // localStorage the key lasts until the page reloads.
+  function submitKey(e) {
     e.preventDefault();
     key = $("key-input").value.trim();
     if (!key) return;
-    sessionStorage.setItem(KEY_STORE, key);
+    try { localStorage.setItem(KEY_STORE, key); } catch (err) {}
     start();
-  });
+  }
+  $("key-form").addEventListener("submit", submitKey);
+  $("key-submit").addEventListener("click", submitKey);
+  $("key-input").addEventListener("keydown", function (e) { if (e.key === "Enter") submitKey(e); });
   $("refresh-all").addEventListener("click", function (e) {
     runAction(e.currentTarget, API + "/refresh", {}, translate("refreshed_all"));
   });
@@ -4282,12 +4431,18 @@
     if (top) noteEdit(e.target);
     var host = accountField ? accountFieldHost(e.target) : top ? saveHost(e.target) : null;
     if (host) editSaveState(host, e.target);
-    if (e.target.name === "mcp_listen") renderMcp();
+    if (e.target.name === "public_listen") renderMcp();
   });
+  timezoneOptions().forEach(function (name) { $("timezone-options").appendChild(el("option", { value: name })); });
+  // Saves the time zone the field shows, such as the browser's one filled in.
+  $("timezone-save").addEventListener("click", function () { saveField({ target: $("settings").elements.timezone }); });
   $("mask-toggle").addEventListener("click", toggleMask);
   $("mcp-key-new").addEventListener("click", generateMcpKey);
   $("mcp-key-show").addEventListener("click", function () { mcpKeyShown = !mcpKeyShown; renderMcp(); });
   $("mcp-key-copy").addEventListener("click", function (e) { copyText(mcpKey(), e.currentTarget); });
+  $("admin-key-new").addEventListener("click", generateAdminKey);
+  $("admin-key-show").addEventListener("click", function () { adminKeyShown = !adminKeyShown; renderPublic(); });
+  $("admin-key-copy").addEventListener("click", function (e) { copyText(adminKey(), e.currentTarget); });
   // The public address stays in this browser; the configs follow it.
   $("mcp-public-url").addEventListener("input", function (e) {
     try {
@@ -4383,18 +4538,11 @@
     if (chartBehind && !chartPointer && !chartCard.contains(e.relatedTarget)) renderChart();
   });
   window.addEventListener("resize", function () { if (history) renderChart(); });
-  window.addEventListener("storage", function (e) {
-    if (e.key === "cli-proxy-theme") { applyTheme(); renderChart(); }
-    if (e.key === "cli-proxy-language") applyLanguage();
-  });
+  window.addEventListener("languagechange", applyLanguage);
   if (window.matchMedia) {
     var media = window.matchMedia("(prefers-color-scheme: dark)");
-    if (media.addEventListener) media.addEventListener("change", function () { applyTheme(); renderChart(); });
+    if (media.addEventListener) media.addEventListener("change", function () { applyTheme(); if (status && history) renderChart(); });
   }
-
-  // Checked without reading the parent, so the layout also clears the
-  // Management Center's toolbar when it is served from another origin.
-  if (window.self !== window.top) document.documentElement.classList.add("embedded");
   // A request to raw.githubusercontent.com that is dropped without a reply
   // only fails when the browser's connection times out, so the logo also
   // moves to the mirror when it has not loaded within 5 seconds.
@@ -4407,10 +4555,12 @@
   }, 5000);
   applyTheme();
   applyLanguage();
-  watchParent();
+  magpieHello();
   var storedView = "quota";
   try { storedView = localStorage.getItem(VIEW_STORE) || "quota"; } catch (err) {}
   showView(storedView);
-  key = sessionStorage.getItem(KEY_STORE) || centerKey();
-  if (key) start(); else askForKey("");
+  // The internal listener needs no key; the public one answers 401 without
+  // the admin key, which asks for it.
+  try { key = localStorage.getItem(KEY_STORE) || ""; } catch (err) {}
+  start();
 })();

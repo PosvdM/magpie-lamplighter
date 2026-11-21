@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lamplighter</title>
+<!-- The internal listener fills in its page token; see pageToken in page.js. -->
+<meta name="lamplighter-page" content="">
+<title>Magpie-Lamplighter</title>
 <style>/*CSS*/</style>
 </head>
 <body>
@@ -11,10 +13,10 @@
      Chinese text here is shown until the script applies the language. -->
 <div id="key-section" class="card" hidden>
   <h2 class="card-title" data-i18n="key_title">需要管理密钥</h2>
-  <p class="secondary" data-i18n="key_hint">在管理中心登录时勾选“记住密码”，此页面会直接使用该密钥；否则请在这里输入，密钥只保存在当前标签页。</p>
+  <p class="secondary" data-i18n="key_hint">通过对外地址访问时需要 Lamplighter 的管理密钥（设置中的 admin_key），密钥保存在当前浏览器中。</p>
   <form id="key-form">
-    <input id="key-input" type="password" autocomplete="off" placeholder="CPA 管理密钥" data-i18n-placeholder="key_placeholder">
-    <button class="btn btn-primary" type="submit" data-i18n="key_submit">确定</button>
+    <input id="key-input" type="password" autocomplete="off" placeholder="Lamplighter 管理密钥" data-i18n-placeholder="key_placeholder">
+    <button id="key-submit" class="btn btn-primary" type="button" data-i18n="key_submit">确定</button>
   </form>
   <p id="key-error" class="error-text" hidden></p>
 </div>
@@ -25,8 +27,8 @@
          raw.githubusercontent.com cannot be reached, or page.js finds it still
          loading after 5 seconds, it is retried through the ghfast.top
          mirror, and removed if that fails too. -->
-    <img class="logo" src="https://raw.githubusercontent.com/PosvdM/cpa-plugin-lamplighter/main/assets/logo.png" alt="" width="30" height="30" onerror="if (this.dataset.mirror) this.remove(); else { this.dataset.mirror = '1'; this.src = 'https://ghfast.top/' + this.src; }">
-    <h1><a class="home" href="https://github.com/PosvdM/cpa-plugin-lamplighter" target="_blank" rel="noopener" title="在 GitHub 上查看" data-i18n-title="repo_hint">Lamplighter</a><span class="sub" data-i18n="app_sub">点灯人</span></h1>
+    <img class="logo" src="https://raw.githubusercontent.com/PosvdM/magpie-lamplighter/main/assets/logo.png" alt="" width="30" height="30" onerror="if (this.dataset.mirror) this.remove(); else { this.dataset.mirror = '1'; this.src = 'https://ghfast.top/' + this.src; }">
+    <h1><a class="home" href="https://github.com/PosvdM/magpie-lamplighter" target="_blank" rel="noopener" title="在 GitHub 上查看" data-i18n-title="repo_hint">Magpie-Lamplighter</a><span class="sub" data-i18n="app_sub">点灯人</span></h1>
     <span id="state" class="state"></span>
     <span id="meta" class="meta"></span>
   </header>
@@ -123,7 +125,7 @@
   <!-- Settings save independently. One .save-state per section heading or
        advanced fieldset legend summarizes progress and persistent failures. -->
   <div id="view-settings" hidden>
-    <p class="hint settings-note" data-i18n="save_hint">修改后自动保存到 CPA 的 config.yaml，插件几秒内应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。</p>
+    <p class="hint settings-note" data-i18n="save_hint">修改后自动保存到 Lamplighter 的 config.json 并立即应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。</p>
     <form id="settings">
       <section class="card settings-section">
         <h2 class="card-title" id="account-order-state"><span data-i18n="account_settings">账号</span></h2>
@@ -131,7 +133,7 @@
         <div class="table-wrap">
           <div id="account-rows"></div>
         </div>
-        <p class="hint" data-i18n="rename_hint">名称写入 CPA 凭证备注的第一行，保留其余各行。留空则按邮箱区分账号；备注有多行时，清空名称须确认删除整条备注。</p>
+        <p class="hint" data-i18n="rename_hint">名称保存在 Lamplighter 的设置中，不修改 Magpie 的账号名称。留空则显示 Magpie 中的账号名称或按邮箱区分账号。</p>
         <p class="hint" data-i18n="weight_hint">同一服务有多个账号时，可设置各账号的权重，合计按权重平均剩余额度。权重须大于 0，可带小数；留空使用输入框中提示的套餐默认值。</p>
       </section>
 
@@ -198,8 +200,21 @@
           </div>
         </div>
         <p class="hint" data-i18n="notify_modes_hint">“用完后”：窗口用完后，在下一次重置时通知一次。“有余量”：剩余高于告急阈值时才提醒。重置前提醒在 5 小时窗口重置前 1 小时、7 天窗口重置前 1 天发送。恢复通知附带上一周期的剩余额度，取自每次重置前 30 秒的查询。</p>
-        <p class="hint" id="timezone-note"></p>
         <p class="hint" id="language-note"></p>
+      </section>
+
+      <section class="card settings-section">
+        <h2 class="card-title"><span data-i18n="timezone">时区</span></h2>
+        <div class="grid-3">
+          <label><span data-i18n="timezone_name">IANA 时区名称</span><input name="timezone" type="text" list="timezone-options" spellcheck="false" autocomplete="off" placeholder="Asia/Shanghai"></label>
+        </div>
+        <datalist id="timezone-options"></datalist>
+        <div class="off-note timezone-unsaved" id="timezone-unsaved" hidden>
+          <span data-i18n="timezone_unsaved">时区尚未保存，确认输入框中的时区后点“保存”。</span>
+          <button id="timezone-save" class="btn btn-secondary btn-sm" type="button" data-i18n="timezone_save">保存</button>
+        </div>
+        <p class="hint" data-i18n="timezone_hint">点火时间、通知和页面中的时间按这个时区计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。尚未保存时，输入框中预填浏览器的时区。</p>
+        <p class="hint" id="timezone-note"></p>
       </section>
 
       <section class="card settings-section">
@@ -207,6 +222,7 @@
         <div class="checks">
           <label class="inline"><input name="ignition.enabled" type="checkbox"><span data-i18n="ignition_enabled">启用自动点火</span></label>
         </div>
+        <p class="hint" id="ignition-enable-hint" data-i18n="ignition_enable_hint">开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。</p>
         <div id="ignition-params" class="ignition-params">
           <p class="off-note" id="ignition-off" data-i18n="ignition_off" hidden>自动点火已关闭，这些设置暂不生效。</p>
           <div class="grid-3">
@@ -223,7 +239,6 @@
               <tbody id="ignition-rows"></tbody>
             </table>
           </div>
-          <p class="hint" data-i18n="ignition_models_hint">选择点火模型需要“高级”中的模型列表 API key。</p>
         </div>
       </section>
 
@@ -247,13 +262,6 @@
           <p class="hint" data-i18n="passive_skip_hint">整点前这段时间内已有被动数据的账号跳过本轮主动查询；设为 0 则每轮都主动查询。</p>
         </fieldset>
         <fieldset>
-          <legend><span data-i18n="models_api_key">模型列表 API key</span></legend>
-          <div class="grid-3">
-            <label class="span-2"><span>API key</span><input name="models_api_key" type="password" autocomplete="one-time-code" data-1p-ignore data-bwignore data-lpignore="true"></label>
-          </div>
-          <p class="hint" data-i18n="models_api_key_hint">插件用这个 key 从 CPA 读取模型列表，为自动点火选择模型；不使用自动点火时可以留空。请在 CPA 的 access.api-keys 中新建一个专用 key，不要填管理密钥。</p>
-        </fieldset>
-        <fieldset>
           <legend><span>Did Codex Reset</span></legend>
           <div class="checks">
             <label class="inline"><input name="codex_reset_updates.enabled" type="checkbox"><span data-i18n="codex_reset_enabled">转发 Did Codex Reset 发布的 Codex 重置信号</span></label>
@@ -267,22 +275,42 @@
           </div>
           <p class="hint" data-i18n="remember_chart_filters_hint">在当前浏览器中记住上次选择的额度窗口、时间范围和排序；关闭后每次打开页面都使用默认选择。</p>
         </fieldset>
+        <fieldset class="public">
+          <legend><span data-i18n="public_access">对外访问</span></legend>
+          <p class="hint" data-i18n="public_hint">内部监听只供 Magpie 使用，不需要密钥。对外监听让其他设备通过浏览器或 MCP 访问 Lamplighter：页面和接口需要管理密钥，MCP 需要 MCP 的密钥。两者都关闭时不监听。</p>
+          <div class="checks">
+            <label class="inline"><input name="web_enabled" type="checkbox"><span data-i18n="web_enabled">在对外监听上提供页面和接口</span></label>
+          </div>
+          <div class="grid-3">
+            <label><span data-i18n="public_listen">对外监听地址</span><input name="public_listen" type="text" spellcheck="false" autocomplete="off" placeholder="127.0.0.1:8318"></label>
+            <div class="field span-2" id="admin-key-field">
+              <span class="field-label" data-i18n="admin_key">管理密钥</span>
+              <div class="key-row">
+                <code id="admin-key-view" class="key-view"></code>
+                <button id="admin-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
+                <button id="admin-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
+                <button id="admin-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" data-i18n="public_status">状态</span>
+            <div id="public-status" class="mcp-status"></div>
+          </div>
+        </fieldset>
         <fieldset class="mcp">
           <legend><span>MCP</span></legend>
           <p class="hint" data-i18n="mcp_hint">AI 客户端（如 Claude Code）可以通过 MCP 查询额度、历史和事件，并刷新额度。</p>
           <div class="checks">
             <label class="inline"><input name="mcp_enabled" type="checkbox"><span data-i18n="mcp_enabled">启用 MCP 接口</span></label>
           </div>
-          <div class="grid-3">
-            <label><span data-i18n="mcp_listen">监听地址</span><input name="mcp_listen" type="text" spellcheck="false" autocomplete="off" placeholder="127.0.0.1:8318"></label>
-            <div class="field span-2" id="mcp-key-field">
-              <span class="field-label" data-i18n="mcp_key">密钥</span>
-              <div class="key-row">
-                <code id="mcp-key-view" class="key-view"></code>
-                <button id="mcp-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
-                <button id="mcp-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
-                <button id="mcp-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
-              </div>
+          <div class="field" id="mcp-key-field">
+            <span class="field-label" data-i18n="mcp_key">密钥</span>
+            <div class="key-row">
+              <code id="mcp-key-view" class="key-view"></code>
+              <button id="mcp-key-show" class="btn btn-ghost btn-sm" type="button" data-i18n="mcp_show">显示</button>
+              <button id="mcp-key-copy" class="btn btn-ghost btn-sm" type="button" data-i18n="copy">复制</button>
+              <button id="mcp-key-new" class="btn btn-secondary btn-sm" type="button" data-i18n="mcp_generate">生成新密钥</button>
             </div>
           </div>
           <div class="field">

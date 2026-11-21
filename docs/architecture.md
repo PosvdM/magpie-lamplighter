@@ -1,80 +1,256 @@
 # 架构
 
-Lamplighter 是用 Go 编写、以 `-buildmode=c-shared` 构建的 CPA 原生插件。CPA 加载动态库后调用 `cliproxy_plugin_init`，此后所有交互都是 JSON 信封形式的 RPC：CPA 调用插件的方法，插件通过宿主回调调用 CPA。
+Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm 包）在 Magpie 的插件宿主（Bun）中启动它；它通过 Magpie 网关（环境变量 `MAGPIE_ADDR`）和 Magpie 配置目录中的文件读取账号、额度和凭证，自己向厂商查询额度，经网关点火，并提供页面、HTTP 接口和 MCP。
 
 ## 模块
 
 | 路径 | 职责 |
 | --- | --- |
-| `main.go` | cgo 入口：导出 C ABI 函数，转发 RPC，实现宿主回调 |
-| `internal/plugin` | 插件 RPC 方法：注册、重新配置、暂停、管理接口、`usage.handle` |
+| `main.go` | 程序入口：打开数据目录和配置，启动引擎和内部监听，收到 SIGINT 或 SIGTERM 时退出 |
+| `internal/server` | HTTP 路由：页面、状态和操作接口、配置读写、插件宿主的 tool 调用；把配置交给引擎和对外监听 |
+| `internal/host` | Lamplighter 与 Magpie 之间的接口 `host.Host` 及其数据类型，见“与 Magpie 的接口” |
+| `internal/magpie` | `host.Host` 的实现：网关请求、Magpie 文件的读取 |
 | `internal/engine` | 后台循环：主动查询、被动数据、点火、通知、历史和状态页数据；`mcp.go` 提供模型可读 DTO 和额度预测 |
-| `internal/mcp` | 独立 HTTP 监听器、MCP Streamable HTTP 协议、Bearer 鉴权和 Origin 校验 |
-| `internal/host` | 宿主回调的 Go 封装、模型流打开/读取/关闭，以及 `host.http.do` 的超时控制 |
-| `internal/config` | 插件配置解析、默认值和取值范围；读取 CPA 配置判断插件是否启用、计算默认数据目录 |
+| `internal/mcp` | 对外监听：页面和接口的 `admin_key` 鉴权，`/mcp` 的 MCP Streamable HTTP 协议、`mcp_key` 鉴权和 Origin 校验 |
+| `internal/config` | 配置解析、默认值和取值范围；配置文件的读写（`Store`）和数据目录 |
 | `internal/providers` | 每个服务一个文件：额度请求和解析、响应头解析、点火请求、候选模型、默认设置；注册表，见下文“服务” |
 | `internal/quota` | 额度窗口和上游请求的类型，窗口种类判断，时间解析 |
-| `internal/egress` | 选择额度请求的网络出口 |
-| `internal/models` | 读取 CPA 模型列表，提供按新旧排列候选模型的工具 |
+| `internal/egress` | 按账号的代理发送额度请求 |
+| `internal/models` | 缓存网关的模型列表，提供按新旧排列候选模型的工具 |
 | `internal/ignite` | 点火时间计算、滑动重置判断、失败分类和失败保护 |
 | `internal/failure` | 把点火和额度查询的上游错误分成凭证失效、账号停用、限流，并提炼一句话摘要 |
 | `internal/notify` | Bark 和 webhook 发送、额度提醒、Did Codex Reset 转发 |
 | `internal/release` | 读取 GitHub 上的最新 Release，比较版本号 |
 | `internal/store` | `state.json`、额度历史和实例锁 |
+| `internal/redact` | 错误文本离开进程或写入磁盘前的脱敏，见“错误文本的脱敏” |
 | `internal/web` | 管理页面，HTML、CSS、JS 分文件编辑，运行时合成一个文档 |
+| `npm/` | Magpie 插件外壳（npm 包 `magpie-lamplighter`）：Bun 入口启动程序并提供 tools，页面启动文件，见“插件外壳” |
 
-## 与 CPA 的接口
+## 进程和数据目录
 
-插件在 `plugin.register` 中返回 `schema_version` 6，并声明两项能力：
+`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`）。内部监听不要求密钥，`-listen` 的主机部分必须是回环地址（`127.0.0.0/8`、`::1` 或 `localhost`），否则程序报错退出（`main.go` 的 `checkListen`）；需要从其他机器访问时使用对外监听。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
-- `management_api`：注册管理接口和页面；
-- `usage_plugin`：接收每个请求的用量记录，其中包含上游响应头。
+- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。手工写入、`PATCH /api/config` 会拒绝的设置在启动时照常加载：`timezone` 无效（包括 `Local`）时记一条警告日志，按 `timezone` 为空处理，即使用 `timezone_offset_hours`，没有时使用进程的时区；`admin_key` 与 `mcp_key` 相同时见“HTTP 接口”的“对外监听”。
+- `state.json`、`history/`、`instance.lock`：见下文“数据”。
 
-管理接口（需要 CPA 管理密钥）：
+启动顺序（`main.go` 的 `run`）：检查 `-listen`，创建数据目录，取得 `instance.lock`，然后读取 `config.json`，开内部监听，按配置开对外监听，最后启动后台循环（它读取 `state.json`）。`instance.lock` 是独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个进程使用数据目录。Magpie 的 `plugin update` 等命令会另起一个插件宿主，它启动的程序使用另一个端口和同一个数据目录；这个程序拿不到锁时每秒重试一次（`lockRetry`），不读取数据目录中的文件，也不监听任何端口，收到 SIGINT 或 SIGTERM 时直接退出。每次重试前和拿到锁后都检查是否已收到退出信号，已收到时释放锁直接退出，不读配置、不绑定端口。拿到锁时前一个进程已经退出，所以从磁盘读到的是它最后写入的配置和状态。等待期间插件宿主调用 tool 连不上内部监听，约 10 秒后报错。
+
+退出顺序（`main.go` 的 `shutdown`）：先调用 `server.Server.Shutdown`（步骤见“HTTP 接口”的“对外监听”中的“关闭”），它返回后不再写 `config.json`；再关闭内部监听，等其中的请求最多 5 秒（`shutdownTimeout`），超时时关闭连接；最后释放锁，`main` 随即返回，进程退出。后台循环 10 秒内没有结束时照样释放锁，它随进程结束；`state.json` 先写临时文件再改名（`store.StateFile.Save`），不会留下写了一半的文件。
+
+## 插件外壳
+
+npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `npm/`，`package.json` 的 `magpie` 字段声明页面和端口选项。包中带有 linux、darwin、windows 各 amd64 和 arm64 的程序（`dist/bin/<GOOS>-<GOARCH>/lamplighter`，构建方法见[开发](./development.md#构建)）。Magpie 用 `bun add --ignore-scripts` 安装插件，不运行安装脚本，所以程序必须随包发布，不能在安装时下载。
+
+**启动**：插件宿主（Bun）加载 `npm/index.js` 的默认导出 `{id, server}`，并以 `plugins.json` 中插件的 `options` 调用 `server`。宿主把模块导出的每个函数都当作插件函数，只有采用默认导出的写法，`lamplighter.js` 中的辅助函数才不会被当作插件函数加载。`server` 按 `process.platform` 和 `process.arch` 找到程序（缺少执行权限时补上），以 `-listen 127.0.0.1:<端口>` 启动，然后返回 tools；同一个宿主中只启动一次。端口取 `options.port`（1～65535 的整数，或这样的数字字符串），没有时为 8317，与 `main.go` 中 `-listen` 的默认值相同（`npm/test/package.test.mjs` 检查两处一致）。Magpie 的 CLI 进程（如 `magpie plugin update`）会另起一个宿主，并把 `options.port` 换成一个空闲端口，所以端口必须从选项读取。
+
+**环境变量**：程序继承宿主的环境（`childEnv`），另外：
+
+- 宿主的工作目录就是 Magpie 的配置目录（便携模式也是），环境中没有 `MAGPIE_CONFIG_DIR` 时把它设为宿主的工作目录。
+- `MAGPIE_ADDR` 原样传递。网关不要求回环地址上的请求带密钥，因此不传密钥。
+- Magpie 把宿主环境中的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY` 改名为 `MAGPIE_` 开头的同名变量（Magpie 源码 `internal/plugin/host.go` 的 `hostEnv`）。这些变量的值是 Magpie 自己的请求所用的代理（`netproxy.Env`：Magpie 中设置的代理，否则是系统代理；设为直连时没有；SOCKS5 代理已桥接为 HTTP 代理）。改名是因为 Bun 只在启动时读一次 `*_PROXY`，之后所有 fetch 都经过它，按服务设置的直连就无法生效；改名后由 `host.js` 为每个 fetch 单独选择代理，并没有禁止插件使用代理的意图。`host.js` 也按同样的方式把代理传给插件启动的程序（`proxied`），所以 `childEnv` 把 `MAGPIE_HTTPS_PROXY`、`MAGPIE_HTTP_PROXY`（缺少时用 `MAGPIE_ALL_PROXY` 代替）和 `MAGPIE_NO_PROXY` 映射回 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`；环境中已有同名变量（不区分大小写）时保留原值。Go 的代理设置不作用于回环地址，所以访问网关时不经过代理；账号自己的代理见“网络出口”。
+
+**生命周期**：`Supervisor` 让程序保持运行。程序自行退出时，先等 1 秒再重新启动；每次快速退出后等待时间加倍，最长 30 秒；程序连续运行 60 秒以上再退出时，等待时间回到 1 秒。快速退出通常是因为端口被占用：Magpie 换下内存占用过高的宿主时，新宿主开始接收调用，旧宿主及其程序要等调用结束才退出。宿主退出时（`process` 的 `exit` 事件），外壳向程序发送 SIGTERM（Windows 上直接结束进程），程序收到后正常关闭。此外，Magpie 停止宿主时会结束整个进程树（Unix 上是宿主所在的会话，Windows 上是作业对象），程序不会残留。程序的标准输入为空，标准输出和标准错误输出交给宿主，Magpie 把宿主的标准错误输出写入日志。
+
+**tools**：`npm/tools.js` 定义的工具与 `internal/mcp` 的 `toolDefinitions` 一一对应，名称、参数和说明相同（`npm/test/tools.test.mjs` 对照 `internal/mcp/server.go` 检查名称和参数）。参数以 JSON Schema 声明，Magpie 照原样列出、不做校验，所以 `toolArguments` 按 MCP 服务的规则检查：拒绝工具不接受的参数（`Unknown argument: …`），`limit` 必须是整数，其余参数必须是字符串。`execute` 把参数转成字符串对象（`limit` 写成十进制数字），发到内部监听的 `POST /api/tools/{name}`。返回 `{"result": …}` 时把结果写成 JSON 文本作为工具的回答，返回 `{"error": "…"}` 时抛出该错误，Magpie 将其作为调用失败返回。内部监听拒绝连接时（程序正在启动或重新启动），每 250 毫秒重试一次，最多等 10 秒。Magpie 的 tool 超时为 55 秒，外壳在 54 秒时放弃请求，内部监听给工具 50 秒。Magpie 以插件的短名称加工具名命名这些工具（如 `magpie-lamplighter_list_quotas`），单独提供这些工具的 MCP 地址是 `/mcp/magpie/tools/magpie-lamplighter`。
+
+**页面**：`magpie.page.file` 指向 `npm/page/index.html`，它先加载 Magpie 的 `_magpie/bridge.js`，再由 `open.js` 跳转到 Lamplighter 自己的页面：经 `magpie web` 打开时，桥接脚本提供经 Magpie 反向代理的内部监听地址 `magpie.service`（来自 `magpie.page.service` 的 `{port: 8317, option: "port"}`），页面跳转到这个地址；在 Magpie 桌面窗口中没有这个地址，页面读取插件的 `port` 选项，跳转到 `http://127.0.0.1:<端口>/`。桥接脚本 3 秒内没有响应时使用默认端口。页面的沙箱策略不允许内联脚本，所以脚本放在单独的文件中。`magpie.options` 中的 `{"port": 8317}` 是 Magpie 插件页面“Options”编辑框中显示的示例。
+
+## 与 Magpie 的接口
+
+引擎只通过 `host.Host` 访问 Magpie，测试使用假的实现。`internal/magpie` 按下表实现它，同时实现两个可选接口：`host.IdentityChecker`（`ConfirmIdentity`）和 `host.KeptRefresher`（`RefreshKept`）。引擎用类型断言使用它们。宿主没有实现 `host.IdentityChecker` 时，引擎无法核对 agy-cli 账号的身份，不为这类账号发送点火请求；没有实现 `host.KeptRefresher` 时改用 `RefreshQuota` 加 `KeptQuotas`：
+
+| 方法 | 来源 |
+| --- | --- |
+| `Accounts` | 网关的 `GET /v1/magpie/accounts`，只取 `kind` 为 `account` 的条目（API key 没有额度窗口）。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控。`User` 原样取 `user`（Magpie 的账号名，Magpie 按它的小写保存每个账号的设置）；`Email` 取 `user` 中的邮箱：Codex 的 Team、Business 等工作区席位和 Claude 的 Team、Enterprise 席位的 `user` 带上工作区（如 `a@b.com · Team`），`Email` 取 `·` 之前的部分，用于显示和打码 |
+| `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的文件，见下文“凭证”。无法确认凭证属于这个账号时（agy 自己的账号，见“凭证”），返回包装 `host.ErrIdentity` 的错误。agy-cli 账号先核对身份，再读代理设置和刷新 Google token，所以代理设置读取失败时，身份对不上的账号同样返回 `host.ErrIdentity` |
+| `ConfirmIdentity` | 只读本地文件，核对 agy-cli 账号的登录属于这个账号（规则同“凭证”中的 Antigravity），返回登录的指纹；不读代理设置，也不刷新 token。任何错误都表示没有核对成功。Codex 和 Claude 账号直接返回空指纹。点火在每个 agy-cli 请求发出前调用它，见“凭证问题” |
+| `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。见下文“额度记录” |
+| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。发送前重新读取账号列表，确认目标仍是启用的订阅账号且有账号名：网关收到没有 `user` 的请求会刷新该服务的所有账号。确认失败或网关不可用时返回 `host.Error`，`Code` 为 `account_not_found`（没有这个 pin、不是订阅账号或没有账号名）、`account_off`（已在 Magpie 中停用）或 `gateway_unavailable`（连不上网关、网关返回 5xx 或超时），`Message` 为中文短句；网关返回的 4xx 和格式错误照原样返回。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次发出刷新的时间计算，过早时返回 `ErrRefreshLimited`；刷新发出之前的确认、读取失败的调用不计入。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒；没有重新读取（30 秒内读过、读取失败或 Magpie 按设置暂不读取）时照样返回缓存的额度卡。所以发送刷新前先用 `kept=1` 记下这个账号的卡的读取时间（`readAt`，没有时取 `asOf`；`kept=1` 与刷新端点返回的卡都来自 Magpie 的 `CachedCards`，时间可以比较），刷新后在返回的卡中按服务和账号名（不区分大小写，不含 `from` 不为空的远程卡）找到这个账号：找不到，卡上有 `readDeferred`、`readError` 或 `error`，没有读取时间，或读取时间没有晚于刷新前时，返回 `Code` 为 `refresh_stale` 的 `host.Error`（`refreshStale`）。`Message` 是中文短句，带 Magpie 给出的原因时只保留一行、最多 120 个字符，邮箱只留用户名末两位（如 `***rk`），32 个字符以上的类 token 字符串替换为省略号（`shortReason`）。刷新前的读取已完成、调用方的 context 却已结束时不发送刷新，也不计入刷新间隔。引擎只在手动刷新凭证已过期的账号时调用，见下文“额度记录” |
+| `RefreshKept` | 即 `RefreshQuota`，另外把刷新返回的这个账号的卡按 `KeptQuotas` 的规则转成 `host.KeptQuota` 一起返回（`keptOf`），引擎因此不必再读一次额度记录。刷新端点的卡来自 Magpie 的 `provider.SubscriptionQuota`，窗口可能只给出 `resetSecs`（距重置的秒数），按收到回答的时间换算成重置时间，与 `kept=1` 的换算相同。返回 `refresh_stale` 时也带上能转换的卡。比较的基准是刷新前 `kept=1` 中这张卡的读取时间，与引擎已应用的读数无关。以下情况返回包装 `host.ErrFormat` 的错误，既不算刷新成功，也不算 `refresh_stale`：卡不比刷新前的读数新、也无法转换（如参与转换的窗口缺少 `used`），这时额度记录中是同一张卡；卡比刷新前的读数新，却没有 Lamplighter 认得的窗口（如 Antigravity 的卡，或窗口都还没有开始的 Claude 账号的卡），Magpie 读到了新读数，但其中没有可应用的额度；卡比刷新前的读数新、却无法转换时，再读一次 `kept=1`（`keptAfter`），其中这个账号的卡同样比刷新前的读数新且能转换时作为刷新返回的卡，否则返回这个错误。所以没有错误时总带着一张比刷新前的读数新的卡。转换错误中的窗口名只写 Lamplighter 认得的名称，其他写成 `a window`（`windowName`）：窗口名来自 Magpie 的卡，可以是任何文字 |
+| `Models` | 网关的 `GET /v1/models` |
+| `OpenModelStream` / `ReadModelStream` / `CloseModelStream` | 向网关发送点火请求（`openai-response` 为 `POST /v1/responses`，`claude` 为 `POST /v1/messages`，`openai` 为 `POST /v1/chat/completions`），带 `X-Magpie-Account`。`OpenModelStream` 的 context 只在响应头到达前取消请求；之后请求已到达厂商，只由 `CloseModelStream` 结束，调用方负责关闭每个打开的流。非 2xx 的错误正文在 10 秒内读完（`errorBodyWait`），不受 context 取消影响，状态码照常返回 |
+| `Log` | 标准错误输出，由插件宿主转交 Magpie 的日志 |
+
+Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，实现返回包装 `host.ErrFormat` 的错误，不猜测字段。以下格式按 Magpie 2a2a8d7 和 agy-cli 插件 0.1.106（magpie-community/plugins f4c3f89）核对。
+
+### 网关请求
+
+`internal/magpie` 直接连接 `MAGPIE_ADDR`（`0.0.0.0:<端口>` 和 `:<端口>` 改为 `127.0.0.1:<端口>`，与插件宿主相同），不经过环境变量中的代理。网关对来自本机回环地址的请求不要求密钥；带有转发头（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`Cf-Connecting-IP` 等）或浏览器特征（`Origin`、`Sec-Fetch-*`、以 `Mozilla/` 开头的 User-Agent）的请求按其他机器的请求处理，需要网关密钥（Magpie 的 `internal/gateway/lan.go`），因此请求中不带这些头。`MAGPIE_ADDR` 设为局域网地址时，请求不算来自本机，网关会拒绝，Lamplighter 不处理这种情况。
+
+所有网关请求共用 `internal/magpie/client.go` 中的 HTTP 客户端（不用代理，连接超时 10 秒，没有总超时）和辅助函数：`gatewayURL` 拼出地址，`newGatewayRequest` 加上 User-Agent `magpie-lamplighter`，`gatewayJSON` 发送请求并解析 JSON 响应。请求没有得到回答（连不上网关、超时或被取消）时得到 `Code` 为 `gateway_unreachable` 的 `host.Error`（用 `errors.As` 取出），读取回答失败时得到普通错误；点火请求在收到响应头之前失败时同样处理。这些错误的文字只有请求方法、不带查询参数的路径和原因（如 `request canceled`、`request timed out`、`connection refused`，`failedRequest`），不带 URL：刷新请求的查询参数 `user` 是账号邮箱，`*url.Error` 的文字却带完整 URL。被 context 结束的请求仍包装 `context.Canceled` 或 `context.DeadlineExceeded`，可以用 `errors.Is` 判断。context 带自定义原因结束时（`context.WithDeadlineCause`，如手动刷新的截止时间），`net/http` 返回的错误只包装这个原因，所以 `failureOf` 按请求的 context 判断是超时还是取消；`RefreshKept` 在发送刷新前发现调用方已结束时，错误的文字是这个原因，同时包装原因和 context 自己的错误（`ended`）。网关返回非 2xx 时 `gatewayError` 给出 `host.Error`：`Code` 为 `gateway_http_error`，`Method` 为请求方法和路径，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
+
+后台循环传入的 context 只在插件停止时取消，网关接受连接后不发响应头或正文发到一半停住时，没有期限的调用会一直挡住后台循环。所以 `Accounts`、`KeptQuotas` 和 `Models` 在入口设置整次调用的期限，覆盖响应头、正文和调用中附带的账号列表查询：`Accounts`（`accountsTimeout`）、`KeptQuotas`（`keptTimeout`）和 `Models`（`listTimeout`）为 20 秒。`RefreshQuota` 分两段计时：刷新前的账号列表和 `kept=1` 读取共 8 秒（`refreshLookTimeout`），刷新请求本身 32 秒（`refreshTimeout`），前面的读取慢不会挤占刷新的时间。32 秒要容纳网关为一张额度卡等待的 30 秒（Claude 的卡运行 Claude Code 的 `/usage`），两段合计 40 秒。两段都随调用方的 context 结束；调用方自己的期限或取消造成的错误照原样返回，不写成 `gateway_unavailable`。手动刷新怎样分配时间见“额度记录”的“过期的凭证”。点火流的时限见“流式执行与取消”。
+
+`magpie.Host` 自己保存运行中的状态：在内存中刷新的 Google token、每个账号上次调用 `RefreshQuota` 的时间和打开的模型流，都是 `Host` 的字段，不同的 `Host` 互不影响。
+
+### 凭证
+
+Magpie 用 pin 中的 id 指认账号：Codex 和 Claude 账号是 `logins.json` 中该条目的 `id`，没有 `id` 时是 `"magpie login\n<agent>\n<小写账号名>"` 的 SHA-256 前 8 字节；插件账号的 id 总是用插件服务名（如 `agy-cli`）和账号名这样算出（`nameID`），与条目自己的 `id` 无关（Magpie 的 `LoginID` 按 `agent` 为服务名查找，插件条目的 `agent` 是 `plugin:<服务名>`）。
+
+读取凭证时区分三种情况：可选的文件不存在时跳过；已知的没有可用凭证的状态返回普通错误或 `Expired`；其他格式返回包装 `host.ErrFormat` 的错误。`logins.json` 为 `null` 时按没有账号处理（Magpie 写空列表时可能写出 `null`），列表中不是对象的条目属于格式错误。
+
+| 服务 | 凭证来源 |
+| --- | --- |
+| Codex（`codex`） | `logins.json` 中 `agent` 为 `codex` 的条目的 `auth`，即 Codex 的 `auth.json`：`tokens.access_token`、`refresh_token`、`account_id`（没有时取 `id_token` 中的 `chatgpt_account_id`）。access token 的 JWT `exp` 已过时设 `Expired`。只有 refresh token 时（Magpie 从 refresh token 导入的登录）返回 `Expired`；`tokens` 缺失或两个 token 都没有时属于格式错误 |
+| Claude（`claude`） | `logins.json` 中 `agent` 为 `claude` 的条目的 `auth.claudeAiOauth`（`accessToken`、`refreshToken`、毫秒时间戳 `expiresAt`）。Claude Code 在账号自己的配置目录 `claude-accounts/<SHA-256(小写账号名) 前 16 个十六进制字符>/.credentials.json` 中刷新 token，Magpie 隔一段时间才写回 `logins.json`，所以那里的 `expiresAt` 更晚时用那里的 token。这个文件可以不存在（macOS 上 Claude Code 把它放在钥匙串中），也可以没有 `claudeAiOauth`（Claude Code 已退出登录），这两种情况都用 `logins.json` 中的副本；文件无法读取时返回错误，不是 JSON 对象时属于格式错误。`expiresAt` 已过时设 `Expired`。用 setup-token 添加的账号（`auth.setupToken`）的 token 不能读额度，返回 `Expired`，由引擎改读额度记录。`claudeAiOauth` 中两个 token 都没有，或既没有 `claudeAiOauth` 也没有 `setupToken` 时属于格式错误 |
+| Antigravity（`agy-cli`） | agy-cli 插件（`@magpie-community/opencode-agy-cli-auth`）的账号。`logins.json` 中 `agent` 为 `plugin:agy-cli` 的条目的 `home` 是该账号在 `plugin-auth.json` 中的键。键下的条目由 Magpie 的 `host.js` 按插件 `signedInAs` 的结果保存（按插件 0.1.108 核对），只接受两种：`{"type": "api", "key": "agy:<home>", "metadata": {"agyHome": "<home>", "email"}}` 是有自己目录的账号，agy 的登录文件为 `$XDG_STATE_HOME/magpie-agy-bridge/accounts/<home>/.gemini/antigravity-cli/antigravity-oauth-token`（没有 `XDG_STATE_HOME` 时为 `~/.local/state`）；`{"type": "api", "key": "agy", "metadata": {"email"}}` 是 agy 自己登录的第一个账号，macOS 和 Windows 上凭证在系统钥匙串中，Lamplighter 不读钥匙串（读取可能弹出授权框），返回 `errAgyKeyring`，Linux（如 Magpie 的 Docker 镜像）上读 `~/.gemini/antigravity-cli/antigravity-oauth-token`。默认文件存放的是 agy 当前登录的账号，所以其他条目（`type` 不是 `api`、缺少 `agyHome` 但 `key` 不是 `agy`、`agyHome` 与 `key` 不符、`logins.json` 条目没有 `home`）都属于格式错误，不读默认文件。登录文件的内容是 `{"token": {"access_token", "refresh_token", "expiry"}, "auth_method", "id_token_email"}`，也可能带 go-keyring 的 `go-keyring-base64:` 前缀；`expiry` 必须是 RFC 3339 时间，Go 的零时间表示不过期，缺失或无法解析时属于格式错误，错误中不带字段的值。两个 token 都为空时表示 agy 没有登录这个账号。`id_token_email` 是 agy 登录的 Google 账号（插件 `signin.mjs` 的 `emailOf` 读的也是它），与条目的 `metadata.email`（没有时取 `logins.json` 中是邮箱的账号名）不区分大小写比较，不一致时返回 `errAgyOtherAccount`，不使用其中的 token，错误中的邮箱只留用户名末两位。agy 在本机改登其他 Google 账号后，默认文件会换成新账号的登录，所以 agy 自己的账号必须两边都有邮箱且一致，缺少任一邮箱时返回 `errAgyUnproven`；有自己目录的账号，目录中只有该账号的登录，只在两边邮箱都有且不一致时拒绝。`errAgyKeyring`、`errAgyOtherAccount` 和 `errAgyUnproven` 都包装 `host.ErrIdentity`，不属于格式错误：这时无法确认网关会用哪个 Google 账号发送这个账号的请求，引擎不点火，见“凭证问题”。`metadata.email` 只在 Magpie 登录时由插件写入（`signedInAs`），在 agy 中重新登录不会补上；插件的“使用 Google 登录”在 agy 已登录时直接保存 agy 当前的账号，仍是 agy 自己的账号。所以错误提示让用户在 Magpie 中用“添加另一个 Google 账号”重新添加，这样添加的账号有自己的目录 |
+
+Claude 和 Codex 的 token 刷新时会更换 refresh token，Lamplighter 只读取、绝不刷新，否则会让 Magpie 或代理 CLI 掉线。Google 刷新 token 时 refresh token 不变：Antigravity 的 access token 已过期或 2 分钟内过期时，用 agy 的 OAuth 客户端向 `https://oauth2.googleapis.com/token` 刷新（经该账号的代理），新 token 只保存在内存中直到过期前 2 分钟，不写回 agy 的文件。Google 返回 `invalid_grant` 时报告需要在 Magpie 中重新登录；没有 refresh token 且 access token 已过期时返回 `Expired`。Antigravity 的 Cloud Code project 是个人 Google 账号共用的 `aicode-consumers`（`auth_method` 为空或 `consumer`）；其他 `auth_method` 的账号需要另行查询 project，返回错误。
+
+`Fingerprint` 是 refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 setup-token 或 access token，见“凭证问题”。`ProxyURL` 的取法见“网络出口”。
+
+### 额度记录
+
+`KeptQuotas` 把 `kept=1` 返回的每张 `kind` 为 `subscription` 的额度卡，按服务和账号名（`user`，不区分大小写）对应到 `Accounts` 中的 pin，转成与该服务 `Fetch` 相同的额度组和窗口 ID。来自远程 Magpie 的卡（`from` 不为空）和对应不上的卡不输出。读取时间取 `readAt`，没有时取 `asOf`，都没有时不输出。
+
+| Magpie 的窗口名 | 额度组 key | 窗口 ID |
+| --- | --- | --- |
+| Codex 的 `5 hours`、`7 days` | `codex:main` | `five-hour`、`seven-day` |
+| Codex 的其他 `<n> hours`、`<n> days` | `codex:main` | `window-<长度>`，如 `window-30d` |
+| Claude 的 `5 hours`、`7 days` | `claude:main` | `five-hour`、`seven-day` |
+| Claude 的 `7 days · Opus`、`7 days · Sonnet` | `claude:seven-day-opus`、`claude:seven-day-sonnet` | `seven-day-opus`、`seven-day-sonnet` |
+| Claude 的 `7 days · Fable` | `claude:seven-day-fable` | `seven-day-fable` |
+
+剩余额度为 `100 - used`。文字行（`text`）、无限额度（`unlimited`）、其他通道（`lane`）、钱包余额（`balance`）和其他名称的窗口（如 `Allowance`、`Extra usage`）不输出。Magpie 为还没有开始 5 小时窗口的 Claude 账号补一个没有重置时间、用量为 0 的 `5 hours` 窗口，额度接口不返回这样的窗口，所以没有重置时间且用量为 0 的窗口也不输出。参与转换的窗口缺少 `used` 时返回 `host.ErrFormat`。
+
+Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gemini · 5 hours`），不带 `Fetch` 用作窗口 ID 的 `bucketId`，转换后不会更新任何已有窗口。Antigravity 的 token 可以在内存中刷新，主动查询总能进行，所以不需要这份读数。
+
+被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
+
+**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再应用刷新返回的这个账号的卡（`refreshKept`，宿主实现 `host.KeptRefresher` 时）；回答中没有这张卡，或刷新失败时，再读一次额度记录，最多等 5 秒（`keptRereadWait`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。宿主实现 `host.KeptRefresher` 时，只有刷新返回了这张卡才算成功：这张卡比刷新前 Magpie 的读数新，再读的额度记录只比引擎已应用的读数新，可能是刷新前就有的读数；刷新返回成功却没有卡时按包装 `host.ErrFormat` 的错误处理。没有实现时，再读的读数比刷新前已应用的新才算成功。`RefreshQuota` 返回 `Code` 为 `refresh_stale` 的 `host.Error`（Magpie 这次没有读到新额度），或（宿主没有实现 `host.KeptRefresher` 时）返回成功但额度记录中的读数不比刷新前已应用的新时，同样应用已有的读数用于显示，但这次刷新算失败，原因为“Magpie 这次没有读到新额度”，`refresh_stale` 的 `Message` 跟在冒号后（最长 120 个字符，`staleRefresh`）。定时查询只读额度记录，找到旧读数不算错误。`RefreshQuota` 返回 `Code` 为 `account_off`、`account_not_found` 或 `gateway_unavailable` 的 `host.Error` 时，原因写成固定的短句（“账号在 Magpie 中已关闭”“Magpie 中找不到这个账号”“Magpie 网关不可用”，`refreshReasons`），不带 Magpie 的原文。只刷新一个账号时，`engine.manualPoll` 把这个账号的错误交回调用方：`POST /api/refresh` 返回 `ok: false` 和错误文字；MCP 的 `refresh_quotas` 返回 `ok: false` 和 `error`，只在错误是 `refreshFailure`（上述三种原因、没有读到新额度，以及账号已不在凭证列表中）时写明原因：没有读到新额度时 `error` 就是上面的原因，其余在原因前加“Magpie 刷新额度失败：”；其他错误的文字可能带上游响应或账号名，只提示查看 `list_quotas`。账号在刷新时已不在凭证列表中（在 Magpie 中关闭、删除，或服务未开启监控）时返回 `errRefreshAccountGone`。刷新全部账号时只报告凭证列表读取失败，各账号的错误在状态中。经 Magpie 调用的 tool 最多等约 50 秒（插件宿主给 55 秒，内部监听的工具路由给 50 秒），所以手动刷新按整次调用分配时间：从 `manualPoll` 开始计时，读取账号列表也算在内，最长 48 秒（`manualRefreshBudget`）；发来命令的请求有期限时（`command.deadline`，如工具路由的 50 秒），最晚在它之前 1 秒（`replyMargin`）结束（`manualRefreshEnd`）。整轮手动刷新（读取账号列表、主动查询、`RefreshQuota` 和再读额度记录）共用一个在结束时间到期的 context，所以刷新全部账号时，无论有多少账号等待 Magpie，都在结束时间之前结束：到期时还没有查询的账号本轮不再查询，错误为“超过手动刷新的时限，未完成”（`errManualTimeUp`），本轮的凭证通知也留给下一轮发送。所有 `RefreshQuota` 共用从它派生的 context，在结束时间之前 5 秒（`keptRereadWait`）到期，留给之后再读一次额度记录；一次 `RefreshQuota` 最多用 40 秒（见“网关请求”）。刷新因这些期限失败时，原因同样为“超过手动刷新的时限，未完成”；插件停止造成的取消不写这个原因。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
+
+## HTTP 接口
+
+Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）：
+
+- 内部监听：`-listen` 的地址，只能是回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。路由外面另有 Host 检查、浏览器请求检查和 CORS，见下文“内部监听”。
+- 对外监听：配置中的 `public_listen`（默认 `127.0.0.1:8318`），供服务器前面的域名或反向代理使用。`GET /` 和 `HEAD /` 不要求密钥，`/api/*` 要求 `admin_key`，`/mcp` 要求 `mcp_key`，见下文“对外监听”。
+
+路由：
 
 | 方法和路径 | 作用 |
 | --- | --- |
-| `GET /v0/management/lamplighter/status` | 状态页数据，配置中的密钥只显示是否已设置。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
-| `GET /v0/management/lamplighter/history?range=1h\|3h\|6h\|12h\|24h\|26h\|4d\|8d\|15d\|1mo\|36d&window=5h\|7d` | 额度历史和点火事件，默认 `24h`。`window` 为 `5h` 或 `7d` 时只返回这种窗口的系列，省略或为其他值时返回全部窗口；点火事件不按窗口筛选。每个系列的第一个点是范围开始前的最后一个样本（往前最多找一天，`historyLead`；分段时不与后面的样本合并），曲线因此画到横轴左端，页面在左端裁掉它；范围内没有样本的系列不返回。5 小时额度按小时、7 天额度按天，依次是：1 个单位；半个窗口加 1（`3h`、`4d`）；一个窗口加 1（`6h`、`8d`）；半天或半月，能完整显示两个窗口（`12h`、`15d`）；一天或一个月（`24h`、`1mo`）；五个窗口加 1（`26h`、`36d`）。`1mo` 从插件时区上个月的同一日期（该月没有这一天时取最后一天）到现在 |
-| `POST /v0/management/lamplighter/refresh` | 立即主动查询，`{"auth_index": "..."}` 只查一个账号 |
-| `POST /v0/management/lamplighter/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
-| `POST /v0/management/lamplighter/test-notify` | 同时向已配置的渠道发送测试通知，`results` 中每个渠道一项：`channel`、`ok`、`error`，webhook 还有 `response`（响应的前 200 字）和 `unchecked`（没有设置 `success_json`，只检查了 HTTP 状态码） |
-| `POST /v0/management/lamplighter/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
-| `POST /v0/management/lamplighter/check-update` | 检查新版本，返回状态；页面打开时调用 |
+| `GET /` | 管理页面 |
+| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置（`admin_key_set`、`mcp_key_set`）；`public` 和 `mcp` 是对外监听的状态，见下文“对外监听”；`magpie_warmup` 是 Lamplighter 会点火、Magpie 也开启了预热的账号 pin 列表，见“Magpie 的预热”。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
+| `GET /api/history?range=…&window=5h\|7d` | 额度历史和点火事件，参数和返回格式见下文“额度变化图表”。扫描历史文件用请求的 context，请求结束（客户端断开、监听关闭）时停止 |
+| `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号；凭证已过期的账号先让 Magpie 刷新额度，见“与 Magpie 的接口”的“额度记录” |
+| `POST /api/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
+| `POST /api/test-notify` | 同时向已配置的渠道发送测试通知，`results` 中每个渠道一项：`channel`、`ok`、`error`，webhook 还有 `response`（响应的前 200 字）和 `unchecked`（没有设置 `success_json`，只检查了 HTTP 状态码） |
+| `POST /api/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
+| `POST /api/check-update` | 检查新版本，返回状态；页面打开时调用 |
+| `GET /api/config` | 已保存的配置原文，含密钥，供设置页填表 |
+| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析并通过 `config.Config.Check`，然后整体写入 `config.json` 并应用。返回保存后的原文。`Check` 拒绝去掉首尾空白后相同的非空 `admin_key` 和 `mcp_key`，以及 `time.LoadLocation` 不认识的非空 `timezone` 和 `Local`（`time.LoadLocation` 把它当作进程的时区，空值已表示这个意思），返回 400，错误信息只写字段名，不含值。合并、写盘、应用到引擎和对外监听、生成响应在 `server.Server.patchMu` 内依次完成，并发的请求按保存的顺序应用，运行中的配置与文件一致。进程开始退出后返回 503，不写盘 |
+| `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
-页面注册为资源 `GET /v0/resource/plugins/lamplighter/page`，菜单名为 `Lamplighter`。资源本身不需要认证，页面中的数据请求都带管理密钥。页面从管理中心保存在 `localStorage` 的 `cli-proxy-auth` 中读取密钥：支持以 `location.host` 做可逆 XOR 混淆的 `enc::v2::`、同时使用 `location.host` 和 User-Agent 的 `enc::v1::`，以及不带前缀的明文 JSON。读不到时让用户输入并只保存在 `sessionStorage`。
+`account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
 
-设置通过 CPA 的 `PATCH /v0/management/plugins/lamplighter/config` 自动保存：开关和勾选框的 `change` 事件触发保存，文本和数字在失焦或按回车时保存，每次只提交改动字段所在的顶层键；三档提醒阈值校验 `notice ≥ low ≥ critical` 后一起提交。`bark_url` 和 `cpa_base_url` 去掉尾部斜线，空的 CPA 地址和 MCP 监听地址按后端默认值保存，避免已应用判断与后端规整结果不一致。该接口只合并顶层键，所以 `ignition`、`providers`、`recovery_notify` 等对象以已保存的对象为基础整体提交。保存依次进行，后一次以前一次写入的配置为基础；数字不满足输入框的范围或步长时不保存。
+### 内部监听
 
-浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。设置中只有 `models_api_key` 是密码框，它的值按以下规则保存：输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示；与当前管理密钥相同的值不保存，并提示这是管理密钥；其他非空值先用它请求 `GET /v1/models`（插件读取模型列表的请求），返回 401 或 403 时不保存并提示 CPA 不接受这个 key，其他结果（包括请求失败）照常保存。拒绝保存时保留输入草稿并显示失败原因；页面加载时的自动填入恢复为已保存的值。该输入框还带有让 1Password、Bitwarden 和 LastPass 跳过它的属性。`models_api_key` 输入框设为 `autocomplete="one-time-code"`：Chrome 的密码管理不把这类字段当作密码，表单中没有其他密码框时只把它作为备用字段，不在页面加载时自动填入，也不在修改后弹出保存或更新密码的提示。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
+内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。HTTP 服务（`main.go` 的 `newInternalServer`）读请求头限时 10 秒、读整个请求 30 秒、空闲连接 2 分钟，请求头最多 64 KiB，从读完请求头到写完响应最多 200 秒（`internalWriteTimeout`）：tool 调用最长 50 秒，页面的操作最多等后台循环 3 分钟。
 
-`webhook.headers` 和 `webhook.success_json` 在页面上以文本编辑（每行一个 `名称: 值`、JSON 对象），无法解析时不保存。状态接口只返回 webhook 的地址、请求头和请求体是否已设置，页面从 CPA 的插件配置接口读取原值填入表单。
+**Host 检查**：请求的 Host 不是 `localhost` 或回环 IP（`127.0.0.0/8`、`::1`，端口不限）时返回 403，包括 `GET /`、`/api/*` 和预检请求。内部监听不要求密钥，恶意域名把自己的名字重新解析到 `127.0.0.1` 后，在浏览器中与内部监听同源，能读到页面和 `GET /api/config` 中的密钥；这类请求的 Host 是那个域名。合法的访问都用回环地址：Magpie 的页面服务代理把 Host 设为 `127.0.0.1:<端口>`（Magpie 源码 `internal/gui/pageservice.go` 的 `servePageService`），桌面窗口中的页面直接打开 `http://127.0.0.1:<端口>/`，插件宿主经 `127.0.0.1` 调用 tool。`-listen` 只能绑定回环地址（见“进程和数据目录”），Host 检查防的是浏览器中的 DNS 重绑定。
+
+**页面令牌**：`server.New` 用 `crypto/rand` 生成 32 字节随机数，以 base64url（无填充）编码作为页面令牌，进程运行期间不变。内部监听的 `GET /` 返回 `web.PageWith(令牌)`：它把页面中的 `<meta name="lamplighter-page" content="">` 填上令牌，页面没有这个标签时原样返回。页面请求接口时在 `X-Lamplighter-Page` 请求头中带上令牌。对外监听返回不带令牌的 `web.Page()`。
+
+**浏览器请求和 CORS**：Magpie 的插件页面在 `sandbox="allow-scripts"` 的 iframe 中运行，页面服务代理还加上 CSP `sandbox`，页面是不透明源，请求自己的 `api/…` 时带 `Origin: null`，没有 CORS 头就读不到响应。任何网页都能向内部监听发请求（包括在 sandbox iframe 中带 `Origin: null`），读不到响应时路由也已经执行，刷新、点火、测试推送和修改配置都会生效。所以浏览器发出的 `/api/*` 请求在执行路由之前检查：
+
+- `/api/*` 的 `OPTIONS` 预检且 `Origin` 为 `null`：返回 204，带 `Access-Control-Allow-Origin: null`、`Access-Control-Allow-Methods: GET, POST, PATCH`、`Access-Control-Allow-Headers: Content-Type, Authorization, X-Lamplighter-Page`、`Access-Control-Max-Age: 600`、`Vary: Origin`。预检本身不带自定义请求头，所以不检查令牌；预检不执行路由。
+- 带 `Origin` 或 `Sec-Fetch-Site` 请求头的 `/api/*` 请求（包括其他预检）是浏览器发出的，网页无法去掉这两个头。只有同时满足以下两条才执行路由，否则返回 403：`X-Lamplighter-Page` 等于令牌（两边先求 SHA-256 再常数时间比较）；来源是插件页面，即 `Origin` 为 `null`、`Origin` 与内部监听同源（`http://` 加请求的 Host），或没有 `Origin` 而 `Sec-Fetch-Site` 为 `same-origin`。`Origin` 为 `null` 时响应带 `Access-Control-Allow-Origin: null` 和 `Vary: Origin`。令牌只在内部监听返回的页面里，其他网页拿不到。
+- 不带这两个头的请求照常处理，不加 CORS 头：插件宿主（Bun）调用 `POST /api/tools/{name}` 时不带它们。
+- 不返回 `Access-Control-Allow-Credentials`。`GET /` 不是 `/api/*`，不做这项检查，也不加 CORS 头，浏览器可以直接打开。
+
+对外监听不加 CORS：独立访问时页面与接口同源，鉴权靠 `admin_key`。
+
+### 对外监听
+
+对外监听由 `mcp.Server` 持有（自己的 `net.Listen` 和 `http.Server`）。`server.New` 用 `mcp.Server.SetWeb` 把上述路由交给它，`server.Server.apply` 每次应用配置时调用 `mcp.Server.Configure`。监听上提供两部分，各自按配置开启：
+
+| 部分 | 开启条件 | 鉴权 |
+| --- | --- | --- |
+| 页面和接口（`/mcp` 以外的路径） | `web_enabled` 为真且 `admin_key` 非空 | `Authorization: Bearer <admin_key>` |
+| `/mcp`，见“MCP” | `mcp_enabled` 为真且 `mcp_key` 非空 | `Authorization: Bearer <mcp_key>`，以及 Origin 校验 |
+
+- 两部分都没有开启时不监听，端口释放。`admin_key` 不校验格式，非空即可；设置页生成的密钥为 `lladm_` 加 32 字节随机数的 base64url 编码。
+- `admin_key` 与 `mcp_key` 不能相同：同一把密钥会同时打开接口和 `/mcp`。`PATCH /api/config` 拒绝这样的配置；手工编辑的 `config.json` 在启动时含有相同的密钥时，`server.Server.apply` 以 `mcp.Config.Refused` 交给 `mcp.Server.Configure`，对外监听两部分都不提供，记一条错误日志，`status.public.error`（开启 MCP 时还有 `status.mcp.error`）说明原因，不含密钥。
+- `GET /`（以及 `HEAD /`）不要求密钥：页面本身不含数据，浏览器打开页面时也带不上请求头。页面请求接口收到 401 后让用户输入管理密钥，见“管理页面”。其他路径（包括不存在的路径）缺少密钥或密钥错误时返回 401 和 `WWW-Authenticate: Bearer`，不暴露有哪些路由；带对密钥后，不存在的路由返回 404。页面和接口没有开启时，`/mcp` 以外的路径都返回 404；`/mcp` 没有开启时返回 404。
+- 两把密钥只开放各自的部分：`admin_key` 不能访问 `/mcp`，`mcp_key` 不能访问页面和接口。比较方法相同：对 `Bearer <密钥>` 和请求的 `Authorization` 头各求 SHA-256，再常数时间比较，不泄露密钥长度和前缀。
+- 页面和接口不做 Origin 校验，也不返回 CORS 头：密钥在请求头中，其他网站的页面无法让浏览器带上它。
+- **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。需要重新绑定时（`mcp.Server.drainLocked`），旧监听立即停止接受连接、端口释放，MCP 请求被取消；已读入的页面和接口请求在后台由 `http.Server.Shutdown` 等待回完，最多 5 秒（`drainTimeout`），超时或 `mcp.Server.Close` 时关闭连接。`Configure` 不等待这些请求，因为修改 `public_listen` 的 `PATCH /api/config` 本身就在等 `Configure` 返回。绑定失败时记录错误，每 2 秒重试。
+- **关闭**：`server.Server.Shutdown` 依次：在 `server.Server.mu` 内标记停止，然后释放这把锁；取消引擎（`engine.Engine.Cancel`），管理操作立即返回 `engine.ErrStopped`（HTTP 503），排队未执行的操作放弃，正在执行的操作的网络请求被取消，包括等待响应头的自动点火请求（`Cancel` 取消 `Engine.admission`），之后 `engine.admit` 不再准入新的点火请求；关闭对外监听，取消其中的请求并等它们结束，最多 5 秒（`mcp.handlerWait`），不理会取消的请求不再挡住退出；取一次 `patchMu`，等已开始的配置写入完成；最后等后台循环结束，最多 10 秒。先取消引擎再等请求，是因为页面和接口的请求可能在等后台循环。对外的接口请求读取状态时要取 `server.Server.mu`，持锁等待会死锁。`PATCH /api/config` 在 `patchMu` 内检查停止标记，停止后返回 503，不写盘，所以 `Shutdown` 返回后不再写 `config.json`。停止后的实例不再应用配置，也不重新监听。
+- **超时**：读请求头 5 秒、读请求 15 秒、写响应 190 秒、空闲连接 30 秒，请求头最多 16 KiB，页面、接口和 `/mcp` 共用。插件宿主的 tool 调用走内部监听，经对外接口调用 `POST /api/tools/{name}` 同样最长 50 秒。
+
+状态接口中的对外监听状态：
+
+- `public`：`listen`（`public_listen`）、`running`（正在监听）、`error`（`admin_key` 与 `mcp_key` 相同的原因，或绑定、运行的错误；没有时为空字符串）、`web`（页面和接口正在提供）、`mcp`（`/mcp` 正在提供）。两部分都没有开启时 `running`、`web`、`mcp` 都为假。
+- `mcp`：`enabled`（`mcp_enabled`）、`listen`、`running`（监听正在运行）、`error`、`path`（固定为 `/mcp`）。开启 MCP 时，`error` 依次为 `admin_key` 与 `mcp_key` 相同的原因、`mcp_key` 为空时的 `MCP key is empty`、监听的错误；关闭 MCP 时为空。
+- `status.config` 不含 `admin_key` 和 `mcp_key`，以 `admin_key_set`、`mcp_key_set` 表示是否已设置；`GET /api/config` 返回原值供设置页填表。
+
+## 管理页面
+
+### 运行环境
+
+页面由内部监听的 `GET /` 提供，也可以经对外监听访问。在 Magpie 中，插件页面的 iframe 先加载插件包中的页面文件，再跳到内部监听：桌面窗口直接访问 `127.0.0.1:<端口>`，`magpie web` 经 Magpie 页面服务的反向代理访问。Magpie 每次 Restart（安装、更新或设置插件，更新 Bun）都会结束插件宿主及其子进程；打开页面时 Magpie 先启动宿主，最多等 7 秒，服务未就绪时显示 502 页并每 2 秒重试。
+
+iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 CSP sandbox，所以页面在不透明源中运行（`window.origin` 为 `"null"`，`page.js` 中的 `SANDBOXED`）：没有 `localStorage`，`confirm()` 不弹窗直接返回假，不能写剪贴板，表单不能提交。页面按以下方式处理：
+
+- `localStorage` 的每次读写都放在 `try` 中。沙箱中读写失败时，视图、打码、图表筛选、5 小时重置开关、MCP 对外地址和管理密钥只在本次打开期间有效。
+- 需要确认的操作（立即点火、替换管理密钥或 MCP 密钥）经 `confirmed` 询问：沙箱外调用 `confirm()`；沙箱中在提示框里显示确认文字，5 秒内再点一次同一个按钮才执行。
+- 复制文字时，沙箱中不调用 Clipboard API，改用选中文本加 `execCommand("copy")`；失败时提示手动复制，或经对外地址在浏览器中打开页面。截图见下文。
+- 管理密钥输入框的按钮为 `type="button"`，点击按钮和在输入框中按回车都提交密钥，不依赖表单的提交事件。
+
+页面在沙箱中请求自己的 `api/…` 也是跨源请求（`Origin: null`）。内部监听把进程启动时生成的令牌写入页面的 `<meta name="lamplighter-page" content="">`，页面读取它（`pageToken`），非空时在每个请求中以 `X-Lamplighter-Page` 发送；内部监听拒绝不带正确令牌的浏览器请求，只对带正确令牌的 `Origin: null` 请求返回 CORS 头，见“HTTP 接口”的“内部监听”。其他网站读不到页面，也就拿不到令牌。页面的请求只由自己的代码发出（`api`），不按父窗口的消息发请求或返回数据，嵌入页面的网站无法借用令牌。
+
+### 与 Magpie 窗口的通信
+
+页面不加载 Magpie 的 `bridge.js`，自己实现其中的消息协议（Magpie 源码 `internal/gui/pagebridge.js`，窗口一侧为 `internal/gui/assets/pluginpages.js`）。Magpie 按 `ev.source` 识别插件页面的 iframe，与其中加载的是哪个文档无关，所以跳到内部监听之后仍能通信。
+
+- 页面在 iframe 中（`window.parent !== window`）加载时向父窗口发送 `{magpie: 1, id, method: "hello"}`（`magpieHello`），Magpie 答复 `{dark, lang, tokens, context, service, visible}`。答复到达后 `magpie.ready` 为真。
+- Magpie 在主题或语言变化时发送 `{magpie: 1, event: "theme", data: {dark, lang, tokens}}`，在读者离开和回到页面时发送 `{magpie: 1, event: "visibility", data: {visible}}`。页面只处理来自 `window.parent`、带 `magpie: 1` 的消息（`magpieMessage`）。
+- 离开页面期间跳过每 30 秒一次的状态刷新，回到页面时立即刷新。
+- 页面不发送 `error` 方法：Magpie 收到后会用“页面出错”替换整个插件页面。
+- 页面单独打开或 Magpie 不答复时，主题和语言跟随浏览器。
+
+### 独立访问和管理密钥
+
+经对外监听打开时，`api` 收到 401 后显示“需要管理密钥”。输入的密钥保存在 `localStorage` 的 `lamplighter-admin-key` 中，之后以 `Authorization: Bearer <密钥>` 发送。请求没有带密钥时只显示输入框；带了密钥时清除它并显示“管理密钥无效”。请求发出后页面换了密钥（例如本页刚生成了新的管理密钥）时，迟到的 401 不清除新密钥。本页生成新的管理密钥后，带密钥访问的页面改用新密钥。
+
+### 页面功能
+
+设置通过 `PATCH /api/config` 自动保存：开关和勾选框的 `change` 事件触发保存，文本和数字在失焦或按回车时保存，每次只提交改动字段所在的顶层键；三档提醒阈值校验 `notice ≥ low ≥ critical` 后一起提交。`bark_url` 去掉尾部斜线，空的对外监听地址按后端默认值保存，避免已应用判断与后端规整结果不一致。该接口整体替换顶层键，所以 `ignition`、`providers`、`recovery_notify` 等对象以已保存的对象为基础整体提交。保存依次进行，后一次以前一次写入的配置为基础；数字不满足输入框的范围或步长时不保存。页面的请求都使用相对路径（`api/…`），所以页面在自己监听的根路径和 Magpie 页面服务的反向代理后面都能工作。
+
+浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示，输入框恢复为已保存的值。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
+
+“时区”区编辑配置中的 `timezone`（IANA 名称），点火时间、通知和页面中的时间按它计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。输入框的 `datalist` 选项取自 `Intl.supportedValuesOf("timeZone")`，浏览器不支持时没有选项，只能手填；名称由插件在保存时校验，无效时 `PATCH /api/config` 返回 400，页面按其他设置的保存失败显示错误。`GET /api/config` 中没有 `timezone` 或为空时，`renderTimezone` 在输入框中预填浏览器的时区（`Intl.DateTimeFormat().resolvedOptions().timeZone`），并显示“尚未保存”和“保存”按钮；页面不自动保存这个值，用户修改输入框或点“保存”后才写入。正在编辑、有草稿或保存失败的输入框不预填。时区和自动点火开关以 `GET /api/config` 中保存的值为准，文件中没有这一项时取 `status.config` 中插件实际使用的值，页面不假设默认值。点火开关旁提示开启前先设置时区，并在 Magpie 中关闭预热（见“Magpie 的预热”）。
+
+`webhook.headers` 和 `webhook.success_json` 在页面上以文本编辑（每行一个 `名称: 值`、JSON 对象），无法解析时不保存。状态接口只返回 webhook 的地址、请求头和请求体是否已设置，页面从 `GET /api/config` 读取原值填入表单。
 
 保存失败时保留输入草稿；普通设置通过 `settingsDirty`、账号字段通过 `accountDirty` 避免回填覆盖草稿。`captureIntent` 在变更事件发生时保存字段值及各控件的 `settingsEdit` 编辑代次，队列中的 `buildPatch` 按这份意图构造补丁并记录实际提交的控件。配置确认后，`refillSaved` 清理本次实际提交、代次仍匹配且没有独立失败标记的控件草稿，再回填有效值。同一顶层键内其他控件的后续保存不阻止这项清理；后续编辑的草稿、无法解析或未提交的字段仍保留。单选组共享编辑代次并作为整体确认；组内仍有草稿或失败时跳过整组回填，避免设置某个单选框时间接覆盖较新的选择。`claimState` 按项设置 `owner`，后续状态通过绑定该所有权的 `say` 更新。任何 `input` 事件都会推进编辑代次、撤销旧 `owner` 并清除该项的普通进度，未解决的失败仍保留。旧请求继续完成并等待自己的令牌，但不能用迟到的响应更新新输入的结果。
 
-每次保存携带新的 `config_token`，它是可为空的字符串，不是密钥，不参与配置校验和运行时行为。`status.config` 表示最近接收的有效配置；顶层 `config_applied_token` 表示引擎后台循环已经确认并完成运行时应用、且插件已执行完 `mcp.Configure` 的同一份配置。只修改 MCP 或其他非运行时字段也需要后台循环确认；MCP 监听成功、停用或绑定失败并记录 `mcp.error` 均算完成配置执行，监听是否可用仍读取 `mcp.running` 和 `mcp.error`。解析失败保留上一令牌；实例重启后确认 CPA 下发的同一令牌，无需持久化计数器。插件以实例内接收序号协调两项确认，读取管理状态时持有生命周期锁，避免跨配置拼接状态。页面每次 PATCH 插件配置都用 `crypto.getRandomValues` 生成 8 字节随机数，以 16 位十六进制字符串作为令牌；设置、权重和卡片顺序等写入共用 `patchConfig`。保存后显示“已保存，等待生效”，等待期间轮询状态；轮询在前一次请求结束后间隔 1 秒发起，单次请求通过 `AbortController` 设置 4 秒超时。`config_applied_token` 与本次令牌相等，或等于本页之后一次保存的令牌时，本次保存显示“已生效”；`whenApplied` 为每次等待设置独立的 15 秒截止计时器，状态请求挂起也会按时结束等待、移除等待项并显示“未确认生效”；截止后到达的令牌不改变已结束的等待结果。脱敏占位和 `mcp_key_set` 不用于确认密钥替换。MCP 配置确认后继续结合 `status.mcp.running` 和 `status.mcp.error` 显示服务状态及错误。测试推送先等待未完成的保存，再按相同令牌规则最多等待 15 秒；确认后发送，超时则显示“配置尚未生效，未发送测试”，不调用测试接口。
+每次保存携带新的 `config_token`，它是可为空的字符串，不是密钥，不参与配置校验和运行时行为。`status.config` 表示最近接收的有效配置；顶层 `config_applied_token` 表示引擎后台循环已经确认并完成运行时应用、且插件已执行完 `mcp.Configure` 的同一份配置。只修改 MCP 或其他非运行时字段也需要后台循环确认；MCP 监听成功、停用或绑定失败并记录 `mcp.error` 均算完成配置执行，监听是否可用仍读取 `mcp.running` 和 `mcp.error`。解析失败的配置不保存，保留上一令牌；程序重启后从 `config.json` 读回同一令牌，无需持久化计数器。插件以实例内接收序号协调两项确认，读取管理状态时持有生命周期锁，避免跨配置拼接状态。页面每次 PATCH 插件配置都用 `crypto.getRandomValues` 生成 8 字节随机数，以 16 位十六进制字符串作为令牌；设置、权重和卡片顺序等写入共用 `patchConfig`。保存后显示“已保存，等待生效”，等待期间轮询状态；轮询在前一次请求结束后间隔 1 秒发起，单次请求通过 `AbortController` 设置 4 秒超时。`config_applied_token` 与本次令牌相等，或等于本页之后一次保存的令牌时，本次保存显示“已生效”；`whenApplied` 为每次等待设置独立的 15 秒截止计时器，状态请求挂起也会按时结束等待、移除等待项并显示“未确认生效”；截止后到达的令牌不改变已结束的等待结果。脱敏占位和 `mcp_key_set` 不用于确认密钥替换。MCP 配置确认后继续结合 `status.mcp.running` 和 `status.mcp.error` 显示服务状态及错误。测试推送先等待未完成的保存，再按相同令牌规则最多等待 15 秒；确认后发送，超时则显示“配置尚未生效，未发送测试”，不调用测试接口。
 
-“设置”视图“账号”区的“名称”输入框用 CPA 的 `PATCH /v0/management/auth-files/fields` 写入凭证的 `note`：替换备注的第一行，保留其余各行，再调用 `refresh` 查询这个账号，使插件立即读到新名称。CPA 保存备注时去掉首尾空白，第一行为空的备注会以下一行为名称，所以有多行的备注清空名称时，确认后删除整条备注。额度查询失败不影响改名，只是不更新页面，所以 `refresh` 的结果不作为改名的结果显示。同一服务有多个账号时，该区还显示“权重”输入框：输入大于 0 的数字后，页面把整个 `account_weights` 对象通过插件配置接口保存（CPA 只合并顶层键），留空则删除这个账号的权重，并立即按新值重画；`config.Parse` 丢弃不大于 0 或无穷大的权重。名称和权重在离开输入框或按回车时通过保存队列提交。名称、权重及排序分别持有保存结果和提示所有权，在“账号”标题右侧汇总显示；字段保存失败时保留输入草稿。账号行按凭证文件名复用 DOM，刷新、排序和较早保存的响应保留正在编辑的输入及焦点。保存结果按稳定的账号字段键保留，与当前 DOM 绑定分开；监控关闭再开启导致账号行重建时，`saveEntry` 重新绑定控件并恢复失败标记、草稿和待保存计数。排队中的账号保存通过当前绑定完成更新。
+“设置”视图“账号”区的“名称”输入框把整个 `account_names` 对象（以 pin 为键）通过配置接口保存，留空则删除这个账号的名称，账号重新显示 Magpie 中的名称；然后调用 `refresh` 查询这个账号，使状态立即带上新名称。额度查询失败不影响改名，只是不更新页面，所以 `refresh` 的结果不作为改名的结果显示。同一服务有多个账号时，该区还显示“权重”输入框：输入大于 0 的数字后，页面把整个 `account_weights` 对象保存，留空则删除这个账号的权重，并立即按新值重画；`config.Parse` 丢弃不大于 0 或无穷大的权重。名称和权重在离开输入框或按回车时通过保存队列提交。名称、权重及排序分别持有保存结果和提示所有权，在“账号”标题右侧汇总显示；字段保存失败时保留输入草稿。账号行按 pin 复用 DOM，刷新、排序和较早保存的响应保留正在编辑的输入及焦点。保存结果按稳定的账号字段键保留，与当前 DOM 绑定分开；监控关闭再开启导致账号行重建时，`saveEntry` 重新绑定控件并恢复失败标记、草稿和待保存计数。排队中的账号保存通过当前绑定完成更新。
 
 页顶、卡片区标题栏和曲线详情标题栏的眼睛按钮共用一个打码开关，状态保存在 `localStorage` 的 `lamplighter-mask-accounts` 中（`1` 为打码），脚本加载时即应用到根元素，首次渲染前生效；各浏览器分别保存。HTML 中的账号标识及“账号”区的输入框使用 `.account-sensitive` 和 CSS `blur`，SVG 图表文字使用模糊滤镜；敏感标识集合同时读取当前账号、事件标签和历史系列标签，包含改名及删除后仍保留的名称。当前状态没有对应额度组元数据的历史系列将 `label`、`source_label` 和 `group` 全部纳入敏感集合，即使标签和来源标签相等。没有当前账号的行标记为 `orphan`，在概览 SVG、详情标题和数据表中将名称整体模糊，读屏标签使用账号编号；详情截图保留相同模糊状态。事件标签整体标为敏感，详情中的标签、错误摘要（`params.summary`，没有时为页面提炼的一行，见下文“事件列表”）和错误原文（`params.error`）也整体标为敏感。以下事件的详情整段标为敏感：`error` 事件；事件本身没有 `params`、也没有存储的 `label` 的旧事件（不看由 `group` 推出的标签）；没有 `params` 且为失败或警告样式的旧事件（`ignite_failed`、`ignite_paused`、`notify_failed`、`error`、`model_refused`、`cooldown_stale`、`plan_change`、`exhausted`，以及未知类型中级别为 error 或 warn 的），因为这些原文可能提到已删除或改名的账号，按当前账号名替换遮不住。旧的成功类事件和带 `params` 的事件仍只遮住账号名和错误原文。概览及详情的点火悬停提示沿用相同规则。打码时省略含账号名的 `title` 提示，以及事件行的推送标记和事件详情的悬停提示，无障碍标签使用账号序号；清空名称等确认对话框保留原文。此开关不改变接口数据或 DOM 中的原始文本。
 
 账号卡片的头部只显示服务标签（含非默认权重倍数）和邮箱。底部的 `.account-head.cell-note` 左侧显示套餐，右侧依次放置“刷新”和相机按钮；按钮使用 `.no-snapshot`，不出现在导出的图片中。底部行在卡片拉伸时贴齐内容区底边，套餐名称过长时单行省略。有套餐的卡片保留头部及原套餐行占用的高度，无套餐或无额度内容的卡片增加相同样式的底部操作行。卡片区标题栏的操作位置独立于卡片内部布局。
 
-卡片、卡片区和曲线详情图的相机按钮调用 `snapshotPng`，克隆目标节点并移除 `.no-snapshot` 操作按钮，将当前样式、主题和模糊状态通过 SVG `foreignObject` 绘制到 canvas，按设备像素比生成 PNG，再通过 `ClipboardItem` 写入剪贴板。曲线详情图的截图对象是 `#chart-detail-wrap`，标题行和图表在这个容器里。截图外框的内边距、背景及静态样式统一定义在 `page.css` 的 `.snapshot-frame` 规则中，离屏测量和 SVG 导出使用同一份样式。过程不加载页面外资源，避免 canvas 被跨源内容污染；动画、过渡和悬停样式不参与截图。只有安全上下文中支持图片剪贴板的浏览器启用按钮，复制仍受浏览器权限限制。
+卡片、卡片区和曲线详情图的相机按钮调用 `snapshotPng`，克隆目标节点并移除 `.no-snapshot` 操作按钮，将当前样式、主题和模糊状态通过 SVG `foreignObject` 绘制到 canvas，按设备像素比生成 PNG，再通过 `ClipboardItem` 写入剪贴板。曲线详情图的截图对象是 `#chart-detail-wrap`，标题行和图表在这个容器里。截图外框的内边距、背景及静态样式统一定义在 `page.css` 的 `.snapshot-frame` 规则中，离屏测量和 SVG 导出使用同一份样式。过程不加载页面外资源，避免 canvas 被跨源内容污染；动画、过渡和悬停样式不参与截图。在 Magpie 中（`magpie.ready`），PNG 交给 Magpie 的 `image.copy`，由 Magpie 写入系统剪贴板，在 `magpie web` 中由浏览器窗口复制。没有 Magpie 时通过 `ClipboardItem` 写入剪贴板，只在沙箱外的安全上下文中、浏览器支持图片剪贴板时启用按钮，复制仍受浏览器权限限制。
 
 顶部的“额度 | 设置”切换两个独立视图，所选视图保存在浏览器的 `localStorage` 中（`lamplighter-view`）。“设置”视图依次显示账号、通知渠道、提醒规则、自动点火、服务和高级。
 
 `saveHost` 将普通设置的保存结果定位到 `.settings-section > .card-title`，高级设置定位到各自 `fieldset > legend`，每处只包含一个 `.save-state`。标题中的文字用子元素承载，切换语言时保留状态节点，`saveText` 按当前语言显示本地状态文案，上游错误原文保持不变。每个标题通过 `saveEntries` 按项保存状态、控件和独立所有权；没有失败时按保存发起顺序显示最近一次进度，较早保存的迟到确认不能覆盖较新的进度。失败独立保留到该项重新写入成功，其他项成功和输入事件不能清除；多项失败时显示最近的失败原因与其余数量。失败控件带 `aria-invalid="true"`，边框使用 `--error-color`；单选框和勾选框使用同色外框。标题及 legend 保持固定行高，失败摘要、原因、计数通过 `data-save-part` 分开渲染。桌面端摘要及原因单行省略，失败数量单独保留；宽度不超过 640 px 时隐藏字段摘要与原因，只显示“保存失败”和失败数量，正常进度仍可单行显示。标题文字可以省略，为失败标识及数量保留空间。记住筛选条件的开关照常写入配置，在“额度图表”legend 显示保存结果，具体筛选值保存在浏览器中。测试推送的结果仍由按钮旁的 `#test-results` 显示；复制操作通过 toast 提示结果。
 
-“设置”视图的“账号”区通过手柄支持一维拖动排序，以凭证文件名列表整体保存 `account_order`；页面在后端排序基础上按最新保存的列表重排，使卡片和图表立即响应顺序变化。拖动使用 Pointer Events，手柄设置 `touch-action: none`；固定定位的不可交互副本跟随指针，副本使用卡片的圆角、边框和背景并保留浮动阴影，原行隐藏内容并显示同样圆角的虚线边框作为占位。命中判断使用各行不含变换的布局中线，其他行以 180 毫秒的 FLIP 动画让位。松手时副本滑至占位行后保存，保存状态显示在“账号”标题旁；按 Esc 或收到 `pointercancel` 时恢复原顺序，不保存。拖动及落定期间推迟账号重绘，系统要求减少动态效果时跳过动画。
+“设置”视图的“账号”区通过手柄支持一维拖动排序，以账号 pin 列表整体保存 `account_order`；页面在后端排序基础上按最新保存的列表重排，使卡片和图表立即响应顺序变化。拖动使用 Pointer Events，手柄设置 `touch-action: none`；固定定位的不可交互副本跟随指针，副本使用卡片的圆角、边框和背景并保留浮动阴影，原行隐藏内容并显示同样圆角的虚线边框作为占位。命中判断使用各行不含变换的布局中线，其他行以 180 毫秒的 FLIP 动画让位。松手时副本滑至占位行后保存，保存状态显示在“账号”标题旁；按 Esc 或收到 `pointercancel` 时恢复原顺序，不保存。拖动及落定期间推迟账号重绘，系统要求减少动态效果时跳过动画。
 
-MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥，则用 `crypto.getRandomValues` 生成 32 字节随机数，以 `llmcp_` 加 base64url 编码与开关一起保存。
+“高级”中的“对外访问”设置 `public_listen`、`web_enabled` 和 `admin_key`，状态读取 `status.public`（`listen`、`running`、`error`、`web`、`mcp`，`publicState`）；状态接口没有这个字段时退回读取 `status.mcp` 的 `listen`、`running` 和 `error`。开启 `web_enabled` 时没有管理密钥，页面用 `crypto.getRandomValues` 生成 32 字节随机数，以 `lladm_` 加 base64url 编码与开关一起保存；“生成新密钥”确认后替换它。“MCP”设置 `mcp_enabled` 和 `mcp_key`，监听状态读取 `status.mcp`；开启时没有有效密钥，同样生成 `llmcp_` 开头的密钥一起保存。两种密钥打码显示，可以显示和复制。保存这些字段后，对外监听的错误（`status.public.error`，没有 `status.public` 时为 `status.mcp.error`）显示为保存失败，页顶也显示提示。客户端配置中的地址取浏览器中保存的对外地址，没有时取对外监听地址。
+
+`status.magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了预热的账号 pin（见“Magpie 的预热”），字段缺失时按空数组处理。列表非空时页顶提示这些账号需要在 Magpie 中关闭预热，以免与自动点火重复点火。账号按页面上的名称显示（`warmupNames`）：服务名加名称（`note`）或邮箱；状态中没有这个账号时显示 `account_names` 中的名称，再没有时显示 pin。
 
 页面标题旁的图标从 GitHub 加载仓库中的 `assets/logo.png`，更换图标不需要发布新版本。`raw.githubusercontent.com` 无法访问（例如在中国大陆）或 5 秒内没有加载完时，改经 `ghfast.top` 镜像加载；仍然失败时不显示。
 
 图表的筛选按钮（`.segmented`）和设置中的三选一开关（`.mode-switch`）共用一套滑块：`page.js` 的 `placeThumb` 测量选中项的位置和尺寸（取不含缩放的小数值），写入滑块的 CSS 变量。各选项宽度不同，所以按测量值定位。用户点选时滑块带回弹滑过去并挤压一下；其他情况直接定位：代码改变选中项时（如首次填入设置、恢复筛选条件）直接调用 `placeThumb`，切换语言、窗口尺寸变化和从隐藏变为可见时由监听控件及其选项尺寸的 `ResizeObserver` 调用。时间范围按钮只在切换额度窗口或语言时重建，点选时原地更新 `aria-pressed`，滑块才能滑动。点击已选中的按钮不改变选择；图表读取失败时，这样的点击会重新读取。系统设置减少动态效果时，`prefers-reduced-motion` 规则关闭这些动画；该规则放在 `page.css` 末尾，以覆盖前面定义的过渡。
 
-页面文字都在 `page.js` 的 `I18N` 词典中，中文和英文各一份；`page.html` 中的静态文字用 `data-i18n`（以及 `data-i18n-placeholder`、`data-i18n-title`、`data-i18n-aria-label`）标出词条，其中的中文原文只在脚本应用语言前显示。语言跟随管理中心：先读父页面根元素的 `lang`（管理中心每次切换语言都会更新它）并监听变化，单独打开时读 `localStorage` 的 `cli-proxy-language`，再退回到浏览器语言；`zh` 开头的显示中文，其余显示英文。状态接口的 `language` 与页面语言不同时，页面调用 `POST .../language` 上报，失败时在下一次刷新状态时重试。
+页面文字都在 `page.js` 的 `I18N` 词典中，中文和英文各一份；`page.html` 中的静态文字用 `data-i18n`（以及 `data-i18n-placeholder`、`data-i18n-title`、`data-i18n-aria-label`）标出词条，其中的中文原文只在脚本应用语言前显示。语言跟随 Magpie（hello 答复和 `theme` 事件中的 `lang`，如 `zh`、`zh-TW`、`en`），单独打开时跟随浏览器语言（`navigator.languages[0]`）并监听 `languagechange`；`zh` 开头的显示中文，其余显示英文（`pageLanguage`）。状态接口的 `language` 与页面语言不同时，页面调用 `POST .../language` 上报，失败时在下一次刷新状态时重试。
 
 事件文字由页面按事件的 `params` 用当前语言拼出（见下文“数据”）。没有 `params` 的旧事件显示存下的中文原文。上游返回的错误原文和推送标题不翻译：推送标题本来就是按通知语言生成的。
 
@@ -85,18 +261,16 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 - **错误**：列表中的错误只显示一行：优先用 `params.summary`，否则由 `errorSummary` 提炼（JSON 之前的文字，加上 JSON 中的 HTTP 状态码 · reason · message；解析不出时取第一行），超过 160 个字符（`ERROR_CHARS`）截断；完整原文在悬停提示中。手动点火失败（`manual` 为 `1`）只显示摘要，不显示重试时间。`ignite_paused` 没有 `until` 时，`reason` 为 `auth` 或 `suspended` 显示“暂停，等待更新凭证”或“暂停，账号已停用”加摘要，其余只显示摘要。
 - **凭证问题**：`credential_invalid` 按 `reason` 显示凭证失效、账号停用、被限流三种徽标。同一额度组前后 60 秒内（`PAUSE_PAIR`）的 `ignite_paused` 并入时间最近的 `credential_invalid` 那一行，不单独显示。`source` 为 `ignite` 或并入了暂停时，详情是摘要后加“· 点火已暂停”，有 `until`（取凭证事件的，没有时取并入的暂停的）时改为“· 点火暂停到 时间”；其余情况下，限流且有 `until` 时加“· 限流到 时间”。悬停提示每项一行，依次为“HTTP 状态码 · code · summary”（缺少的部分省略）、`appeal_url`（有才写）、并入的暂停事件的 `params.error` 原文（有才写）；查询发现、没有并入暂停的 `credential_invalid` 只有前两项。打码时不显示悬停提示。`appeal_url` 是 http 或 https 地址时显示申诉链接。
 
-页面的视觉样式与管理中心一致：CSS 变量沿用管理中心 `src/styles/themes.scss` 的名称和取值（浅色、纯白、深色三套），额度条和图表通过 `quotaLevel` 共用满、高、中、低、空五档颜色：原始值接近 100% 为满、接近 0% 为空（`LEVEL_EPSILON` 为 `1e-6`，容纳加权平均的浮点误差）；中间按前两档提醒阈值划分（默认 >50% 为高，>20% 为中，其余为低），满额和耗尽有独立颜色。判断先于显示值取整，因此 99.6% 不使用满额颜色；中、低的分界与通知标题的 🟡、🔴 一致，遥测数字使用等宽字体。页面与管理中心同源，主题直接读取父页面根元素的 `data-theme`，并监听其变化；单独打开时退回到管理中心保存在 `localStorage` 的 `cli-proxy-theme`。管理中心改了配色时，同步更新 `internal/web/page.css` 中的变量。
-
-管理中心把插件页面的 iframe 铺满内容区，顶部不留空白，右上角的浮动工具栏（178 × 52 px，距窗口顶边和右边各 24 px）盖在 iframe 上。窗口宽度在 768 px 及以下时管理中心使用手机布局：侧栏收起，iframe 与窗口同宽，工具栏为 162 × 48 px、距边缘 12 px，左上角另有一个 48 × 48 px 的菜单按钮。页面在 iframe 中打开时（`window.self !== window.top`，不需要读取父页面，所以管理中心与插件不同源时也生效）给根元素加 `embedded` 类：标题行右侧留出工具栏的宽度，放不下时换行；“立即刷新全部”放在“额度”标题行的右侧，这一行从工具栏下方 8 px 开始；宽度在 768 px 及以下时整个页面从工具栏和菜单按钮下方开始；宽度超过 1584 px 时工具栏落在页面边距中，不做调整。这些数值来自管理中心的 `src/styles/layout.scss`（`.main-header .header-actions`、`.mobile-sidebar-actions`），管理中心改了这些控件的位置或大小时，同步更新 `page.css` 中的对应规则。
+页面的 CSS 变量沿用 CPA 管理中心 `src/styles/themes.scss` 的名称和取值（浅色、深色两套），额度条和图表通过 `quotaLevel` 共用满、高、中、低、空五档颜色：原始值接近 100% 为满、接近 0% 为空（`LEVEL_EPSILON` 为 `1e-6`，容纳加权平均的浮点误差）；中间按前两档提醒阈值划分（默认 >50% 为高，>20% 为中，其余为低），满额和耗尽有独立颜色。判断先于显示值取整，因此 99.6% 不使用满额颜色；中、低的分界与通知标题的 🟡、🔴 一致，遥测数字使用等宽字体。主题跟随 Magpie 的 `dark`，单独打开时跟随浏览器的 `prefers-color-scheme` 并监听其变化（`pageTheme`）；深色时根元素带 `data-theme="dark"`。Magpie 的主题只分浅色和深色，页面使用自己的配色，不使用 Magpie 传来的 `tokens`。
 
 额度变化图表的数据处理都在页面中完成：
 
 - **时间轴**：1、3 小时和 1、4 天的横轴右端是现在。从 6 小时、8 天起（5 小时额度的 6、12、24、26 小时，7 天额度的 8、15 天、1 个月和 36 天），横轴总长仍等于所选范围，右端是所选行当前窗口的重置时间。合计行取各账号中最早的下一次重置，即行右侧 ↻ 的时间；已经过去的重置时间（窗口还没有重新开启，或之后没有查询到）不算。例如 6 小时显示当前 5 小时窗口和上个窗口的最后 1 小时。`RANGES` 中的 `24h` 既是 5 小时额度的 24 小时，也是 7 天额度的 1 天，只有前者延伸（`extendsAhead`）。历史接口返回到现在为止的范围，页面不画横轴左端之前的部分。切换所选行时整张图平移；时间流逝时横轴不动，窗口重置后右端移到新窗口的重置时间。所选行没有重置时间、重置时间已过（5 小时窗口还没有被新请求开启），或重置时间离现在超过所选范围时，右端是现在。现在之后的部分画成与缺数据相同的斜纹，不画表示现在的竖线。详情图绘图区的左右两端是实线，与 0% 线相同；刻度离两端不到 4 像素时只标时间，不画刻度虚线，以免与边线并排。概览图和详情图共用这条横轴。
 - **缺数据**：相邻样本间隔超过 3.5 个查询间隔（或接口的分段长度）时视为缺数据，画成斜线纹理，不延续前一个值。启用被动跳过时，阈值至少为 `passive_skip_max_minutes` 加 1.5 个查询间隔：响应头里没有的窗口（如没在使用的 Fable）在跳过期间只能等下一次主动查询，这段间隔不算缺数据。
-- **多账号合计**：同一服务、同一 `source_label` 的多个账号合成一行，取各账号剩余百分比按权重的加权平均值（`pooled`），权重与各账号的额度大小成比例时，这等于总额度的剩余比例。合计行的当前值、曲线和延长线都用加权值；详情图的阴影仍是各账号的最低到最高。权重依次取 `account_weights` 中按凭证文件名（状态接口中账号的 `name`）设置的值、状态接口中账号的 `default_weight`，都没有时为 1（`accountWeight`）；权重全为 1 时就是简单平均。
+- **多账号合计**：同一服务、同一 `source_label` 的多个账号合成一行，取各账号剩余百分比按权重的加权平均值（`pooled`），权重与各账号的额度大小成比例时，这等于总额度的剩余比例。合计行的当前值、曲线和延长线都用加权值；详情图的阴影仍是各账号的最低到最高。权重依次取 `account_weights` 中按账号 pin（状态接口中账号的 `name`，与 `auth_index` 相同）设置的值、状态接口中账号的 `default_weight`，都没有时为 1（`accountWeight`）；权重全为 1 时就是简单平均。
 - **窗口种类与行集合**：标签页和图表行取当前状态中的窗口与所选范围内历史系列的并集，按 `kind` 分到“5 小时额度”和“7 天额度”两个标签页（一个都不知道时两个都显示），默认打开第一个；其他长度的窗口不画进图表。当前窗口没有对应历史系列时，前端补一条空样本行，使用当前剩余和重置时间显示标题，曲线区显示缺数据，不伪造样本。同一额度名下有自己标签的窗口（例如 Claude 的 `7 Day Opus`）单独成行，不与主窗口合并。
 - **已停用窗口**：历史系列在当前状态中没有对应窗口时，且所选范围内仍有样本，单独显示为“已停用”。该行放在同一额度组的当前行后，不计入合计，不参与剩余最低排序；条带和曲线停在最后一个样本，不画匀速参考线和延长线。最后一个样本移出范围时隐藏；历史接口仍返回这些系列，由前端过滤。
-- **排序**：图表默认跟随卡片顺序，同一额度的合计行使用其第一个当前账号的位置；同一账号内按 `group_order` 排列（Claude、GPT、Gemini、Kimi、Grok、Fable、Claude / GPT，来自 `internal/providers/provider.go` 的 `groupOrder`）。也可按当前剩余从低到高排列。状态接口中账号优先按 `account_order` 的凭证文件名排列，未列出的按服务注册顺序、账号后缀排列；不存在的条目忽略，重复条目以第一次为准。同一账号的额度组按额度组注册顺序排列，所以账号卡片上 Gemini 在 Claude / GPT 之前、Claude 在 Fable 之前。
+- **排序**：图表默认跟随卡片顺序，同一额度的合计行使用其第一个当前账号的位置；同一账号内按 `group_order` 排列（Claude、GPT、Gemini、Fable、Claude / GPT，来自 `internal/providers/provider.go` 的 `groupOrder`）。也可按当前剩余从低到高排列。状态接口中账号优先按 `account_order` 中的 pin 排列，未列出的按服务注册顺序、账号后缀排列；不存在的条目忽略，重复条目以第一次为准。同一账号的额度组按额度组注册顺序排列，所以账号卡片上 Gemini 在 Claude / GPT 之前、Claude 在 Fable 之前。
 - **记住筛选**：`remember_chart_filters` 开启时，页面把所选窗口、排序和每个窗口各自的时间范围存在 `localStorage` 的 `lamplighter-chart-filters` 中，打开页面时恢复；5 小时和 7 天的时间范围选项不同，所以分开保存。保存的值不在当前选项中时使用默认值。开关读取设置表单中的勾选状态，所以改动在保存前就生效；关闭时删除这项记录。
 - **加载**：页面按所选窗口请求历史（`window` 参数），并按窗口和时间范围缓存响应。切换到缓存过的组合时立即画出缓存的数据，同时重新请求，响应到达后重画；没有缓存时图表变灰，等响应到达。只有最近一次加载的响应会画到图上，切换后才到达的旧响应只存入缓存；同一组合已有请求在进行时，加载沿用这个请求，刷新和点火后的加载除外。请求失败且没有所选组合的数据时，图表显示错误信息，不再显示其他组合的旧图。页面打开、第一张图加载成功后，预先请求另一个窗口的时间范围，切换窗口时不用等待。页面每 30 秒读取一次状态；某个窗口的 `observed_at` 晚于图表中该窗口的最后一个样本，并且来自主动查询或剩余值与最后一个样本不同时（数值不变的被动读数不写入历史），重新请求当前图表（`refreshHistory`）。鼠标在图表卡片内时只保存新数据，移开后再重画，以免替换鼠标下的竖线和提示。
 - **重置**：相邻样本的剩余上升 5 个百分点及以上视为重置。曲线在重置处断开，前一段保持最后的值画到重置样本的时间，新的一段从重置后的值开始，图上标出重置时间；相隔一个样本的两次上升算一次重置。单个账号重置只让合计上升一部分，上升不足 5 个百分点时合计曲线不断开。
@@ -112,29 +286,17 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 - **详情图标题行**：图表宽度不小于 640 px（左侧标签区 `labelW` 至少 190 px）、且标题行不高于图表时，`placeDetailHead` 把标题行竖排放进图表左侧与概览图对齐留出的空白，右侧留 `SIDE_GAP`（46 px）给纵轴刻度；否则标题行放在图表上方。
 - **悬停**：在概览图或详情图上悬停时，竖线吸附到详情图当前行（多账号为合计线）离鼠标最近的采样点，提示中的时间和各行数值都取该时刻；采样时间不同的其他行显示该时刻之前最近的样本。最近的采样点也超过缺数据阈值时，竖线停在鼠标所在的时间。在现在右侧悬停时，竖线跟随鼠标，详情图的提示显示该时刻延长线的值和匀速参考值，概览图不显示提示。
 
-使用的宿主回调：
-
-| 回调 | 用途 |
-| --- | --- |
-| `host.auth.list` | 凭证列表，含 `auth_index`、运行时 ID、邮箱、备注（`note`）、停用状态，以及 CPA 冷却状态（`unavailable`、`next_retry_after`） |
-| `host.auth.get` | 凭证文件 JSON，取凭证指纹（见“凭证问题”）、access token、Codex 账号 ID、Antigravity 的 `project_id` 和 `user_agent`、Kimi 的 `domain` 和 `base_url`、Grok 的 `sub`、`proxy_url` |
-| `host.model.execute_stream` / `host.model.stream_read` / `host.model.stream_close` | 流式点火，带 `auth_id` 和 `forced_provider`，关闭流时取消上游请求 |
-| `host.http.operation_open` / `host.http.do` / `host.http.cancel` | 没有账号代理时的额度请求，以及读取 Antigravity Hub 更新清单 |
-| `host.log` | 写入 CPA 日志 |
-
-宿主回调绑定在插件实例上，不依赖某次 RPC，所以后台循环可以随时调用。
-
-每轮主动查询开始时，`engine.loadCreds` 读取凭证列表，重新计算每个账号的后缀（`Cred.Suffix`）：备注第一行（`accountName`，最长 `maxNameRunes` 个字符）不为空时为 `#` 加名称，与同一服务另一个账号的后缀相同时（例如名称重复）再加邮箱后缀；没有名称时，同一服务有多个账号才加邮箱后缀（`maskedSuffix`）。额度组的 `Label` 随之更新。告警状态按额度组 key 记录，改名不会重新发送通知。
+每轮主动查询开始时，`engine.loadCreds` 读取账号列表，重新计算每个账号的后缀（`Cred.Suffix`）：名称（`account_names` 中的名称，否则是 Magpie 的 `label`，与邮箱相同时不算）的第一行（`accountName`，最长 `maxNameRunes` 个字符）不为空时为 `#` 加名称，与同一服务另一个账号的后缀相同时（例如名称重复）再加邮箱后缀；没有名称时，同一服务有多个账号才加邮箱后缀（`maskedSuffix`）。额度组的 `Label` 随之更新。告警状态按额度组 key 记录，改名不会重新发送通知。
 
 ## MCP
 
-CPA 在转发插件管理请求之前用管理密钥鉴权，并一次性写回响应。MCP 使用插件自己的 `net.Listen` 和 `http.Server`，监听 `mcp_listen`（默认 `127.0.0.1:8318`），路径固定为 `/mcp`，与管理路由和密钥独立。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
+MCP 在对外监听的 `/mcp` 上提供，`mcp_enabled` 为真且 `mcp_key` 非空时开启；监听、重新绑定、关闭和状态字段见“HTTP 接口”的“对外监听”。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
 
-`plugin.Plugin` 持有 `mcp.Server` 和生命周期互斥锁。注册及重新配置成功时根据 `mcp_enabled`、`mcp_listen`、`mcp_key` 应用监听配置，先关闭旧监听器再绑定新地址。监听正在运行、开关和地址都不变而只换了非空密钥时，`mcp.Server.Configure` 只替换密钥并取消用旧密钥进入的请求，不关闭监听：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让换密钥后的第一个请求失败。处理请求时在 `mu` 内读取密钥，`Configure` 返回后的请求都按新密钥校验；配置无法解析时保留有效配置。空密钥阻止启动。绑定失败记录状态并每 2 秒重试，以便热重载中先注册的新实例在旧实例释放端口后接管。`plugin.quiesce`、`plugin.shutdown` 和 C ABI shutdown 均关闭监听器、取消连接并等待 HTTP 工具调用退出，再停止引擎；停止的实例不重启。监听状态由插件填入管理响应的 `mcp`：`enabled`、`listen`、`running`、`error`、`path`。`status.config` 清除 `mcp_key`，以 `mcp_key_set` 表示是否设置密钥；配置执行确认使用顶层 `config_applied_token`，不能通过布尔值确认密钥轮换。宿主的配置 GET/PATCH 保留原值。
+`server.Server.apply` 先把配置交给引擎（`engine.Configure`），再调用 `mcp.Server.Configure`，最后调用 `engine.MCPConfigured`。所以顶层 `config_applied_token` 表示对外监听也已按这份配置执行；绑定失败并记录错误也算执行完成。监听是否可用读取 `status.public` 和 `status.mcp`；这些布尔值不能确认密钥已经更换，确认更换看 `config_applied_token`。配置无法解析时不调用 `Configure`，对外监听保持原来的设置。
 
 ### 协议与鉴权
 
-服务采用无会话状态的 Streamable HTTP，支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`。请求版本为 `2025-03-26` 或 `2025-06-18` 时原样协商，不支持时建议 `2025-06-18`；后续 `MCP-Protocol-Version` 若存在必须受支持。POST 请求只返回 `application/json`，不建立 SSE；通知返回 202 且无正文，GET 返回 405。`2025-03-26` 接受最多 50 项的 JSON-RPC 批次，`2025-06-18` 拒绝批次。请求体最多 1 MiB，读取和写入有超时限制。每个服务实例最多同时执行 4 次工具调用，批处理内的每次调用也占用同一组名额；名额不足立即返回 JSON-RPC `-32000` 忙碌错误，调用方可稍后重试，不进入等待队列。`list_quotas`、`get_quota_history` 和 `get_quota_events` 的调用超时为 10 秒，`refresh_quotas` 为 180 秒。关闭、停用或替换监听器会显式取消已登记请求，关闭服务等待取消后的处理退出；历史扫描和预测计算沿用调用 context，在循环中检查取消。
+服务采用无会话状态的 Streamable HTTP，支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`。请求版本为 `2025-03-26` 或 `2025-06-18` 时原样协商，不支持时建议 `2025-06-18`；后续 `MCP-Protocol-Version` 若存在必须受支持。POST 请求只返回 `application/json`，不建立 SSE；通知返回 202 且无正文，GET 返回 405。`2025-03-26` 接受最多 50 项的 JSON-RPC 批次，`2025-06-18` 拒绝批次。请求体最多 1 MiB，读取和写入有超时限制。每个服务实例最多同时执行 4 次工具调用，批处理内的每次调用也占用同一组名额；名额不足立即返回 JSON-RPC `-32000` 忙碌错误，调用方可稍后重试，不进入等待队列。`list_quotas`、`get_quota_history` 和 `get_quota_events` 的调用超时为 10 秒，`refresh_quotas` 为 180 秒。关闭监听、关闭 `/mcp` 或更换 `mcp_key` 会取消已登记的 MCP 请求，`mcp.Server.Close` 还会等待取消后的处理退出，最多 5 秒（`handlerWait`）；历史扫描和预测计算沿用调用 context，在循环中检查取消。
 
 每次请求验证 `Authorization: Bearer <mcp_key>`，先对双方求 SHA-256，再常量时间比较，避免泄露密钥长度和前缀。出现 `Origin` 时只接受 http/https 的 `localhost` 或回环 IP，不解析任意主机名，拒绝其他来源和多个 Origin。代理不能把外部 Origin 改写成本机来源。鉴权及 HTTP 传输错误使用对应状态码；JSON-RPC 解析、请求、参数和方法错误使用标准错误码，工具执行错误使用 `isError` 结果。
 
@@ -146,50 +308,51 @@ CPA 在转发插件管理请求之前用管理密钥鉴权，并一次性写回�
 
 - `list_quotas` 仅返回当前窗口，按服务及额度组汇总；每个账号带 `credential_invalid`（已确认的凭证失效，或最近一次查询为认证失败）和 `account_suspended`（已确认的账号停用），取自状态接口账号的 `credential_problem`；每个窗口的合计只计入拥有该窗口的账号，权重依次取 `account_weights`、套餐默认权重、1。给出每个窗口最先预计耗尽的账号。5 小时速度采用当前周期累计最低读数的分段最小二乘拟合，最大偏差 2 个百分点，最多 256 个输入点；7 天速度采用本周期累计使用量除以周期已过时间。缺失周期或样本时预测为空；超过 15 分钟或 3 个查询间隔（取较长者）未更新时标记过旧并停止预测。7 天匀速剩余为距重置占整个周期的比例，每日匀速预算为 `100/7`，同时给出实剩、差值和剩余每天可用量。滑动占位观测通过受锁保护的副本提供；不能确认窗口是否开始时返回空值。
 - `get_quota_history` 与 `list_quotas` 使用可取消的流式历史查询，扫描时先按所选账号、服务和窗口筛选，再按时间桶只保留最后一个样本；`list_quotas` 只读取当前窗口的样本，避免退役系列占用预算。此过程不全量保留原始记录。桶长度至少为管理历史的分段长度和所选范围的 1/2000（按秒取整，最少 1 秒）中的较大者；聚合中间结果最多 20000 个桶，超限返回工具错误。结果排序和预测计算只处理有界集合。`get_quota_history` 保留消失的窗口，按服务、账号、窗口筛选后每个系列最多 200 点、单次最多 2000 点，采样保留首尾，返回格式不含管理历史的 `resets`。已删除账号的历史使用匿名的 `retired account` 标识。
-- `refresh_quotas` 将请求交给原有引擎命令队列，全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。等待上限 180 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
+- `refresh_quotas` 与 `POST /api/refresh` 一样交给引擎命令队列执行手动刷新（凭证已过期的账号先让 Magpie 刷新额度，见“额度记录”），全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。刷新失败时返回 `ok: false` 和 `error`（不设工具错误），原因的写法见“额度记录”。`/mcp` 上等待上限 180 秒，经 Magpie 的 tool 调用最长 50 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
 - `get_quota_events` 从最近保留的最多 200 条引擎事件中筛选重置、耗尽、点火成功/失败和凭证问题（`credential_invalid`、`credential_restored`），支持 `since` 和最多 100 条的 `limit`。事件带 `reason`（`auth`、`suspended`、`rate_limited`，只输出这三个取值），凭证事件还带 `source`（`ignite`、`query`）；账号还没有额度组时，凭证事件的 `group` 为空。重置和耗尽事件独立于通知渠道记录，窗口消失或首次返回不产生事件。
 
-CPA 的 `sdk/cliproxy/auth` 在请求执行中应用模型别名、会话亲和、可用凭据、模型冷却及选择器。插件 SDK 不提供完整的模型到凭据路由快照，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。
+Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到完整的模型到账号的路由，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。
 
 ## 服务
 
-`internal/providers` 中每个服务是一个 `providers.Provider`，在 `provider.go` 的 `registry` 中按显示顺序注册：GPT（`codex`）、Claude、Antigravity、Kimi、Grok（`xai`）。服务定义包含：
+`internal/providers` 中每个服务是一个 `providers.Provider`，在 `provider.go` 的 `registry` 中按显示顺序注册：GPT（`codex`）、Claude、Antigravity。服务定义包含：
 
 | 字段 | 内容 |
 | --- | --- |
-| `ID`、`Aliases`、`Title` | 配置键和额度组 key 使用的服务名；CPA 中的其他写法（Kimi 的 `kimi-ai`、`kimi.ai`、`kimi.com`，Grok 的 `x-ai`、`x.ai`、`grok`）；显示名 |
+| `ID`、`Aliases`、`Title` | 配置键和额度组 key 使用的服务名；Magpie 中的其他写法；显示名 |
 | `Monitor`、`Ignite` | 默认是否监控、点火 |
 | `Fetch` | 主动查询，返回额度组 |
 | `Headers` | 解析模型请求的响应头；为空表示响应头里没有额度，被动跳过对该服务不生效 |
 | `Ignition` | 点火协议、请求体、候选模型、模型提示、可勾选的额度组；为空表示不点火，设置页显示“不支持点火” |
 
-`providers.Lookup` 按服务名或别名查找（忽略大小写，`_` 视同 `-`）。凭证列表中的服务名换成 `ID` 存进 `Cred.Provider`，原始写法存进 `Cred.HostProvider`。配置中用别名写的服务键在解析时换成 `ID`。
+`providers.Lookup` 按服务名或别名查找（忽略大小写，`_` 视同 `-`）。凭证列表中的服务名换成 `ID` 存进 `Cred.Provider`，原始写法存进 `Cred.HostProvider`。`loadCreds` 只接收 Magpie 服务 ID 为 `codex`、`claude`、`agy-cli` 的账号（`hostProviders`），其他账号只记 debug 日志：`internal/magpie` 只能读取这三种账号的凭证，Magpie 自带的 `antigravity` 账号虽然也对应 Antigravity，但读不到凭证。配置中用别名写的服务键在解析时换成 `ID`。
 
-**窗口种类**：`quota.Window.Period` 是窗口长度，由各服务从接口数据填入：Codex 的 `limit_window_seconds` 和 `Window-Minutes`，Claude 的字段名，Antigravity 的 `window`，Kimi 的 `duration` 和 `timeUnit`，Grok 的周期起止时间。`quota.Kind` 先看周期（与 5 小时或 7 天相差 5% 以内），没有周期时按 ID 和标签判断。5 小时和 7 天窗口使用固定的 ID 和标签（`five-hour`、`seven-day`），其他长度的窗口带自己的 ID，标签为 `quota.PeriodLabel` 给出的长度，例如 `30d`；Grok 的周期长度会随月份变化，固定使用 `credits`。点火、冷却判断、图表和通知都按种类处理，所以没有当前 5 小时窗口的账号（例如 ChatGPT Pro）不点火；图表仍可显示所选范围内保留的 5 小时历史窗口。
+**窗口种类**：`quota.Window.Period` 是窗口长度，由各服务从接口数据填入：Codex 的 `limit_window_seconds` 和 `Window-Minutes`，Claude 的字段名，Antigravity 的 `window`。`quota.Kind` 先看周期（与 5 小时或 7 天相差 5% 以内），没有周期时按 ID 和标签判断。5 小时和 7 天窗口使用固定的 ID 和标签（`five-hour`、`seven-day`），其他长度的窗口带自己的 ID，标签为 `quota.PeriodLabel` 给出的长度，例如 `30d`。点火、图表和通知都按种类处理，所以没有当前 5 小时窗口的账号（例如 ChatGPT Pro）不点火；图表仍可显示所选范围内保留的 5 小时历史窗口。
 
-**新增服务**：在 `internal/providers` 中新建一个文件，参照 CPA 管理中心额度页的请求实现 `Fetch`，有额度响应头时实现 `Headers`，窗口填上 `Period`；能点火时填写 `Ignition`；把服务加入 `registry`，需要固定位置时把主额度组的名称加入 `groupOrder`；在 `internal/web/page.css` 中加上管理中心同名服务的标签颜色（`--type-<id>-bg` 等）。同步更新 README 的服务表和本文档的主动查询、被动数据、点火请求和模型选择各节。
+**新增服务**：在 `internal/providers` 中新建一个文件，实现 `Fetch`，有额度响应头时实现 `Headers`，窗口填上 `Period`；能点火时填写 `Ignition`；把服务加入 `registry`，需要固定位置时把主额度组的名称加入 `groupOrder`；在 `internal/web/page.css` 中加上该服务的标签颜色（`--type-<id>-bg` 等）。同步更新 README 的服务表和本文档的主动查询、被动数据、点火请求和模型选择各节。
 
 ## 后台循环
 
 `engine.Engine` 用一个后台循环串行处理查询、点火和通知状态；HTTP 取消和模型流 watchdog 在独立 goroutine 中执行，不修改额度状态：
 
-1. 插件注册后启动，先等 20 秒，让 CPA 加载凭证和执行器。
-2. 打开数据目录，取得 `instance.lock`。
-3. 每 30 秒读取一次 CPA 的 `config.yaml`，判断 `plugins.enabled` 和本插件的 `enabled`。CPA 停用插件时不会通知插件，所以插件自己检查；停用期间不做任何工作。读不到配置文件时视为启用。
-4. 依次处理被动数据、Did Codex Reset、到点的主动查询、到期的点火、历史清理、新版本检查，并保存状态。
-5. 计算下一次需要醒来的时间，在这之前等待新的被动数据、管理操作或配置变更。
+1. 程序启动后先等 5 秒（`startupDelay`），让同时启动的 Magpie 网关就绪。
+2. 读取 `state.json` 和最近的历史事件（`openStores`）。实例锁在进程启动时已由 `main.go` 取得，见“进程和数据目录”。
+3. 依次处理排队的被动数据、Did Codex Reset、到点的主动查询、Magpie 的额度记录（`pollKept`）、重置前后的查询、到期的点火、历史清理、新版本检查，并保存状态。
+4. 计算下一次需要醒来的时间，在这之前等待新的被动数据、管理操作或配置变更。
 
-`usage.handle` 和管理接口不直接执行网络请求：前者只解析响应头并放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果，最多 3 分钟。唯一的例外是 `check-update`，见下文。
+Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组一起退出，所以没有“停用”状态。
 
-新版本检查读取 GitHub API 的 `releases/latest`（不含草稿和预发布版本），后台循环开始工作后读一次，之后每 6 小时读一次，失败后 30 分钟重试。页面打开时调用 `check-update` 再读一次，距上次尝试读取（无论成败）不到 1 分钟（`releaseRecheckPeriod`）时不读：未登录的 GitHub API 每个地址每小时只能请求 60 次，GitHub 不响应时也不会让每次打开页面都等到超时。这次读取在处理请求的 goroutine 中进行，不经过后台循环，以免排在查询和点火之后；插件停止时请求随之取消。同一时间只有一个读取（`releaseMu`）：已有读取在进行时，页面的请求直接返回，后台循环不等待并在 30 分钟后重试；距上次成功读取不到 1 分钟时，后台循环也不读。插件停用期间不检查，状态接口保留上一次的结果。请求使用 Did Codex Reset 相同的出口（环境变量中的代理或直连）。版本号按数字逐段比较；最新版本比当前版本新时，状态接口返回 `latest_version` 和 `release_url`，页面在版本号右边显示更新图标。失败只记 debug 日志，保留上一次的结果。当前版本不是纯数字版本时（开发版本 `dev`、`0.0.0-dev.<commit>` 和预发布版本）不检查；最新 Release 的标签不是纯数字版本时视为没有新版本。
+`ObservePassive` 和 HTTP 接口不直接执行网络请求：前者只把读数放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果（`engine.dispatch`），最多 3 分钟；请求的 context 结束（如客户端断开）或引擎停止时立即返回，已交给后台循环的操作仍会执行完。唯一的例外是 `check-update`，见下文。
 
-后台循环崩溃时，`supervise` 记录日志并在 30 秒后重启。插件中任何未恢复的 panic 都会结束整个 CPA 进程，所以每个 goroutine 和每个 RPC 方法都有 `recover`。
+新版本检查读取 GitHub API 的 `releases/latest`（不含草稿和预发布版本），后台循环开始工作后读一次，之后每 6 小时读一次，失败后 30 分钟重试。页面打开时调用 `check-update` 再读一次，距上次尝试读取（无论成败）不到 1 分钟（`releaseRecheckPeriod`）时不读：未登录的 GitHub API 每个地址每小时只能请求 60 次，GitHub 不响应时也不会让每次打开页面都等到超时。这次读取在处理请求的 goroutine 中进行，不经过后台循环，以免排在查询和点火之后；插件停止时请求随之取消。同一时间只有一个读取（`releaseMu`）：已有读取在进行时，页面的请求直接返回，后台循环不等待并在 30 分钟后重试；距上次成功读取不到 1 分钟时，后台循环也不读。请求使用 Did Codex Reset 相同的出口（环境变量中的代理或直连）。版本号按数字逐段比较；最新版本比当前版本新时，状态接口返回 `latest_version` 和 `release_url`，页面在版本号右边显示更新图标。失败只记 debug 日志，保留上一次的结果。当前版本不是纯数字版本时（开发版本 `dev`、`0.0.0-dev.<commit>` 和预发布版本）不检查；最新 Release 的标签不是纯数字版本时视为没有新版本。
+
+后台循环崩溃时，`supervise` 记录日志并在 30 秒后重启。未恢复的 panic 会结束进程，页面和 tool 随之不可用，所以每个 goroutine 都有 `recover`。
 
 ### 生命周期
 
-- `plugin.register` 和 `plugin.reconfigure` 解析配置并应用。无法解析的配置不生效，状态页显示错误，插件继续使用上一份配置。
-- 新版本动态库加载后，CPA 对旧实例调用 `plugin.quiesce`，但不会卸载它。插件收到 `plugin.quiesce` 或 `plugin.shutdown` 后停止后台循环且不再启动。
-- `instance.lock` 是数据目录中的独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个实例在查询、点火和推送。新实例拿不到锁时每 10 秒重试一次。
+- 启动时读取 `config.json`；`PATCH /api/config` 保存并应用新的配置。无法解析的配置不会写入文件。
+- 收到 SIGINT 或 SIGTERM 时取消后台循环，关闭监听，等已开始的配置写入完成后退出，见“进程和数据目录”。
+- `instance.lock` 由 `main.go` 在读取任何数据之前取得，进程退出前释放，见“进程和数据目录”。
 
 ## 额度获取
 
@@ -200,28 +363,31 @@ CPA 的 `sdk/cliproxy/auth` 在请求执行中应用模型别名、会话亲和�
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage`，带 `Chatgpt-Account-Id` |
 | Claude | `GET https://api.anthropic.com/api/oauth/usage`，`anthropic-beta: oauth-2025-04-20` |
 | Antigravity | `POST .../v1internal:retrieveUserQuotaSummary`，依次尝试三个地址，正文为 `{"project": "<project_id>"}` |
-| Kimi | `GET https://api.kimi.com/coding/v1/usages`；与 CPA 的 Kimi 执行器一样，依次看凭证的 `domain`、`base_url`、`type`、服务名，最后看运行时 ID 或文件名是否含 `kimi-ai`、`kimi.ai`，指向 kimi.ai 时用 `api.kimi.ai` |
-| Grok | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`，带 Grok CLI 的请求头和凭证 `sub` 作为 `x-userid`。`currentPeriod` 为每周时是 7 天窗口；没有 `currentPeriod` 时才用按月的 `billingPeriodStart`/`End`。其他长度的周期固定使用 ID `credits`，让历史和提醒在周期之间延续 |
 
-请求头与 CPA 管理中心额度页相同，常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 CPA 的 Codex 执行器一致；Claude 的 User-Agent 与 CPA 默认的 Claude Code 指纹一致。
+请求头常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 Codex CLI 一致，Claude 的 User-Agent 与 Claude Code 一致。
 
-Antigravity 的 User-Agent 按 CPA 的 Antigravity 执行器的规则确定。Cloud Code 按 User-Agent 判断客户端，对旧格式的客户端（如 `antigravity/cli/1.0.13 (aidev_client; ...)`）不返回 Gemini 额度组。
+Antigravity 的 User-Agent 按以下规则确定。Cloud Code 按 User-Agent 判断客户端，对旧格式的客户端（如 `antigravity/cli/1.0.13 (aidev_client; ...)`）不返回 Gemini 额度组。
 
 - 凭证设置了 `user_agent`（文件顶层、`attributes` 或 `metadata` 中）时使用它；以 `antigravity/` 开头的值去掉 ` google-api-nodejs-client/...` 后缀。
-- 否则使用 `antigravity/hub/<版本> darwin/arm64`。版本读自 Antigravity Hub 更新清单（`AntigravityHubManifestURL`，与 CPA 使用的地址和请求头相同），成功后缓存 3 小时；读取失败时保留已缓存的版本，30 分钟后重试。还没有读到时使用 `2.23.0`，与 CPA 管理中心一致。清单在查询额度时按需读取，不经过凭证代理。
+- 否则使用 `antigravity/hub/<版本> darwin/arm64`。版本读自 Antigravity Hub 更新清单（`AntigravityHubManifestURL`），成功后缓存 3 小时；读取失败时保留已缓存的版本，30 分钟后重试。还没有读到时使用 `2.23.0`。清单在查询额度时按需读取，不经过凭证代理。
 
-token 来自凭证文件。CPA 在后台刷新 token 并写回文件，插件不自行刷新；上游返回 401 时跳过本轮，等 CPA 刷新。401 持续下去时按凭证失效处理；401 的正文说账号已停用时（如 `account_deactivated`）第一次就按账号停用处理，见“凭证问题”。非 2xx 的响应（包括 401）返回 `quota.HTTPError`：错误文字（显示在页面上）只带响应的前 300 个字节，`Body` 保留前 4096 个字节，供 `failure.Diagnose` 读取靠后的 `reason`。状态码为 401 的 `HTTPError` 在 `errors.Is` 中等同 `quota.ErrUnauthorized`，Antigravity 遇到它不再换下一个地址。
+token 来自 `host.Credential`。Claude 和 Codex 的 token 由 Magpie 或代理 CLI 刷新，Lamplighter 不刷新；上游返回 401 时跳过本轮，等它们刷新。401 持续下去时按凭证失效处理；401 的正文说账号已停用时（如 `account_deactivated`）第一次就按账号停用处理，见“凭证问题”。非 2xx 的响应（包括 401）返回 `quota.HTTPError`：错误文字（显示在页面上）只带响应的前 300 个字节，`Body` 保留前 4096 个字节，供 `failure.Diagnose` 读取靠后的 `reason`。状态码为 401 的 `HTTPError` 在 `errors.Is` 中等同 `quota.ErrUnauthorized`，Antigravity 遇到它不再换下一个地址。
 
 查询时间对齐到绝对时间边界（`alignedAfter`），默认 300 秒间隔落在每小时的 `:00 / :05 / ... / :55`。不使用“上次时间加间隔”，以免时间点随启动时间漂移。
 
 ### 网络出口
 
-`internal/egress` 让额度请求和 CPA 的模型请求使用同一个出口：
+`internal/egress` 让额度请求和 Magpie 对同一账号的请求使用同一个出口。`host.Credential.ProxyURL` 由 `internal/magpie` 按 Magpie 的规则（`ProxyOfLogin` 和 `netproxy`）确定：
 
-- 凭证有 `proxy_url` 时，用 CPA 的 `sdk/proxyutil` 建立连接，和 CPA 执行器的做法一致；`direct` / `none` 表示直连。无法解析时返回错误，不退回其他出口。
-- 没有 `proxy_url` 时调用 `host.http.do`。CPA 依次使用全局 `proxy-url`、环境变量代理、直连。`host.http.do` 本身没有超时，插件先用 `host.http.operation_open` 打开一个操作，超时后用 `host.http.cancel` 取消。
+1. `providers.json` 中该服务的 `accountProxies` 里该账号的代理（键为小写的账号名），否则该服务的 `proxy`。
+2. 否则 `settings.json` 的全局代理 `proxy`。Magpie 的 `netproxy.For` 对发往厂商的所有请求都使用它，不看 `NO_PROXY`，所以照原样返回。
+3. 都没有时为空，交给环境变量代理。这时 Magpie 自己使用环境变量或系统代理及其例外列表，并把它们作为 `MAGPIE_HTTPS_PROXY`、`MAGPIE_HTTP_PROXY`、`MAGPIE_NO_PROXY` 传给插件宿主（`netproxy.Env`），npm 外壳再映射成 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`（见“插件外壳”），所以 `NO_PROXY` 中的例外同样生效。`internal/magpie` 不把 `MAGPIE_*_PROXY` 当作账号的代理。
 
-CPA 的 `/api-call`（管理中心额度页使用）会忽略环境变量代理，而模型请求不会。插件按模型请求的规则选择出口。
+`direct` 表示直连。`@<id>` 是 Settings 中保存的代理，换成 `settings.json` 的 `proxies` 中该代理的地址和登录信息；这个代理已不存在或是 SSH 服务器时返回错误，不改用其他出口。只写 `host:port` 时按 HTTP 代理处理。`egress` 按以下规则使用 `ProxyURL`：
+
+- 支持 `http`、`https`、`socks5`、`socks5h` 代理；`direct` 或 `none` 表示直连。无法解析的地址返回错误（错误中隐藏用户名和密码），不退回其他出口。
+- 为空时使用环境变量代理（`HTTPS_PROXY` 等），没有时直连。
+- 每个请求的超时为 `request_timeout_seconds`。
 
 ### 套餐
 
@@ -229,7 +395,7 @@ CPA 的 `/api-call`（管理中心额度页使用）会忽略环境变量代理�
 
 - Codex：取 `wham/usage` 返回的 `plan_type`，每次主动查询都更新，不另发请求。套餐名与 Codex CLI 的状态页一致（`codex-rs/tui/src/subscription.rs`），默认权重为价格除以 Plus 的 20 美元：`prolite`（Pro $100）和 `self_serve_business_prolite`（Business Premium）为 5，`pro`（Pro $200）为 10，`promax`（Pro $500）为 25，`free` 和 `go` 为 0.1，其余为 1；Business（`team`）、Enterprise 和 Edu 席位的额度与 Plus 相同。未知的 `plan_type` 以原值作为套餐名，权重为 1。
 - Claude：额度响应里没有套餐。主动查询成功后请求 `GET https://api.anthropic.com/api/oauth/profile`，请求头与额度查询相同。请求失败时保留上次的结果，只记 debug 日志，不影响额度查询。原始值是 `organization.organization_type` 和 `organization.rate_limit_tier` 以空格连接：`claude_pro` 为 Pro（1）；`claude_max` 的 tier 含 `20x` 为 Max 20x（20），含 `5x` 为 Max 5x（5），都不含时为 Max（5）；`claude_team`、`claude_enterprise` 为 Team、Enterprise（1）。没有 `organization_type` 时按 `account.has_claude_max`、`has_claude_pro` 判断。2026-10-20 在 Pro 账号上实测为 `claude_pro` 和 `default_claude_ai`；Max 和 Team 的取值来自 Claude Code 的已知用法，未经实测。
-- Antigravity：额度响应里没有套餐。主动查询成功后请求 `POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`，请求体 `{"metadata":{"ideType":"ANTIGRAVITY"}}` 和 User-Agent 与 CPA 读取 Antigravity 额度点数时相同。原始值是 `paidTier.id`，没有 `paidTier` 时为 `currentTier.id`。Google AI Pro 账号的 `currentTier.id` 也是 `free-tier`，所以以 `paidTier` 为准。`free-tier` 为 Free，`g1-<名称>-tier` 取中间的名称并大写首字母，例如 `g1-pro-tier` 为 Pro；其余以原值作为套餐名。Google 没有公布各套餐额度的倍数，权重都是 1。2026-10-23 在 Google AI Pro 账号上实测 `paidTier.id` 为 `g1-pro-tier`；没有付费套餐时不带 `paidTier` 是推测，未经实测。
+- Antigravity：额度响应里没有套餐。主动查询成功后请求 `POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`，请求体为 `{"metadata":{"ideType":"ANTIGRAVITY"}}`，User-Agent 与额度查询相同。原始值是 `paidTier.id`，没有 `paidTier` 时为 `currentTier.id`。Google AI Pro 账号的 `currentTier.id` 也是 `free-tier`，所以以 `paidTier` 为准。`free-tier` 为 Free，`g1-<名称>-tier` 取中间的名称并大写首字母，例如 `g1-pro-tier` 为 Pro；其余以原值作为套餐名。Google 没有公布各套餐额度的倍数，权重都是 1。2026-10-23 在 Google AI Pro 账号上实测 `paidTier.id` 为 `g1-pro-tier`；没有付费套餐时不带 `paidTier` 是推测，未经实测。
 - 其他服务没有套餐，默认权重为 1。
 
 Claude 和 Antigravity 的单独请求（`Provider.Profile`）每个账号每 24 小时发一次（`plans` 中的 `checked`）。账号的主动查询结果与上一次相比有额度窗口增减时（比较 `plans` 中的 `windows`），之后 1 小时（`planRecheckPeriod`，记在 `recheck_until`）内每次主动查询都读一次套餐，直到读到套餐变化：Google AI Pro 到期后，Antigravity 的接口不再返回 5 小时窗口，7 天窗口换成免费账号的新额度。读取可能失败，套餐也可能比窗口晚一步变化，所以不只读一次。`windows` 保存在 `state.json` 中，插件停止期间发生的变化在重启后的第一次查询就能发现。重读期间读取失败时，这一轮不处理这个账号的额度提醒（只记录样本），等下一轮读到套餐再比较，因为这时的窗口可能属于一个还没读到的新套餐。从未读到过套餐的账号不暂缓：之后读到套餐也只算第一次读到，不会重新记录基线。重读期间读取失败后，15 分钟（`planRetryPeriod`）后的第一次主动查询会再读一次，1 小时结束后也是如此，不必等到 24 小时后。读取连续失败超过 1 小时后，额度提醒恢复按旧基线比较。套餐比窗口晚一步变化时（窗口变化的那一轮读到的仍是旧套餐），这一轮的额度提醒按旧基线比较，可能发出一条错误的恢复或下降提醒，读到新套餐的那一轮才推送套餐变化。
@@ -238,23 +404,25 @@ Claude 和 Antigravity 的单独请求（`Provider.Profile`）每个账号每 24
 
 ### 被动数据
 
-CPA 在用量记录的 `ResponseHeaders` 中提供上游响应头：
+被动数据有两个来源：Magpie 的额度记录（`KeptQuotas`，见“与 Magpie 的接口”），以及点火响应的响应头。响应头按下表解析：
 
 | 服务 | 响应头 | 窗口 |
 | --- | --- | --- |
 | Claude | `Anthropic-Ratelimit-Unified-5h-Utilization` / `-5h-Reset`，`-7d-` 同理 | 5 小时、7 天；值是已用比例，如 `0.2` |
-| Claude | `Anthropic-Ratelimit-Unified-7d_oi-Utilization` / `-7d_oi-Reset` | Fable 的 7 天窗口，写入与主动查询相同的 Fable 额度组（`providers.FableGroupKey`）。CPA 也把 `7d_oi` 当作 Fable 专用窗口。普通（非 Fable）请求的响应头里没有这组；Fable 请求时是否返回，还没有在能用 Fable 的账号上验证过。插件每次启动后第一次读到时记一条日志 |
+| Claude | `Anthropic-Ratelimit-Unified-7d_oi-Utilization` / `-7d_oi-Reset` | Fable 的 7 天窗口，写入与主动查询相同的 Fable 额度组（`providers.FableGroupKey`）。普通（非 Fable）请求的响应头里没有这组；Fable 请求时是否返回，还没有在能用 Fable 的账号上验证过。插件每次启动后第一次读到时记一条日志 |
 | Codex | `X-Codex-Primary-Used-Percent`、`-Reset-At`、`-Reset-After-Seconds`、`-Window-Minutes`，`Secondary` 同理 | 按窗口长度区分，300 分钟为 5 小时，10080 分钟为 7 天，其他长度各自成为一个窗口；没有长度时 Primary 为 5 小时、Secondary 为 7 天 |
 
-Antigravity、Kimi 和 Grok 的响应头里没有额度。
+Antigravity 的响应头里没有额度。
 
-被动数据只更新响应头里有的窗口，主动查询结果替换整个凭证的额度组及窗口；未返回的额度组保留空组，避免被动响应头重新补回。主动结果缺席的持久化窗口基线标记 `Rebase`，跨重启保留；窗口重新出现后的第一次读数只作为新起点，不触发恢复或重置前提醒。窗口消失本身不发送通知；没有 5 小时窗口时 `collectTargets` 跳过点火，恢复后自动继续。管理历史仍包含过去出现的所有窗口，由页面决定显示哪些窗口。额度组有过主动查询结果后，被动数据只更新那次结果中出现过的窗口，不新增窗口：ChatGPT Pro 账号的额度接口只返回 7 天窗口，页面上却出现过一个没有重置时间、一直是 100% 的 5 小时窗口，它只能来自响应头。最近一次成功主动查询的窗口集合保存在 `state.json` 的 `groups.active_windows` 中：`null` 或字段缺失表示尚未确认，空数组表示已确认整组缺席。被动数据只接受保存集合中的窗口，启动后首次主动查询失败也沿用该集合；只有新的成功主动查询能恢复缺席窗口。旧状态缺少 `active_windows` 时，优先从非空且格式有效的 `plans.windows` 恢复集合；这个签名只在成功主动查询后写入，组未出现在签名中表示该组缺席。空签名无法区分尚未查询和主动返回空集合，不作为迁移依据。无法可靠迁移的已有组在首次主动查询成功前，禁止被动数据新增窗口；当前内存视图中已有的窗口仍可更新，首次成功主动结果只建立新的通知基线。迁移能确认缺席的旧窗口同样标记为首次返回时重建基线，即使旧文件尚未设置 `Rebase`。此限制在加载时标记，不通过通知基线、`Rebase` 或点火观测推断窗口存在与否。状态文件中没有的真正新组允许被动数据先建立窗口。服务新开的窗口要到下一次主动查询才出现。`-Reset-After-Seconds` 从用量记录的 `RequestedAt` 起算：用量记录在请求结束时才到达，从处理时刻起算会把长请求带回的上一周期重置时间推到重置之后。
+被动数据只更新响应头里有的窗口，主动查询结果替换整个凭证的额度组及窗口；未返回的额度组保留空组，避免被动响应头重新补回。主动结果缺席的持久化窗口基线标记 `Rebase`，跨重启保留；窗口重新出现后的第一次读数只作为新起点，不触发恢复或重置前提醒。窗口消失本身不发送通知；没有 5 小时窗口时 `collectTargets` 跳过点火，恢复后自动继续。管理历史仍包含过去出现的所有窗口，由页面决定显示哪些窗口。额度组有过主动查询结果后，被动数据只更新那次结果中出现过的窗口，不新增窗口：ChatGPT Pro 账号的额度接口只返回 7 天窗口，页面上却出现过一个没有重置时间、一直是 100% 的 5 小时窗口，它只能来自响应头。最近一次成功主动查询的窗口集合保存在 `state.json` 的 `groups.active_windows` 中：`null` 或字段缺失表示尚未确认，空数组表示已确认整组缺席。被动数据只接受保存集合中的窗口，启动后首次主动查询失败也沿用该集合；只有新的成功主动查询能恢复缺席窗口。旧状态缺少 `active_windows` 时，优先从非空且格式有效的 `plans.windows` 恢复集合；这个签名只在成功主动查询后写入，组未出现在签名中表示该组缺席。空签名无法区分尚未查询和主动返回空集合，不作为迁移依据。无法可靠迁移的已有组在首次主动查询成功前，禁止被动数据新增窗口；当前内存视图中已有的窗口仍可更新，首次成功主动结果只建立新的通知基线。迁移能确认缺席的旧窗口同样标记为首次返回时重建基线，即使旧文件尚未设置 `Rebase`。此限制在加载时标记，不通过通知基线、`Rebase` 或点火观测推断窗口存在与否。状态文件中没有的真正新组允许被动数据先建立窗口。服务新开的窗口要到下一次主动查询才出现。点火响应的 `-Reset-After-Seconds` 从收到响应的时刻起算。
 
-每个窗口记下当前读数的读取时间（`WindowView.ReadAt`）：主动查询为查询开始的时刻，被动数据为用量记录的 `RequestedAt`，点火确认为点火请求开始的时刻。被动数据的读取时间早于窗口当前读数时，`applyGroups` 丢弃这个窗口的读数；一组窗口全部被丢弃时，不写历史样本，也不处理通知。多个请求并发时，先开始、后结束的长请求会在较新的读数之后带回较高的额度；额度下降较快时，两者相差可能达到 `RecoveryJump`，会被当成恢复，同一档提醒会再推送一次。主动查询结果不受这条规则限制。
+每个窗口记下当前读数的读取时间（`WindowView.ReadAt`）：主动查询为查询开始的时刻，Magpie 的额度记录为它的读取时间（`KeptQuota.ReadAt`），点火确认读到的响应头为成功的那次点火请求发出的时刻。被动数据的读取时间早于窗口当前读数时，`applyGroups` 丢弃这个窗口的读数；一组窗口全部被丢弃时，不写历史样本，也不处理通知。多个请求并发时，先开始、后结束的长请求会在较新的读数之后带回较高的额度；额度下降较快时，两者相差可能达到 `RecoveryJump`，会被当成恢复，同一档提醒会再推送一次。主动查询结果不受这条规则限制。
 
-跳过规则（`shouldSkipActive`）：响应头里没有额度的服务从不跳过。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
+跳过规则（`shouldSkipActive`）：响应头里没有额度的服务（Antigravity）从不跳过，Magpie 也不为它提供额度记录，见“与 Magpie 的接口”的“额度记录”。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
 
 ## 点火
+
+`ignition.enabled` 默认关闭（`config.Default`）：点火会用用户的账号发送模型请求，由用户自己开启。配置文件中写了 `ignition.enabled` 时按文件的值。
 
 ### 时间
 
@@ -266,19 +434,23 @@ Antigravity、Kimi 和 Grok 的响应头里没有额度。
 4. 重置时间在未来：`reset + grace_seconds`；不在当天时段内时等到第二天。
 5. 重置时间已过或未知：立即（受冷却和重试时间限制）。
 
+额度组是否为点火目标由 `ignitionTarget` 判断：有 5 小时窗口，服务开启监控（`monitor`）和点火（`ignite`），额度组被选中（`groupIgnitable`）。有额度组勾选项的服务（`providers.Ignition.Groups`，目前只有 Antigravity）按配置中的 `groups` 选择：空数组表示一个都不选，字段省略或为 `null` 时使用 `DefaultGroups`；页面保存时总是写出勾选结果的数组，取消最后一个勾选即保存 `[]`。其他服务的 `groups` 为空时选择全部额度组。自动点火、手动点火、每个自动点火请求的准入和 `magpie_warmup` 共用这条规则。
+
+自动点火在每个请求（包括换下一个候选模型）发出前都重新读取配置：`ignition.enabled` 仍开启，当前仍在每天的点火时段内（`ignite.Schedule.InWindow`），账号仍在凭证列表中，额度组仍是点火目标（`engine.mayIgniteLocked`）。这项检查与登记在 `engine.mu` 下一次完成（`engine.admit`），登记的请求记在 `Engine.admission`。`engine.Configure` 在同一把锁下换上新配置后调用 `withdrawLocked`：新配置下目标不再满足条件时，取消这个请求的 context（原因为 `errIgnitionWithdrawn`），尚未发出的请求不再发出，正在等待响应头的请求被取消。收到响应头后请求已到达厂商，准入结束：网关不再按这个 context 取消请求，非 2xx 的错误正文照常读完（见“与 Magpie 的接口”）。`OpenModelStream` 带回了上游状态码时，即使撤销与响应头同时发生，也按上游的结果处理（401、403 照常进入凭证问题）；只有没有状态码时才按撤销处理，关闭可能已打开的流。锁只保护检查和登记，不在持锁期间等待网络。引擎停止后（`engine.Engine.Cancel`）不再准入，已登记的请求被取消，调用日志的 `end_reason` 为 `canceled`。不满足条件或被撤销时放弃这一轮中尚未发送的请求（`errIgnitionWithdrawn`），调用日志的 `end_reason` 为 `withdrawn`，只记一条 info 日志，不计失败。一轮点火可能因候选模型和确认持续数分钟，用户在这期间关闭点火或监控、取消额度组时，后续目标和候选模型都不再发送。手动点火（`POST /api/ignite`）不经过准入，不受 `ignition.enabled` 影响，按精确的额度组 key 查找目标。
+
 同一额度组中有 5 小时以外的窗口用完（剩余 ≤ 0.01%）且尚未到重置时间时，定时点火跳过这个额度组，不尝试、不计失败、不推送；引擎在该窗口的重置时间醒来，由下一次查询确认额度是否恢复。页面在点火状态中显示被哪个窗口挡住（`blocked_window`、`blocked_until`）。手动点火不受此限制。
 
-**滑动占位**：有些服务在窗口尚未开始时返回“当前时间加 5 小时”的重置时间，并且每次查询都向后移动。`ignite.Observe` 用连续两次主动观测判断：重置时间距当前约 5 小时（误差 120 秒），且两次观测间的移动量接近经过的时间（误差为经过时间的 2%，在 3 到 10 秒之间）。被动数据来自真实请求，请求本身会开始窗口，所以被动观测永远不是滑动占位。看到固定的未来重置时间会清空失败状态。
+**滑动占位**：有些服务在窗口尚未开始时返回“当前时间加 5 小时”的重置时间，并且每次查询都向后移动。`ignite.Observe` 用连续两次观测判断：重置时间距当前约 5 小时（误差 120 秒），且两次观测间的移动量接近经过的时间（误差为经过时间的 2%，在 3 到 10 秒之间）。点火响应头中的读数来自真实请求，请求本身会开始窗口，所以这种观测永远不是滑动占位。Magpie 的额度记录（`kept=1`）可能来自 Magpie 自己的额度查询，不说明窗口已经开始，所以与主动查询一样判断，观测时刻取读数的读取时间（`applyGroupsFrom` 的 `requested` 为假）。看到固定的未来重置时间会清空失败状态。
 
 ### 请求
 
-点火通过 `host.model.execute_stream` 发送，`auth_id` 为凭证的运行时 ID，`forced_provider` 为 CPA 报告的服务名（`Cred.HostProvider`）。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。Kimi 和 Grok 没有点火：Kimi 订阅的 5 小时和 7 天窗口从开通时间起按固定时间切换，不论是否使用；Grok 的每周额度在上一周期结束时自动开始。其余服务的请求如下：
+点火通过 `host.Host.OpenModelStream` 经 Magpie 网关发送，`Account` 为账号的 pin，`Protocol` 为下表的入口协议，`Model` 为网关的模型 ID（`<服务>/<模型>`，见“模型选择”）。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。各服务的请求如下：
 
-| 服务 | 入口协议 | 请求要点 |
-| --- | --- | --- |
-| Codex | `openai-response` | `reasoning.effort: none`，`tools: []`，`stream: true` |
-| Claude | `claude` | `stream: true` |
-| Antigravity | `openai` | `temperature: 0`，`reasoning_effort: none`，`stream: true` |
+| 服务 | 入口协议 | 网关路径 | 请求要点 |
+| --- | --- | --- | --- |
+| Codex | `openai-response` | `POST /v1/responses` | `reasoning.effort: none`，`tools: []`，`stream: true` |
+| Claude | `claude` | `POST /v1/messages` | `stream: true` |
+| Antigravity | `openai` | `POST /v1/chat/completions` | `temperature: 0`，`reasoning_effort: none`，`stream: true` |
 
 所有点火请求都省略输出 token 上限字段。唯一的提示词由 `providers.TriggerPrompt` 给出：
 
@@ -286,82 +458,127 @@ Antigravity、Kimi 和 Grok 的响应头里没有额度。
 Reply with only OK. Do not think, do not use tools, do not do anything else.
 ```
 
+`internal/magpie` 的点火请求（`gateway.go`）经“网关请求”一节所述的客户端发送：
+
+- **锁定账号**：请求头 `X-Magpie-Account: <pin>`。pin 含非 ASCII 字符时按百分号编码发送，Magpie 会解码。锁定后网关只尝试这个账号，不换账号重试；账号不能接受时由网关直接回答，见“失败分类和保护”。
+- **错误状态码**：网关返回非 2xx 时，`OpenModelStream` 返回该状态码和响应头，以及 `gatewayError` 给出的 `host.Error`。错误正文在收到响应头后用独立的 10 秒期限读取（`errorBodyWait`），读到一半被截断时状态码照样返回。
+- **模型列表**：`Models` 读 `GET /v1/models` 的 `data[].id`，最多读 16 MiB，整次调用 20 秒超时。没有服务前缀的 ID（用户在 Magpie 中开启了只列出模型名）按 `owned_by` 补上前缀；`data` 缺失或某项没有 `id` 时返回包装 `host.ErrFormat` 的错误。
+
+Claude 账号的请求在 Magpie 中由本机的 Claude Code 转发（Magpie 文档 `docs/subsystems/claude-subscription-bridge.md`，源码 `serveClaudeSubscription`）。`X-Magpie-Account` 在选择候选账号时生效（`pinTo` 在转发之前执行），Claude Code 随后在该账号保存的配置目录中运行，所以锁定对这条路径同样有效。Claude Code 向 Anthropic 发送真实的模型请求，按 Anthropic 的规则这会开始 5 小时窗口；请求带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。网关把 Claude Code 报告的额度写回响应头 `anthropic-ratelimit-unified-{5h,7d,7d_oi}-{utilization,reset}`（`limitHeaders`），在请求到达时和回复开始时各写一次；网关在等待 Claude Code 启动期间可能提前发出响应头，这时响应头里还没有新窗口，由“确认”中的主动查询确认。以上来自 Magpie 源码和文档，尚未用真实账号验证。
+
 ### 流式执行与取消
 
-`engine.executeStream` 同步打开模型流，取得 `stream_id` 后逐块读取；响应头保留给 `confirm`。`stream_parse.go` 按协议固定格式假设：
+`engine.executeStream` 同步打开模型流，取得流 ID 后逐块读取；响应头保留给 `confirm`。网关对三种协议都返回标准 SSE 字节流，`ReadModelStream` 每次返回收到的字节（最多 32 KiB），可能在任意位置切开：
 
-- `openai`（Antigravity）：每个 chunk 是原始 JSON 对象，直接解析；HTTP handler 才会添加 `data:` 和 `[DONE]`。
-- `claude`：只按标准 SSE 字节流解析，保留跨 chunk 的行内容，以空行派发事件；不丢弃未完成的 `event:` 或注释行，也不提前派发无换行的 `data:`。
-- `openai-response`（Codex）：尚未见到换行、且行缓冲为空时，不含 `\n` 的 chunk 是 CPA Scanner 去掉行尾换行后的完整单行。`event:` 和注释作为独立行忽略；`data:` 组成完整 JSON 或 `[DONE]` 时立即派发，因为 CPA 会丢弃空行。含 `\n` 的 chunk 按标准 SSE 字节流处理，并为该流永久锁定字节流模式；后续无换行的 chunk 只作为碎片保留。
+- `openai`（Antigravity）：Chat 的每个 chunk 是一条 `data:` 行，以 `data: [DONE]` 结束。没有 `[DONE]` 时，收到 `finish_reason` 之后的 EOF 视为正常结束，以便读到单独发送的 usage chunk。
+- `claude`：Anthropic 的事件（`event:` 和 `data:` 行），以 `message_stop` 结束。
+- `openai-response`（Codex）：Responses 的事件，以 `response.completed` 结束。
 
-**Codex 格式限制**：如果 CPA 的 Codex 路径以后改为发送尚未包含换行的字节流碎片，首批碎片会被误判为 Scanner 完整单行；需要随 CPA 的格式变化调整解析器。
+`stream_parse.go` 对三种协议使用同一个 SSE 解析器：保留跨块的行内容，以空行派发事件，忽略 `event:` 和注释行（网关等待上游时会发送 `: keepalive` 注释，Responses 还会重复发送 `response.in_progress`），不提前派发没有换行的 `data:` 行。允许跨块的行、事件、CRLF 和 UTF-8 字符，单行及单事件缓冲各最多 1 MiB。首次非空文本、可见 reasoning 或工具参数增量触发 `onOutput`，心跳、角色、生命周期和加密 reasoning 不触发。
 
-标准 SSE 允许跨 chunk 的行、事件、CRLF 和 UTF-8 字符，单行及单事件缓冲各最多 1 MiB，单个 Chat JSON chunk 同样限为 1 MiB。首次非空文本、可见 reasoning 或工具参数增量触发 `onOutput`，心跳、角色、生命周期和加密 reasoning 不触发。
+独立 watchdog 从首次输出的单调时钟时间起计时 2 秒（`ignitionOutputWindow`），到期调用 `CloseModelStream`，取消到网关的 HTTP 请求，阻塞中的 `ReadModelStream` 随之返回错误。读路径和 watchdog 通过互斥锁争取单一终止所有权，只有仍活动的流能被 watchdog 截断；已确定的完成或错误不会被迟到的截止、取消或 watchdog panic 覆盖。截止分支发现取消或停止已就绪时按取消处理。`sync.Once` 保证只关闭一次，调用返回前等待 watchdog 退出；关闭错误或 panic 记为 `close_error`，同时保留已确定的执行错误。主动 2 秒断流记为 `output_timeout`，不触发候选模型 fallback，随后仍走额度窗口确认。Claude 和 Responses 在终止事件之前的 EOF 作为异常处理（`unexpected_eof`）。
 
-独立 watchdog 从首次输出的单调时钟时间起计时 2 秒（`ignitionOutputWindow`），到期调用 `host.model.stream_close`。这个回调取消 CPA 的上游 HTTP context，因此下一次 `stream_read` 阻塞时仍可关闭。自然终止、读取或解析错误、调用 context 取消及插件停止时同样释放流。读路径和 watchdog 通过互斥锁争取单一终止所有权，只有仍活动的流能被 watchdog 截断；已确定的完成或错误不会被迟到的 deadline、取消或 watchdog panic 覆盖。deadline 分支发现取消或停止已就绪时按取消处理。`sync.Once` 保证只关闭一次，调用返回前等待 watchdog 退出；关闭错误或 panic 记为 `close_error`，同时保留已确定的执行错误。主动 2 秒断流记为 `output_timeout`，不触发候选模型 fallback，随后仍走额度窗口确认。Claude/Responses 终止事件前的 EOF 作为异常处理；Chat 收到 `finish_reason` 后继续读取可能独立返回的 usage，随后 EOF 才视为正常终止。
+每次点火从发出请求到读完正文最长 2 分钟（`ignitionStreamTimeout`）：网关等待较慢的启动（如 Claude Code）时持续发送 keepalive，流可能长时间没有输出，不加限制会挡住后台循环。超时、调用 context 取消和插件停止都会结束请求：还在等待响应头时取消 `OpenModelStream` 的 context，收到响应头后由 `executeStream` 调用 `CloseModelStream`。正常结束、读流出错、主动断流、超时、取消和停止都在 `executeStream` 返回前关闭流，确认阶段不留打开的流。超时记为 `timeout`，返回 `errIgnitionTimeout`，按临时错误重试。插件停止或调用 context 结束时被取消的点火（读取模型列表、等待响应头、读流或确认中）返回 `context.Canceled`，只记一条 info 日志，不计失败、不打开熔断。`host.Host` 没有规定被取消的调用返回什么错误，额度查询的错误也可能只说请求失败，所以模型列表读取失败和每次确认查询返回后，引擎再检查一次是否已停止或 context 已结束。停止前已收到的上游错误（带状态码）照常按该错误处理。
 
-流打开后的宿主 `chunk.Error`、协议 `error` 和 `response.failed` 统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。只保留白名单内的 HTTP 状态码和协议 `code`/`type`；宿主字符串只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，不从自由文本 message 中猜测分类。已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404；显式状态码优先。流内明确的认证失败（`authentication_error` 或状态码 401）会丢弃 `auth_unavailable` 标识，避免被既有分类器误认为 CPA 本地冷却；未带认证失败信息的本地冷却及非流式路径沿用原有分类。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法时，只在 `Message` 后附上这条固定说法；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。宿主字符串为 `HTTP NNN: {...}` 时，同时解析后面的 JSON。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
+流内错误统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。网关在发出 200 和响应头之后才遇到错误时，只能把它写成流中的错误事件（Magpie `streamError`）：Chat 为 `{"error":{"message","type","code"}}`，Claude 为 `error` 事件，Responses 为 `response.failed`（代码默认为 `server_error`，过载为 `server_is_overloaded`）。上游错误带有类型时，网关原样写进 `type`/`code`（`saidError`）；没有时 Claude 和 Chat 写 `api_error`，Responses 写 `server_error`，都不带状态码。解析时只保留白名单内的 HTTP 状态码和协议 `code`/`type`，message 只在以下固定情况中使用，用完即丢弃：
 
-**启动限制及 TODO**：CPA SDK v8.0.4（检查至 v8.0.60 仍相同）没有公开的模型启动取消接口。`internal/pluginhost/host_model_stream_callbacks.go` 使用 `context.WithoutCancel`，`sdk/api/handlers/model_execution.go` 同步等待首个 raw chunk 后才返回流，`internal/pluginhost/model_stream_bridge.go` 随后登记 `stream_id`。raw chunk 可能只是生命周期事件，不等于首次输出。插件在 ID 返回前无法调用 close，沿用 CPA 自身的等待行为，停止也可能等到这一步结束；ID 返回后若已停止，立即关闭。`request_timeout_seconds` 的默认 20 秒只用于其他 HTTP 请求，不保护模型启动或首输出等待。后续需在 CPA 提供公开的启动操作取消句柄后，再实现启动等待超时和停止期间取消；不通过单独 goroutine 超时返回留下仍在运行的上游请求，也不为此升级到仍无该接口的 SDK。
+- **重试后缀**：状态码为 408、429 或 5xx 时，网关在 message 末尾加上 `(429: you can retry your request)`（`saysPassing`），解析器只读取锚定在末尾的这个后缀。
+- **重试说法**：message 已含 `saysPassing` 认得的说法（`passingSaid`）时，网关不加后缀。`type`/`code` 只有上述默认值（且至少有一个）时，解析器按 `magpiePassingWords` 读出状态码：独立的 `429`、`rate limit`、`too many requests` 为 429，`overloaded` 为 529；其他说法（如 `timed out`）沿用默认值的 500。没有 `type`/`code` 的错误不是 Magpie 编码器写的，不读 message。
+- **Magpie 的限额**：message 以 `cappedError` 的开头（`usage cap reached: every account `、`spend cap reached: every key `、`usage limit reached: every account `，可带 `X-Magpie-Account: ` 前缀）开始时，是 Magpie 按用户设置扣住了账号，不是厂商限流。解析结果的 `Code` 为 `magpie_account_held`，`Message` 为与锁定账号本地回答相同的固定说法，没有状态码时按 429，由 `ignite.PinHeld` 和 `failure.Diagnose` 按“失败分类和保护”处理。厂商自己的 `usage limit reached|<时间>` 不是这个开头，按限流处理。
+- **Claude Code 的限流**：Claude Code 的一轮在流开始后失败时，Magpie 的 Claude Code 桥把它的结果写成错误事件：`code` 为 Claude Code 给出的错误类别（限流为 `rate_limit`），Claude Code 没有拿到 HTTP 状态时不带状态码，也不加重试后缀。`rate_limit` 在协议标识白名单中，对应 429。message 含 Claude Code 的固定说法 `usage limit reached|<10 位 Unix 时间>`（`claudeUsageLimit`，与 Magpie 读取重置时间的 `resetsWords` 相同）且没有其他状态码时也按 429。没有重置时间的 `Claude AI usage limit reached` 只在它是整条 message（可带句号）、且 `type`/`code` 只有上述默认值时按 429（`claudeUsageLimitBare`）。Magpie 的限额开头先于这两条判断，所以 Magpie 扣住账号的回答即使带 `rate_limit` 或这条说法，仍按 `magpie_account_held` 处理。
+
+已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` / `rate_limit` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404、`server_is_overloaded` 对应 529；显式状态码优先，上游的具体类型优先于 message 中的说法。宿主字符串错误（`StreamChunk.Error`）只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，`HTTP NNN: {...}` 时同时解析后面的 JSON。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法、且状态码为空或 400/401/403、也不是从重试说法读出的时，只在 `Message` 后附上这条固定说法；说法与限流或重试说法同时出现时无法判断是否停用，按普通失败处理；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
 
 ### 调用日志
 
-每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：CPA 默认 formatter 会丢弃任意 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
+每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：日志输出可能丢弃 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
 
-记录包含 `provider`、`model`、`auth_index`、随机 `correlation_id`、`stream_id`、HTTP 状态、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符；截断不截断 UTF-8 字符。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
+记录包含 `provider`、`model`、`auth_index`（账号 pin）、随机 `correlation_id`、`stream_id`、`status_code`、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符，不截断 UTF-8 字符，写入前经 `redact.Text` 处理（见“错误文本的脱敏”）。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
 
-`usage_source` 固定为 `cpa_host`。`usage` 保留宿主提供的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 CPA 转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
+`usage_source` 固定为 `magpie_gateway`。`usage` 保留网关返回的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 Magpie 的协议转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
 
-`usage_completeness` 为 `missing`（没有计数）、`partial` 或 `complete`。只有 Claude/`claude` 和 Codex/`openai-response` 原生点火路由正常终止，且收到最终输入和输出计数时标为 `complete`；它表示宿主协议的最终计数齐全，不保证每个上游细分项均存在。其余有计数的调用均为 `partial`，包括主动断流及 Antigravity/Chat 的自然结束。CPA 的 Antigravity→OpenAI translator 会为缺失计数补零，不同转换路径对推理 token 的合并和细分也可能不同；字段齐全或收到 `finish_reason` 不足以验证上游统计完整性，插件不把补出的零解释为确定的零用量。结束原因区分正常完成、主动断流、取消、启动/HTTP/读取/解析错误、异常 EOF 和关闭失败。
+`usage_completeness` 为 `missing`（没有计数）、`partial` 或 `complete`。只有 Claude/`claude` 和 Codex/`openai-response` 原生协议的点火正常终止，且收到最终输入和输出计数时标为 `complete`；它表示网关协议的最终计数齐全，不保证每个上游细分项均存在。其余有计数的调用均为 `partial`，包括主动断流及 Antigravity/Chat 的自然结束：网关在协议转换中可能为缺失的计数补零，不同转换路径对推理 token 的合并和细分也可能不同，字段齐全或收到 `finish_reason` 不足以验证上游统计完整性，插件不把补出的零解释为确定的零用量。
+
+`end_reason` 为 `completed`（正常完成）、`output_timeout`（主动断流）、`canceled`、`timeout`（超过 `ignitionStreamTimeout`）、`start_error`（请求没有发出或没有响应）、`http_error`（网关返回错误状态码）、`read_error`、`stream_error`（流内错误或无法解析）、`unexpected_eof`、`close_error`、`watchdog_error` 或 `withdrawn`（自动点火的请求未通过准入或被配置变更撤销，见“点火”）。
 
 ### 模型选择
 
-CPA 没有按凭证列出模型的宿主回调，插件用 `models_api_key` 读取 `GET /v1/models`。这个列表是所有凭证模型的合集，按模型 ID 去重，`owned_by` 在两个服务提供同一 ID 时可能指向另一个服务，所以候选只按名称挑选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型）：
+模型列表来自网关的 `GET /v1/models`（`host.Host.Models`，`models.Lister` 缓存 10 分钟），是所有服务所有账号模型的合集。Magpie 以 `<服务>/<模型>` 命名模型，服务部分是 Magpie 的服务 ID，例如 `codex/gpt-5.5`、`claude/claude-haiku-4-5`、`agy-cli/gemini-3-flash`。锁定账号的请求只能使用该账号所属服务的模型，因此点火时只取账号的 Magpie 服务（`Cred.HostProvider`）前缀下的模型（`credModels`），去掉前缀后按名称挑选候选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型），再按完整 ID 发送。没有服务前缀的 ID 原样使用。
 
 - Codex：名称含 `luna` 的模型由新到旧，然后其他 `gpt-` 模型；排除图片模型和 `gpt-oss`。
 - Claude：`claude-` 开头的非 thinking Haiku 由新到旧，然后 Sonnet。
 - Antigravity Gemini 组：Flash 由新到旧，然后其他非 Pro 模型，Pro 最后；排除图片模型。
 - Antigravity Claude / GPT 组：Haiku、Sonnet、Opus（均为非 thinking）、GPT-OSS、其他非 thinking 模型。
 
-“由新到旧”比较模型名中的数字段，新版本无需改代码。每次点火都从最新的候选开始。新模型发布后，旧模型通常还会在列表里保留很久，所以候选顺序不参考上次成功的模型。配置了 `model` 或 `models` 时只用指定模型，且它必须在列表中。
+“由新到旧”比较模型名中的数字段，新版本无需改代码。每次点火都从最新的候选开始。新模型发布后，旧模型通常还会在列表里保留很久，所以候选顺序不参考上次成功的模型。配置了 `model` 或 `models` 时只用指定模型，且它必须在该服务的列表中；指定模型可以写模型名，也可以写带服务前缀的完整 ID。模型列表暂时读不到时，使用指定模型（模型名补上账号的服务前缀）或上次成功的模型。`last_model`、事件和日志中的模型都是完整 ID。
 
-候选模型被锁定的凭证拒绝时，CPA 在本地返回 `auth_not_found`（凭证不支持该模型）或 `unknown provider for model`（没有凭证支持），不会请求上游；插件换下一个候选，最多 6 个。全部被拒绝时按高风险错误处理。模型列表暂时读不到时，使用指定模型或上次成功的模型。
+候选模型不在锁定账号的套餐中时，Magpie 在本地回答 400 `X-Magpie-Account: <账号>'s plan doesn't list <模型>`；没有任何账号提供它时回答 404 `X-Magpie-Account: no account "<pin>" serves this model`。两者都不请求上游，插件换下一个候选，最多 6 个。全部被拒绝时按高风险错误处理（`ErrNoModel`）。
 
-CPA 的模型列表来自它内置并定期更新的模型表，同一服务的凭证都列出相同的模型，所以列表里的新模型不一定能被每个账号调用。上游以 HTTP 400 或 404 拒绝某个候选时（`ignite.ModelRejected`；`failure.Diagnose` 判为账号停用的错误除外，停用的账号拒绝所有模型），插件在这次点火中换下一个候选，每次点火只换一次；再次被拒说明问题在请求或账号，按高风险错误处理，错误文字带上第一个被拒的模型和状态码；其余候选都被 CPA 本地拒绝时，带上被拒的完整错误。401、403 和 429 与模型无关，不换模型。
+Magpie 为同一服务的所有账号列出相同的模型，所以列表里的新模型不一定能被每个账号调用。上游以 HTTP 400 或 404 拒绝某个候选时（`ignite.ModelRejected`；`failure.Diagnose` 判为账号停用的错误除外，停用的账号拒绝所有模型），插件在这次点火中换下一个候选，每次点火只换一次；再次被拒说明问题在请求或账号，按高风险错误处理，错误文字带上第一个被拒的模型和状态码；其余候选都被 Magpie 本地拒绝时，带上被拒的完整错误。401、403 和 429 与模型无关，不换模型。
 
 换到的候选成功时，被拒的模型确实与这个额度组的账号有关：`engine.noteRefused` 在内存中记下额度组和模型，并记录 `model_refused` 事件；之后 24 小时（`refusedFor`）内，这个额度组的自动选择跳过该模型（`engine.skipRefused`），到期后再试一次。反复请求账号没有权限的模型可能增加账号风险，而新模型可能分批开放，所以按天重试。记录不写入 `state.json`，插件重启后清空。指定模型不受影响。
 
-模型列表在三种情况下读取：插件启动后、CPA 地址或 `models_api_key` 变化后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；前两种读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选，放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果；CPA 地址或 `models_api_key` 变化时清空 `next_models` 和模型列表错误，再按新的地址和 key 读取。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
+模型列表在两种情况下读取：程序启动后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；启动后的读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选（取该服务及其别名对应的 Magpie 服务前缀下的模型），以完整 ID 放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
 
 ### 确认
 
-点火请求返回 2xx，且流正常结束或被 2 秒计时主动关闭后，插件确认 5 小时窗口在请求之后观测到了固定的未来重置时间。收到正文或 usage 本身不能确认成功：
+点火请求返回 2xx，且流正常结束或被 2 秒计时主动关闭后，插件确认 5 小时窗口有在请求之后读取的固定未来重置时间。收到正文或 usage 本身不能确认成功。`engine.confirmed` 按以下条件判断：
 
-1. Claude 的响应头里直接带新的重置时间，立即确认。
-2. Codex 的额度信息通过同一请求的用量记录到达；等待期间继续处理被动数据。
-3. 按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次。Antigravity 的响应头里没有额度，只靠这一步确认。
+- 窗口读数的读取时间（`WindowView.ReadAt`）不早于成功的那次点火请求进入 `OpenModelStream` 的时刻（`sentResponse.sentAt`）。读取模型列表和被拒的候选模型可能用去一段时间，这期间的读数不能说明这次请求开始了窗口。应用读数的时刻（`ObservedAt`）不能代替它：Magpie 在点火前记下的读数可能在点火后才被读到，例如凭证过期时确认阶段改读额度记录（`keptFallback`）。
+- 重置时间在未来，且不是滑动占位（额度记录中的读数不能单凭来源确认窗口已开始，见“时间”的“滑动占位”）。
+- 点火前的窗口已结束或是滑动占位时，`ignitionBase` 记下它的重置时间；读数的重置时间与它相同时仍是旧窗口，不算确认。点火前窗口已在运行时（手动点火）不比较。
 
-全部检查都没有确认时，返回 `ErrNotConfirmed`。
+确认的途径：
+
+1. 响应头里带额度时立即确认：Claude 的 `anthropic-ratelimit-unified-5h-*` 由网关写回（见“请求”）。
+2. 否则按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次；等待期间继续处理排队的被动数据。网关不把 Codex 的 `x-codex-*` 响应头转发给客户端（Magpie v0.1.4634 实测，响应头只有 `x-magpie-model`、`x-magpie-provider` 等），Antigravity 的响应头里没有额度，这两种服务只靠主动查询确认。
+
+全部检查都没有确认时，返回 `ErrNotConfirmed`。确认前插件停止或调用 context 结束时（包括确认查询被打断），返回 `context.Canceled`，不计失败，见“流式执行与取消”。
+
+### Magpie 的预热
+
+Magpie 自带的预热（内置插件“Warm-up and check-in”的设置，由 Magpie 的 `provider.KeepCodexWindowsWarm`、`KeepClaudeWindowsWarm` 执行）也会在窗口重置后或在设定的时间点发送请求开始窗口，与 Lamplighter 的点火同时开启会重复点火。Magpie 的预热只支持 Codex 和 Claude。
+
+`magpie.Host.MagpieWarmup`（`internal/magpie/warmup.go`）读取 Magpie 配置目录的 `settings.json`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `codexWarmup`、`claudeWarmup` | `""` 或 `off` 关闭，`week` 只在 7 天窗口重置时预热，`all` 同时预热 5 小时窗口 |
+| `codexWarmAts`、`claudeWarmAts` | 每天开启 5 小时窗口的时间点列表（如 `06:00`）；列表不存在时读旧版 Magpie 写的单个时间 `codexWarmAt`、`claudeWarmAt`，空列表表示关闭 |
+| `codexWarmAtOf` | ChatGPT 账号自己的时间点，以小写的 Magpie 账号名（`host.Account.User`，工作区席位为 `a@b.com · team`）为键，`off` 表示不预热，代替 `codexWarmAts` |
+
+预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 匹配，`codexWarmAtOf` 按账号的 `User` 匹配（没有时用 `Email`），所以同一邮箱的个人账号和 Team 席位各自对应自己的设置。
+
+状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了这类预热的账号 pin，按字符串排序，没有时为空数组（不为 `null`）。Lamplighter 会点火的账号与自动点火的判定相同：`ignition.enabled` 开启，且账号至少有一个额度组是点火目标（`ignitionTarget`，见“点火”）。只有周窗口的账号（如 ChatGPT Pro）不点火，也就不列出。`ignition.enabled` 关闭时不读取设置，直接为空数组；还没有查询到额度组的账号不列出。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
 
 ### 失败分类和保护
 
 手动点火失败只记录一次 `ignite_failed` 事件并向调用方返回错误，不安排重试、不累计失败次数、不打开熔断或发送暂停通知；已有自动点火的重试、熔断、失败和凭证问题状态保持不变。手动点火确认阶段的额度查询（`queryCred` 不带 `track`）同样不改凭证状态：查询失败不建立凭证问题、不暂停自动点火、不通知，查询成功也不结束凭证问题，留给之后的轮询。事件的 `params` 为 `manual: "1"`、`error`、`summary`，没有 `retry_seconds`，页面据此不显示重试提示。手动成功仍通过 `ignite.RecordSuccess` 记录并清空失败状态，并结束账号的凭证问题。
 
+Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回答，不请求厂商（Magpie 源码 `internal/gateway/fallback.go` 的 `pinTo`）。这些回答的 message 都以 `X-Magpie-Account: ` 开头：
+
+| 状态码 | message | 含义 |
+| --- | --- | --- |
+| 429 | `<账号> rests until <RFC 3339 时间> (<原因>); no other account is tried in its place` | 账号在 Magpie 中休息：Magpie 在限流、额度用完或被拒之后让账号休息到厂商的重置时间 |
+| 429 | `usage cap reached: …`、`spend cap reached: …` 或 `usage limit reached: every account …`（`cappedError`） | 用户在 Magpie 中给账号设置的上限，或账号额度用完且设置为不额外付费 |
+| 400 | `<账号>'s plan doesn't list <模型>` | 账号的套餐不含该模型 |
+| 404 | `no account "<pin>" serves this model; …` | 没有这个账号，或它不提供该模型 |
+
+前两种由 `ignite.PinHeld` 识别，它只认 `X-Magpie-Account: ` 之后的完整固定说法：休息必须带 RFC 3339 时间，上限必须紧跟在前缀之后。后两种使模型不可用。网关在发出响应头之后才扣住账号时，`cappedError` 写进流中的错误事件，解析时换成同样的固定说法，见“流式执行与取消”。
+
 以下调度和保护规则用于自动点火。`ignite.Classify`：
 
 | 类别 | 条件 | 处理 |
 | --- | --- | --- |
-| 换模型 | `auth_not_found`、`unknown provider for model` | 换下一个候选 |
+| 换模型 | Magpie 本地回答的 400 `plan doesn't list`、404 `serves this model` | 换下一个候选 |
 | 上游拒绝模型 | 高风险错误中的 HTTP 400/404（`ignite.ModelRejected`） | 每次点火换一次候选，之后按高风险处理 |
-| 凭证失效、账号停用 | `failure.Diagnose` 给出 `auth` 或 `suspended`，见下文“凭证问题” | 暂停到凭证变化或手动点火成功 |
+| 凭证失效、账号停用 | `failure.Diagnose` 给出 `auth` 或 `suspended`，或 agy-cli 账号的凭证无法确认身份（`host.ErrIdentity`，不发请求），见下文“凭证问题” | 暂停到凭证变化或手动点火成功 |
 | 高风险 | `ErrNotConfirmed`、`ErrNoModel`，HTTP 400/401/403/404/409/422/429，`not found`、`unsupported` 等 | 立即暂停到第二天 `start_hour`；429 发送限流通知 |
-| 临时 | CPA 本地冷却（`are cooling down`）、`auth_unavailable`，其他错误 | 按 `failure_retry_seconds × multiplier^(n-1)` 重试，第 `max_transient_failures` 次暂停到第二天 |
+| 临时 | Magpie 本地回答的 429（账号休息或达到上限）、点火超时，其他错误 | 按 `failure_retry_seconds × multiplier^(n-1)` 重试，第 `max_transient_failures` 次暂停到第二天 |
 
-CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.CooldownWait`），不计入失败次数，在冷却结束后再等 `grace_seconds` 重试。CPA 在 429 之后把凭证冷却到上游重置时间再加十几秒，额度在重置前用完时，重置后 3 秒的点火会撞上这段冷却。连续第二次冷却按普通临时错误计数，避免冷却不断续期时无限重试。
+账号在 Magpie 中休息、且距休息结束不超过 10 分钟时（`ignite.CooldownWait`，取 message 中最晚的 `rests until` 时间），不计入失败次数，在休息结束后再等 `grace_seconds` 重试；事件带 `cooldown: "1"`。Magpie 在 429 之后让账号休息到厂商的重置时间，额度在重置前用完时，重置后 3 秒的点火会撞上这段休息。连续第二次休息按普通临时错误计数，避免休息不断续期时无限重试。
 
-**过期的 CPA 冷却**：CPA 收到账号级 429 后，把凭证冷却到上游报告的重置时间（7 天额度用完时可达数天），额度提前恢复（如重置卡）时不会自动解除。每轮查询后，`engine.checkCooldowns` 检查每个凭证：CPA 冷却还剩 10 分钟以上，且某个带 5 小时窗口的额度组在最近 15 分钟内的数据显示所有窗口都没有用完，就认为冷却已过期。每个冷却结束时间只推送一次（`state.json` 的 `cooldown_notices`），并记录 `cooldown_stale` 事件；状态接口的账号带 `cooldown_until` 和 `stale_cooldown`。插件不替用户清除冷却，因为那需要 CPA 管理密钥，并且会改变 CPA 的路由状态。
-
-暂停时推送一次通知（`circuit_notified_until_epoch` 防止重复），成功或看到固定的未来重置时间后清空失败状态。通知和事件详情只写 `failure.Diagnose` 提炼的一句话（`summary`）：上游的完整错误是多行 JSON，只保留在事件的 `error` 和状态的 `last_error` 中。HTTP 429（不含 CPA 本地冷却）暂停时发送限流通知代替暂停通知，并记录 `reason` 为 `rate_limited` 的 `credential_invalid` 事件。
+暂停时推送一次通知（`circuit_notified_until_epoch` 防止重复），成功或看到固定的未来重置时间后清空失败状态。通知和事件详情只写 `failure.Diagnose` 提炼的一句话（`summary`）：上游的完整错误是多行 JSON，只保留在事件的 `error` 和状态的 `last_error` 中。HTTP 429（不含 Magpie 本地回答的 429）暂停时发送限流通知代替暂停通知，并记录 `reason` 为 `rate_limited` 的 `credential_invalid` 事件。
 
 ### 凭证问题
 
@@ -371,14 +588,14 @@ CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.Coold
 | --- | --- |
 | `suspended` 账号停用 | 错误代码为 `TOS_VIOLATION`、`account_deactivated` 等停用代码；或状态码为 400/401/403，且 message 说账号或组织被停用（“violation of Terms of Service”“account has been disabled”等，见 `suspendedPhrases`）。单纯的 403 不算：缺少权限（`PERMISSION_DENIED`）和项目未启用 API（`SERVICE_DISABLED`）也返回 403 |
 | `auth` 凭证失效 | 状态码 401、`quota.ErrUnauthorized`，或 `invalid_grant`、`authentication_error` 等代码 |
-| `rate_limited` 限流 | 状态码 429 或 `RESOURCE_EXHAUSTED`；CPA 本地冷却（`model_cooldown`、`are cooling down`、`auth_unavailable`）除外，它们由 `ignite.CooldownWait` 和 `ignite.Classify` 处理 |
+| `rate_limited` 限流 | 状态码 429 或 `RESOURCE_EXHAUSTED`；Magpie 对锁定账号的本地回答（message 含 `X-Magpie-Account:`）除外，它们不是厂商的响应，由 `ignite.CooldownWait` 和 `ignite.Classify` 处理 |
 
 账号的凭证问题记在 `state.json` 的 `credentials`（按 `auth_index`，`store.CredentialState`），代码在 `internal/engine/credential.go`：
 
-- **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
-- **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 过期且 CPA 还没刷新时也返回 401，CPA 每 15 分钟刷新一次凭证，持续两个刷新周期以上的 401 不是过期。其他结果清零计数。
+- **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。agy-cli 账号的请求由 agy 用它当前登录的 Google 账号发出，pin 不能说明是哪个账号，所以自动和手动点火都先核对身份（`identityChecked`、`ignitionCredential`），每个候选模型的请求发出前再核对一次（`execute`）：读取模型列表最多要 20 秒，候选模型被拒后紧接着发下一个，期间 agy 可能已改登其他账号。核对（`confirmIdentity`）只用 `host.IdentityChecker`，它只读本地文件；`Credential` 读得到凭证也不能说明网关会用这个账号自己的登录，所以宿主没有实现 `host.IdentityChecker` 时，agy-cli 账号一律不发请求。只要没有核对成功就不发请求（agy 已改登其他账号、无法确认身份、凭证在系统钥匙串中，以及读不到文件、宿主不支持核对等其他错误），错误包装 `host.ErrIdentity`，按 `auth` 处理，指纹记为未知。还没有发出请求时，错误以“没有发送点火请求：”开头；前面的候选模型已经发出、第 n 个候选模型发出前核对失败时，以“第 n 个候选模型未发送：”开头。之后的原因只用固定的类别（`identityReason`）：身份错误（`host.ErrIdentity`）用宿主给出的原因，如 agy 已改登其他账号（邮箱只留用户名末两位）、无法确认 agy 当前登录的账号、凭证在系统钥匙串中，引擎再遮掉其中的邮箱、引号中的值和类 token 字符串（`redactDetail`）；其他错误写成“无法确认账号身份：”加凭证文件格式不对、找不到凭证文件、读取凭证失败或宿主不支持核对 agy 账号的身份，不带宿主错误的原文，因为其中可能有凭证文件的字段值。宿主错误经 `redactDetail` 处理后记一条 debug 日志，日志在出口再脱敏一次（见“错误文本的脱敏”）。核对成功、请求发出后被拒时，agy-cli 账号记下的指纹是最后一个发出的请求之前核对得到的指纹（`sentResponse.fingerprint`）：第一次核对之后 agy 可能已经重新登录，记下第一次的指纹会让下一轮查询把已被拒的登录当成新凭证。核对失败时，自动点火照下文暂停到凭证变化，不计临时失败、不算限流，原因写在 `ignite_paused` 和 `credential_invalid` 事件的 `summary` 及目标的 `last_error` 中；手动点火只记 `ignite_failed`。Codex 和 Claude 的请求用账号自己的凭证，手动点火不读。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
+- **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 刚过期、Magpie 或代理 CLI 还没刷新时也可能返回 401，Lamplighter 不自己刷新这些 token，刷新的时间由它们决定，持续这么久的 401 才按凭证失效处理。已知过期的 token（`Expired`）不发给厂商，见“与 Magpie 的接口”的“额度记录”。其他结果清零计数。
 - **通知**：进入问题状态时记录 `credential_invalid` 事件，并发送一次通知：`auth` 为“🔑 … 凭证失效”，`suspended` 为“⛔ … 账号已停用”（有申诉链接时附上，https 链接同时作为 Bark 的跳转链接）。同一账号已处于同一类问题时，点火和查询再发现都只更新指纹，不再记事件或通知；点火发现或以同一原因再次确认过的问题（例如查询发现、换凭证后点火又失败）记为点火确认（`ignited`），只有点火成功才能结束。之后查询发现另一种原因（例如停用后查询又连续 401 满 30 分钟）时，事件和通知按新原因和来源照常发出，点火确认继续保留；只有凭证指纹变化后，新原因的问题才不带点火确认；状态在 `state.json` 中，插件重启后也不重复。发送失败时随之后每轮查询重试，每轮最多发一次：查询发现问题的那一轮已经发过，轮末的 `flushCredentialNotices` 跳过本轮发过或试过的通知（`credNoticeTried`）；1 小时（`credentialNoticeAge`）后放弃；没有推送渠道时不发送，这个问题也就不发恢复通知。
-- **凭证变化**：进入问题状态时记下凭证指纹（`providers.Fingerprint`：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。CPA 会自己改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
+- **凭证变化**：进入问题状态时记下凭证指纹（`host.Credential.Fingerprint`，由 `internal/magpie` 计算：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。Magpie 和代理 CLI 会改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
 - **恢复**：点火成功（含手动点火）结束任何凭证问题；额度查询成功只结束没有点火确认的问题。2026-11-16 Antigravity 账号因 TOS_VIOLATION 点火被拒后，额度查询仍然成功，查询成功不能说明停用已解除。结束时记录 `credential_restored` 事件；问题通知已送达时发送“✅ … 凭证已恢复”。
 
 状态接口的账号带 `credential_problem`（`auth` 或 `suspended`），是 `state.json` 的副本，由 `engine.mu` 保护。凭证事件和它们的通知带同一个额度组 key（存在 `credentials` 的 `group` 中）：点火发现时是点火的额度组，其余是账号按显示顺序的第一个额度组（`accountGroup`），页面据此把推送挂到事件上。账号还没有额度组时两边都为空，页面改按标签匹配。凭证事件另外记下账号的 auth index（`Event.Account`，历史记录的 `a`），只供 MCP 找到账号，见“MCP”。
@@ -401,7 +618,7 @@ CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.Coold
 - 第一次看到某个窗口只记录基线，不推送。
 - 推送失败（所有渠道都失败）时不更新已通知等级，下一次检查会重试。
 
-Bark 请求为 `GET {bark_url}/{标题}/{正文}?group&level&icon&url`，标题和正文除 RFC 3986 非保留字符外全部百分号编码，返回 JSON 中 `code` 不为 200 视为失败。`icon` 默认使用仓库中的 `assets/logo.png`；配置中的 `bark_icon` 仍为旧默认值（CPA Management Center 图标）时，载入时替换为该默认值。
+Bark 请求为 `GET {bark_url}/{标题}/{正文}?group&level&icon&url`，标题和正文除 RFC 3986 非保留字符外全部百分号编码，返回 JSON 中 `code` 不为 200 视为失败。`icon` 默认使用仓库中的 `assets/logo.png`（`bark_icon`）。
 
 ### 渠道
 
@@ -421,17 +638,45 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 排期时间取 `scheduleWindow`，没有时取 `effectiveAt`，按插件时区显示：起止相同时显示时刻，`scheduleConstraint = deadline` 时显示“终点 前”，其余（日期级排期）显示“起点～终点”。日期级窗口覆盖来源时区的一整天，起点通常早于公布时间，只显示起点会被误读为已经过去的时刻。
 
+## 错误文本的脱敏
+
+错误文字可能带上账号邮箱（如网关刷新请求的 `user` 参数、Magpie 给出的原因）、凭证字段或 URL 参数，来源包括上游和网关的错误正文、凭证文件的读取错误和 Magpie 的额度卡。这些文字在离开进程或写入磁盘的出口统一经 `internal/redact` 的 `redact.Text` 处理，不按来源逐条处理。
+
+规则（`redact.Text`）：
+
+- 带协议的网址（`scheme://…`）保留协议、主机和路径，去掉用户信息、查询参数和片段。
+- 邮箱（`@` 之后的域名带点）只留用户名的最后两个字符，如 `***rk`，引号去掉，不显示域名和用户名长度（`redact.Email`，MCP 的账号标识和 `shortReason` 用同一写法）。`claude-sonnet-4@20250514` 这类 `@` 后没有点的模型名不算邮箱。
+- `Bearer`、`Basic` 之后的凭证，`eyJ` 开头的 JWT，名为 `access_token`、`refresh_token`、`id_token`、`client_secret`、`api_key`（`api-key`、`apikey`）、`private_key`、`password`、`secret`、`token` 的字段的值，以及 32 个字符以上的连续 base64url 或十六进制字符，换成 `…`。
+- 其余文字不变，包括换行和 JSON 的引号，所以脱敏后的 JSON 错误正文仍能解析；处理过的文字再处理一次结果不变。
+
+出口：
+
+| 出口 | 位置 |
+| --- | --- |
+| 日志 | `magpie.Host.Log`（debug 日志也一样）；引擎的 `logf`；点火调用日志的 `reply`；`main.go` 的 `setupLog` 让标准库 `log` 的输出经过 `redact.Writer`，`net/http` 的错误日志也在其中 |
+| 事件和历史 | `engine.addAccountEvent` 在保存、写入历史和记日志之前处理 `message`、`detail` 和 `params` 的每个值。`label` 不处理：页面按它把事件对应到账号 |
+| `state.json` | 点火目标的 `last_error` 和 `circuit_reason`（`ignite.errorText`），凭证问题的 `summary`（`credentialSummary`）和 `appeal_url` |
+| 状态接口 | `engine.Status` 返回前调用 `redactStatus`，处理 `config_error`、`models_error`、`list_error`、`notify_error`、账号的 `error`、点火目标的 `last_error` 和 `circuit_reason`、事件；这些错误在内存中保留原文。`status.public.error` 和 `status.mcp.error` 由 `mcp.Server` 的 `Public`、`State` 处理 |
+| 历史接口和读回的事件 | `HistoryRange` 和启动时的 `loadRecentEvents` 处理读到的事件，覆盖脱敏之前写入的记录 |
+| HTTP 接口的错误 | `server.writeError`；`/api/refresh`、`/api/ignite` 等操作的 `error`（`action`）；`POST /api/tools/{name}` 的 `error`（`writeToolError`）；`/api/test-notify` 每个渠道的 `error` 和 `response` |
+| MCP | `refresh_quotas` 的 `error`；工具执行错误（`isError` 结果的文字）和参数错误 |
+| 推送 | 暂停通知和凭证通知中的一句话摘要，以及凭证通知的申诉链接和 Bark 跳转链接（`notify.CircuitMessage`、`notify.CredentialMessage`）。申诉链接来自上游的错误，按同样的规则处理；`forms.gle` 和 `support.google.com` 的表单地址没有查询参数，不受影响 |
+
+脱敏只处理出口的文字，不包装、不改写错误对象，所以 `errors.Is`、`errors.As`、`failure.Diagnose` 和 `ignite.Classify` 读到的仍是原文。来源处已有的打码保留：`shortReason`、`redactDetail`、webhook 响应中的 `[redacted]`、MCP 的账号标识。上述规则认不出、又可能是任意文字的值不写进错误：agy-cli 账号在 `plugin-auth.json` 中的键（`logins.json` 的 `home`）和条目的 `type`，以及额度卡中 Lamplighter 不认得的窗口名。
+
+新增把错误文字写入日志、磁盘、接口、MCP 或推送的地方时，调用 `redact.Text`，并在该包的 `redact_test.go`（引擎为 `redact_exit_test.go`）中用带邮箱、token 和 URL 参数的错误测试这个出口。
+
 ## 数据
 
-数据目录默认是插件目录下的 `data/lamplighter`。`config.DefaultDataDir` 从 CPA 的 `config.yaml` 读取 `plugins.dir`（默认 `plugins`，开头的 `~` 展开为用户主目录，相对路径以 CPA 的工作目录为准），与 CPA 解析插件目录的规则相同。CPA 在所有平台上都从临时目录 `cliproxy-pluginhost/pid-<进程号>/` 中的副本加载动态库，这个目录在 CPA 重启或容器重建后不保留，所以数据目录不能按动态库所在位置计算。
+数据目录的位置见“进程和数据目录”。
 
 | 文件 | 内容 |
 | --- | --- |
-| `state.json` | `groups`：每个窗口的通知基线和最近一次成功主动查询确认的窗口集合；`scheduler`：每个额度组的点火状态；`codex_reset_updates`：已见记录和已推送的排期；`cooldown_notices`：已提醒的过期冷却；`language`：通知语言；`plans`：各账号的原始套餐值、上次单独读取套餐的时间、上次主动查询的窗口、重读截止时间和待发送的套餐变化通知；`credentials`：各账号的凭证问题、指纹和通知状态（见“凭证问题”）。写入临时文件后替换 |
+| `state.json` | `groups`：每个窗口的通知基线和最近一次成功主动查询确认的窗口集合；`scheduler`：每个额度组的点火状态；`codex_reset_updates`：已见记录和已推送的排期；`language`：通知语言；`plans`：各账号的原始套餐值、上次单独读取套餐的时间、上次主动查询的窗口、重读截止时间和待发送的套餐变化通知；`credentials`：各账号的凭证问题、指纹和通知状态（见“凭证问题”）。写入临时文件后替换 |
 | `history/YYYY-MM-DD.jsonl` | 按 UTC 日期分文件的额度样本和事件 |
 | `instance.lock` | 实例锁 |
 
-历史记录每行一个 JSON：样本为 `{"k":"s","t":秒,"g":额度组,"w":窗口,"r":剩余,"x":重置,"s":"active|passive"}`，事件为 `{"k":"e","t":秒,"g":额度组,"e":类型,"v":级别,"m":文本,"l":标签,"d":详情,"p":参数,"a":账号}`，`a` 是账号的 auth index，只有凭证事件有。`m` 和 `d` 是写给 CPA 日志的中文；`p` 是页面拼出事件文字所需的值：`ignite` 和 `ignite_manual` 为 `model`、`reset`，自动点火的 `ignite_failed` 为 `retry_seconds`、`error`、`summary` 和可选的 `cooldown`，手动点火的 `ignite_failed` 为 `manual`（`1`）、`error`、`summary`，`ignite_paused` 为 `until`、`error`、`summary` 和可选的 `reason`（`reason` 为 `auth` 或 `suspended` 时没有 `until`），`credential_invalid` 为 `reason`、`status`、`code`、`summary`、`appeal_url`、`source`（`ignite` 或 `query`），限流时还有 `until`，`credential_restored` 为 `source`，`model_refused` 为 `model`、`fallback`、`hours`，`notify` 为 `title`、`notify_kind`，`notify_failed` 为 `title`、`error`、`notify_kind`（`quota`、`recovery`、`reminder`、`cooldown`、`plan`、`circuit`、`credential`、`suspended`、`rate_limited`、`credential_ok`、`codex_reset`），恢复通知还有 `windows`（以逗号连接的窗口 ID），`cooldown_stale` 为 `until`，`plan_change` 为 `from`、`to`（套餐名），`codex_reset` 为 `count`；`reset` 和 `exhausted` 为 `window`、`remaining`、`kind`（`5h`、`7d` 或空）、`label`（窗口短名）及可选的 `reset`；时间为 RFC 3339 UTC。主动样本每次都写；被动样本只在数值或重置时间变化时写，同一窗口每分钟最多一次，期间的新值暂存在 `pendingSamp`，满一分钟后写入。历史接口对超过 2 天的范围分段，每段取最后一个样本：超过 2 天按 10 分钟，超过 4 天按 15 分钟，超过 8 天按 30 分钟，超过 15 天按 1 小时，使这些范围的每个系列不超过约 800 个点（图表约 1000 像素宽）。2 天及以内不分段。分段长度在响应的 `bucket_seconds` 中。每个系列还带有 `resets: [[t, x], ...]`，两个值均为 Unix 秒，表示从样本时间 `t` 起预定重置时间为 `x`。此数组在点降采样之前按原始样本生成，按 `t` 升序；相邻原始样本的非零 `x` 相差超过 60 秒才记为变化，已知与未知之间的切换始终记录，未知使用 `x=0`。范围前生效项使用范围开始前时间最大的样本的 `[t, x]`，其 `t` 可以早于样本的一天前导范围，不要求是该 `x` 首次出现的时间；整个系列从未有重置时间时返回空数组。`points` 仍为 `[t, remaining, passive]`，分段规则独立于重置事件。每个系列带有 `label`（含账号后缀，例如 `ChatGPT#rk`）和 `source_label`（不含后缀），页面按服务和 `source_label` 合并同一额度的多个账号。
+历史记录每行一个 JSON：样本为 `{"k":"s","t":秒,"g":额度组,"w":窗口,"r":剩余,"x":重置,"s":"active|passive"}`，事件为 `{"k":"e","t":秒,"g":额度组,"e":类型,"v":级别,"m":文本,"l":标签,"d":详情,"p":参数,"a":账号}`，`a` 是账号的 auth index，只有凭证事件有。`m` 和 `d` 是写给日志的中文；`p` 是页面拼出事件文字所需的值：`ignite` 和 `ignite_manual` 为 `model`、`reset`，自动点火的 `ignite_failed` 为 `retry_seconds`、`error`、`summary` 和可选的 `cooldown`，手动点火的 `ignite_failed` 为 `manual`（`1`）、`error`、`summary`，`ignite_paused` 为 `until`、`error`、`summary` 和可选的 `reason`（`reason` 为 `auth` 或 `suspended` 时没有 `until`），`credential_invalid` 为 `reason`、`status`、`code`、`summary`、`appeal_url`、`source`（`ignite` 或 `query`），限流时还有 `until`，`credential_restored` 为 `source`，`model_refused` 为 `model`、`fallback`、`hours`，`notify` 为 `title`、`notify_kind`，`notify_failed` 为 `title`、`error`、`notify_kind`（`quota`、`recovery`、`reminder`、`cooldown`、`plan`、`circuit`、`credential`、`suspended`、`rate_limited`、`credential_ok`、`codex_reset`），恢复通知还有 `windows`（以逗号连接的窗口 ID），`plan_change` 为 `from`、`to`（套餐名），`codex_reset` 为 `count`；`reset` 和 `exhausted` 为 `window`、`remaining`、`kind`（`5h`、`7d` 或空）、`label`（窗口短名）及可选的 `reset`；时间为 RFC 3339 UTC。主动样本每次都写；被动样本只在数值或重置时间变化时写，同一窗口每分钟最多一次，期间的新值暂存在 `pendingSamp`，满一分钟后写入。历史接口对超过 2 天的范围分段，每段取最后一个样本：超过 2 天按 10 分钟，超过 4 天按 15 分钟，超过 8 天按 30 分钟，超过 15 天按 1 小时，使这些范围的每个系列不超过约 800 个点（图表约 1000 像素宽）。2 天及以内不分段。分段长度在响应的 `bucket_seconds` 中。每个系列还带有 `resets: [[t, x], ...]`，两个值均为 Unix 秒，表示从样本时间 `t` 起预定重置时间为 `x`。此数组在点降采样之前按原始样本生成，按 `t` 升序；相邻原始样本的非零 `x` 相差超过 60 秒才记为变化，已知与未知之间的切换始终记录，未知使用 `x=0`。范围前生效项使用范围开始前时间最大的样本的 `[t, x]`，其 `t` 可以早于样本的一天前导范围，不要求是该 `x` 首次出现的时间；整个系列从未有重置时间时返回空数组。`points` 仍为 `[t, remaining, passive]`，分段规则独立于重置事件。每个系列带有 `label`（含账号后缀，例如 `ChatGPT#rk`）和 `source_label`（不含后缀），页面按服务和 `source_label` 合并同一额度的多个账号。
 
 管理历史查询通过 `store.History.QueryWindow` 单遍扫描保留记录。每个系列在范围外只保留时间最大的一个前驱样本，以及是否出现过非零重置时间的标记；同一时间的前驱取最后补写值，乱序补写不会覆盖较新的前驱。范围内记录收集后按时间稳定排序，再计算重置变化、点降采样和事件。前驱在一天前导范围内时也作为 `points` 的起始点，更早的前驱只提供重置状态；范围内没有样本的系列不输出。内存为 `O(系列数 + 范围内记录数)`，不对范围外记录排序，不创建磁盘临时文件，不依赖临时目录。扫描循环和范围内处理保留 context 取消检查。
 
@@ -439,8 +684,8 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 ## 设计约束
 
-- 点火只通过 `host.model.execute_stream` 发送，并锁定到具体凭证；不要在插件中拼装服务的模型请求。
-- 额度请求的出口必须与 CPA 模型请求一致；出口无法确定时跳过请求，不能退回直连。
-- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `models_api_key`、`mcp_key`。
-- 宿主回调的 JSON 字段以 CPA v8.0.4 的 `sdk/pluginapi` 和 `internal/pluginhost` 为准；修改前对照 CPA 源码。
+- 点火只经 Magpie 网关发送，并用 `X-Magpie-Account` 锁定到具体账号；不要直接向服务发送模型请求。
+- 额度请求的出口必须与 Magpie 对同一账号的请求一致；出口无法确定时跳过请求，不能退回直连。
+- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `admin_key`、`mcp_key`。错误文字在出口统一脱敏，见“错误文本的脱敏”。
+- Magpie 的接口和文件格式以 Magpie 最新源码为准；格式与预期不符时返回 `host.ErrFormat`，不猜测字段。
 - 修改 `state.json` 结构时保持向后兼容：新字段使用缺省值，旧字段缺失时继续运行。

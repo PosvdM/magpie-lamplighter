@@ -8,11 +8,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 const ignitionOutputWindow = 2 * time.Second
+
+// ignitionStreamTimeout bounds one ignition request from sending it to the
+// end of its body. The gateway sends keepalives while it waits for a slow
+// start, such as a Claude Code run, so a stream can otherwise stay open
+// without output and hold up the background loop.
+var ignitionStreamTimeout = 2 * time.Minute
+
+// errIgnitionTimeout ends a stream that reached ignitionStreamTimeout.
+var errIgnitionTimeout = errors.New("点火请求超时")
 
 // streamEnd gives the reader and watchdog a single terminal owner. Closing done
 // publishes the result; a late deadline, cancellation or panic cannot replace it.
@@ -97,10 +106,27 @@ func watchStream(ctx context.Context, stop <-chan struct{}, first <-chan time.Ti
 	}
 }
 
+// sentResponse is an ignition response with sentAt, when its request
+// entered OpenModelStream; confirmation compares readings with it.
+type sentResponse struct {
+	host.ModelResponse
+	sentAt time.Time
+	// confirmed tells that the account of an agy-cli request
+	// (identityChecked) was confirmed right before it was sent, with the
+	// sign-in fingerprint.
+	confirmed   bool
+	fingerprint string
+}
+
 // executeStream retains headers for quota confirmation. A deliberate cutoff
 // returns no execution error, so it cannot cause a model fallback. It does not
 // establish ignition success: the caller must still confirm the quota window.
-func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.HostModelExecutionRequest, outputWindow time.Duration) (resp pluginapi.HostModelExecutionResponse, err error) {
+//
+// The request of an automatic ignition (t.automatic) passes admit right
+// before it is opened, and returns errIgnitionWithdrawn when the target no
+// longer qualifies or a configuration change withdraws it before its
+// response headers arrive.
+func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequest, outputWindow time.Duration) (resp sentResponse, err error) {
 	started := time.Now()
 	correlation := rand.Text()
 	var firstOutput time.Time
@@ -111,7 +137,7 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 		usageState := "missing"
 		if len(capture.usage) > 0 {
 			usageState = "partial"
-			if capture.completeUsage(t.group.Provider, req.ExitProtocol) && capture.terminal && reason == "completed" {
+			if capture.completeUsage(t.group.Provider, req.Protocol) && capture.terminal && reason == "completed" {
 				usageState = "complete"
 			}
 		}
@@ -119,18 +145,20 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 		if !firstOutput.IsZero() {
 			firstWait = firstOutput.Sub(started).Milliseconds()
 		}
+		// The reply is the record's only free text; it is redacted
+		// (redact.Text), as every log line is.
 		fields := map[string]any{
 			"event": "ignition_stream", "provider": t.group.Provider,
 			"model": req.Model, "auth_index": t.group.AuthIndex,
 			"correlation_id": correlation, "stream_id": streamID,
-			"reply": capture.reply.String(), "reply_truncated": capture.replyChars > replyLimit,
-			"output_received": capture.output, "usage": capture.usage, "usage_source": "cpa_host",
+			"reply": redact.Text(capture.reply.String()), "reply_truncated": capture.replyChars > replyLimit,
+			"output_received": capture.output, "usage": capture.usage, "usage_source": "magpie_gateway",
 			"usage_completeness": usageState, "end_reason": reason,
 			"first_output_wait_ms": firstWait, "total_ms": time.Since(started).Milliseconds(),
 			"status_code": resp.StatusCode,
 		}
-		// CPA's default formatter discards arbitrary fields. JSON in Message
-		// preserves the record and escapes newlines/control characters.
+		// JSON in Message keeps the record whole in a log that drops
+		// fields, and escapes newlines and control characters.
 		raw, _ := json.Marshal(fields)
 		level := "info"
 		if err != nil {
@@ -144,15 +172,63 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 		return resp, context.Canceled
 	}
 
-	// Do not detach this synchronous startup into a timeout goroutine: until
-	// CPA returns an ID there is no public way to cancel its upstream HTTP.
-	opened, err := e.host.ModelExecuteStream(req)
-	resp.StatusCode, resp.Headers = opened.StatusCode, opened.Headers
-	streamID = opened.StreamID
-	if err != nil {
-		if ctx.Err() != nil || e.stopping() {
+	// streamCtx carries the request: cancelling ctx, stopping or reaching
+	// ignitionStreamTimeout cancels it, also while it waits for headers.
+	streamCtx, cancelStream := context.WithTimeout(ctx, ignitionStreamTimeout)
+	defer cancelStream()
+	go func() {
+		select {
+		case <-e.stopCh:
+			cancelStream()
+		case <-streamCtx.Done():
+		}
+	}()
+	timedOut := func() bool {
+		return ctx.Err() == nil && errors.Is(streamCtx.Err(), context.DeadlineExceeded)
+	}
+	// reqCtx carries the request; withdrawing an admitted request cancels
+	// it. It ends with streamCtx.
+	reqCtx := streamCtx
+	var admitted func() bool
+	if t.automatic {
+		var ok bool
+		reqCtx, admitted, ok = e.admit(streamCtx, t)
+		if !ok && e.stopping() {
 			reason = "canceled"
 			return resp, context.Canceled
+		}
+		if !ok {
+			reason = "withdrawn"
+			return resp, errIgnitionWithdrawn
+		}
+		// Ends the admission also when OpenModelStream panics.
+		defer admitted()
+	}
+	resp.sentAt = e.now()
+	opened, err := e.host.OpenModelStream(reqCtx, req)
+	// A response status means the headers arrived: the request reached the
+	// provider, and its outcome counts even when a withdrawal or a stop came
+	// at the same moment. The host no longer ends the request on reqCtx.
+	answered := opened.StatusCode != 0 || host.StatusOf(err) != 0
+	if admitted != nil && !admitted() && !answered {
+		if err == nil && opened.ID != "" {
+			_ = e.host.CloseModelStream(opened.ID)
+		}
+		reason = "withdrawn"
+		return resp, errIgnitionWithdrawn
+	}
+	resp.StatusCode, resp.Header = opened.StatusCode, opened.Header
+	streamID = opened.ID
+	if err != nil {
+		switch {
+		case answered:
+			reason = "http_error"
+		case ctx.Err() != nil || e.stopping():
+			reason = "canceled"
+			return resp, context.Canceled
+		case timedOut():
+			reason = "timeout"
+			return resp, errIgnitionTimeout
 		}
 		return resp, err
 	}
@@ -169,12 +245,12 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 					closeErr = errors.New("ignition stream close panic")
 				}
 			}()
-			closeErr = e.host.ModelStreamClose(streamID)
+			closeErr = e.host.CloseModelStream(streamID)
 		})
 	}
 	first := make(chan time.Time, 1)
 	end := &streamEnd{done: make(chan struct{})}
-	finish := func(why string, failure error) (pluginapi.HostModelExecutionResponse, error) {
+	finish := func(why string, failure error) (sentResponse, error) {
 		end.claim(why, failure)
 		return resp, failure
 	}
@@ -183,6 +259,14 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 		defer close(watchDone)
 		watchStream(ctx, e.stopCh, first, outputWindow, end, closeStream, newStreamTimer)
 	}()
+	// The deadline closes the stream for any host, also one whose read does
+	// not follow streamCtx.
+	stopDeadline := context.AfterFunc(streamCtx, func() {
+		if timedOut() && end.claim("timeout", errIgnitionTimeout) {
+			closeStream()
+		}
+	})
+	defer stopDeadline()
 	defer func() {
 		// Also release the watchdog if the reader unwinds through a panic.
 		end.claim("read_error", errors.New("ignition stream reader failed"))
@@ -200,17 +284,23 @@ func (e *Engine) executeStream(ctx context.Context, t target, req pluginapi.Host
 		first <- firstOutput
 	}
 	if opened.StatusCode < 200 || opened.StatusCode >= 300 {
-		return finish("http_error", &host.Error{Method: "host.model.execute_stream", Code: "model_execution_failed", Message: "ignition model request failed", Status: opened.StatusCode})
+		return finish("http_error", &host.Error{Method: "gateway", Code: "model_execution_failed", Message: "ignition model request failed", Status: opened.StatusCode})
 	}
 	for {
 		if ctx.Err() != nil || e.stopping() {
 			return finish("canceled", context.Canceled)
 		}
-		chunk, readErr := e.host.ModelStreamRead(streamID)
+		chunk, readErr := e.host.ReadModelStream(streamID)
 		if readErr != nil {
+			if timedOut() {
+				return finish("timeout", errIgnitionTimeout)
+			}
+			if ctx.Err() != nil || e.stopping() {
+				return finish("canceled", context.Canceled)
+			}
 			return finish("read_error", errors.New("ignition stream read failed"))
 		}
-		if parseErr := capture.feedChunk(req.ExitProtocol, chunk.Payload); parseErr != nil {
+		if parseErr := capture.feedChunk(req.Protocol, chunk.Payload); parseErr != nil {
 			return finish("stream_error", parseErr)
 		}
 		if chunk.Error != "" {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // geminiReadings are the active queries of the Antigravity Gemini group on
@@ -30,7 +30,7 @@ var geminiReadings = []struct {
 func TestWeeklyBounceRecordsOneResetAndOneNotification(t *testing.T) {
 	c := &clock{t: time.Unix(geminiReadings[0].at, 0).In(shanghai)}
 	e, sender := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
 	cfg := e.config()

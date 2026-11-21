@@ -8,16 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// tosError is the error CPA returned for the ignition of a suspended
+// tosError is the error returned for the ignition of a suspended
 // Antigravity account on 2026-11-16.
 var tosError = &host.Error{Code: "host_call_failed", Status: 403, Message: `{
   "error": {
@@ -76,9 +75,9 @@ func TestSuspendedAccountPausesIgnitionUntilTheCredentialChanges(t *testing.T) {
 	h.files["3"] = `{"access_token":"t3","refresh_token":"r3"}`
 	fail := true
 	success := h.execute
-	h.execute = func(req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
+	h.execute = func(req host.ModelRequest) (host.ModelResponse, error) {
 		if fail {
-			return pluginapi.HostModelExecutionResponse{}, tosError
+			return host.ModelResponse{}, tosError
 		}
 		return success(req)
 	}
@@ -121,7 +120,8 @@ func TestSuspendedAccountPausesIgnitionUntilTheCredentialChanges(t *testing.T) {
 		t.Fatalf("notify events %+v", notices)
 	}
 
-	// CPA keeps refreshing the access token, which is no new login.
+	// The owner of the token keeps refreshing the access token, which is no
+	// new login.
 	for day := 1; day <= 2; day++ {
 		c.t = time.Date(2026, 11, 16+day, 7, 0, 0, 0, shanghai)
 		h.files["3"] = `{"access_token":"t3-` + c.t.Format("0102") + `","refresh_token":"r3","tos_appeal_url":"x"}`
@@ -173,9 +173,9 @@ func TestRejectedQueryNotifiesOnceAfterItLasts(t *testing.T) {
 	h := standardHost(c)
 	rejected := true
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL && rejected {
-			return pluginapi.HTTPResponse{StatusCode: 401, Body: []byte(`{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}`)}
+			return httpResponse{StatusCode: 401, Body: []byte(`{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}`)}
 		}
 		return base(req)
 	}
@@ -185,7 +185,7 @@ func TestRejectedQueryNotifiesOnceAfterItLasts(t *testing.T) {
 	cfg := e.config()
 	cfg.Providers["codex"] = config.Provider{}
 	e.Configure(cfg, nil)
-	// An expired access token is refreshed by CPA within minutes.
+	// An expired access token is refreshed by its owner within minutes.
 	for i := 0; i < 7; i++ {
 		e.poll(ctx, cfg, c.t, "", true)
 		if len(sender.sent) != 0 && c.t.Before(time.Date(2026, 11, 16, 7, 30, 0, 0, shanghai)) {
@@ -227,11 +227,11 @@ func TestShortQueryRejectionIsNoProblem(t *testing.T) {
 	h := standardHost(c)
 	calls := 0
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL {
 			calls++
 			if calls <= 2 {
-				return pluginapi.HTTPResponse{StatusCode: 401}
+				return httpResponse{StatusCode: 401}
 			}
 		}
 		return base(req)
@@ -252,8 +252,8 @@ func TestShortQueryRejectionIsNoProblem(t *testing.T) {
 func TestRateLimitedIgnitionNotifiesWithPauseEnd(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 10, 0, 0, 0, shanghai)}
 	h := claudeIgnitionHost(c, nil)
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{}, &host.Error{Code: "host_call_failed", Status: 429,
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{}, &host.Error{Code: "host_call_failed", Status: 429,
 			Message: `{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit."}}`}
 	}
 	e, sender := newTestEngine(t, h, c)
@@ -284,8 +284,8 @@ func TestRateLimitedIgnitionNotifiesWithPauseEnd(t *testing.T) {
 func TestCircuitNotificationShowsOneSentence(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 10, 0, 0, 0, shanghai)}
 	h := claudeIgnitionHost(c, nil)
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{}, &host.Error{Code: "host_call_failed", Status: 403,
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{}, &host.Error{Code: "host_call_failed", Status: 403,
 			Message: "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"The caller does not have permission\",\n    \"status\": \"PERMISSION_DENIED\"\n  }\n}"}
 	}
 	e, sender := newTestEngine(t, h, c)
@@ -361,9 +361,9 @@ func TestDeactivatedAccountQueryWithoutGroups(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 7, 0, 0, 0, shanghai)}
 	h := standardHost(c)
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL {
-			return pluginapi.HTTPResponse{StatusCode: 401, Body: []byte(`{"error":{"message":"Your account has been deactivated.","type":"invalid_request_error","code":"account_deactivated"}}`)}
+			return httpResponse{StatusCode: 401, Body: []byte(`{"error":{"message":"Your account has been deactivated.","type":"invalid_request_error","code":"account_deactivated"}}`)}
 		}
 		return base(req)
 	}
@@ -419,8 +419,8 @@ func TestUnknownFingerprintIsSampledAgain(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 7, 0, 0, 0, shanghai)}
 	h := claudeIgnitionHost(c, nil)
 	h.files["3"] = `{"access_token":"t3","refresh_token":"r3"}`
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{}, tosError
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{}, tosError
 	}
 	dir := t.TempDir()
 	e, sender := newTestEngineIn(t, h, c, dir)
@@ -447,13 +447,13 @@ func TestUnknownFingerprintIsSampledAgain(t *testing.T) {
 	}
 	// The file disappears while the request is out; the fingerprint read
 	// before it is kept.
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
 		delete(h.files, "3")
-		return pluginapi.HostModelExecutionResponse{}, tosError
+		return host.ModelResponse{}, tosError
 	}
 	e2.performDue(ctx, cfg)
 	st := e2.state.Credentials["3"]
-	if len(h.executed) != 2 || st == nil || st.Fingerprint != providers.Fingerprint(json.RawMessage(newLogin)) || !e2.credentialBlocked("3") || len(sender2.sent) != 0 {
+	if len(h.executed) != 2 || st == nil || st.Fingerprint != fingerprintOf(json.RawMessage(newLogin)) || !e2.credentialBlocked("3") || len(sender2.sent) != 0 {
 		t.Fatalf("retry: %d ignitions, state %+v, sent %+v", len(h.executed), st, sender2.sent)
 	}
 	h.files["3"] = newLogin
@@ -472,14 +472,14 @@ func TestIgnitionConfirmsAQueryProblem(t *testing.T) {
 	h.files["3"] = `{"access_token":"t3","refresh_token":"r3"}`
 	rejected := false
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL && rejected {
-			return pluginapi.HTTPResponse{StatusCode: 403, Body: []byte(tosBody)}
+			return httpResponse{StatusCode: 403, Body: []byte(tosBody)}
 		}
 		return base(req)
 	}
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{}, tosError
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{}, tosError
 	}
 	e, sender := newTestEngine(t, h, c)
 	ctx := context.Background()
@@ -517,15 +517,15 @@ func TestManualConfirmationLeavesCredentialState(t *testing.T) {
 	h := claudeIgnitionHost(c, nil)
 	rejected := false
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL && rejected {
-			return pluginapi.HTTPResponse{StatusCode: 403, Body: []byte(tosBody)}
+			return httpResponse{StatusCode: 403, Body: []byte(tosBody)}
 		}
 		return base(req)
 	}
 	// The response has no quota headers, so a query has to confirm it.
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{StatusCode: 200}, nil
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{StatusCode: 200}, nil
 	}
 	e, sender := newTestEngine(t, h, c)
 	ctx := context.Background()
@@ -593,9 +593,9 @@ func TestFailedCredentialNotificationIsTriedOncePerPoll(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 7, 0, 0, 0, shanghai)}
 	h := standardHost(c)
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL {
-			return pluginapi.HTTPResponse{StatusCode: 403, Body: []byte(tosBody)}
+			return httpResponse{StatusCode: 403, Body: []byte(tosBody)}
 		}
 		return base(req)
 	}
@@ -631,14 +631,14 @@ func TestReasonChangeKeepsIgnitionConfirmation(t *testing.T) {
 	c := &clock{t: time.Date(2026, 11, 16, 7, 0, 0, 0, shanghai)}
 	h := claudeIgnitionHost(c, nil)
 	h.files["3"] = `{"access_token":"t3","refresh_token":"r3"}`
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-		return pluginapi.HostModelExecutionResponse{}, tosError
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+		return host.ModelResponse{}, tosError
 	}
 	rejected := false
 	base := h.http
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL && rejected {
-			return pluginapi.HTTPResponse{StatusCode: 401, Body: []byte(`{"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token."}}`)}
+			return httpResponse{StatusCode: 401, Body: []byte(`{"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token."}}`)}
 		}
 		return base(req)
 	}
@@ -682,9 +682,9 @@ func TestReasonChangeKeepsIgnitionConfirmation(t *testing.T) {
 	// reason that a query finds with it ends with a working query.
 	h.files["3"] = `{"access_token":"t3-new","refresh_token":"r3-new"}`
 	suspendedQuery := true
-	h.http = func(req pluginapi.HTTPRequest) pluginapi.HTTPResponse {
+	h.http = func(req httpRequest) httpResponse {
 		if req.URL == providers.ClaudeUsageURL && suspendedQuery {
-			return pluginapi.HTTPResponse{StatusCode: 403, Body: []byte(tosBody)}
+			return httpResponse{StatusCode: 403, Body: []byte(tosBody)}
 		}
 		return base(req)
 	}
@@ -709,9 +709,9 @@ func TestLoginDuringTheRequestIsNotBlocked(t *testing.T) {
 	h := claudeIgnitionHost(c, nil)
 	h.files["3"] = `{"access_token":"t3","refresh_token":"r3"}`
 	newLogin := `{"access_token":"t3-new","refresh_token":"r3-new"}`
-	h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
+	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
 		h.files["3"] = newLogin
-		return pluginapi.HostModelExecutionResponse{}, tosError
+		return host.ModelResponse{}, tosError
 	}
 	dir := t.TempDir()
 	e, _ := newTestEngineIn(t, h, c, dir)
@@ -731,7 +731,7 @@ func TestLoginDuringTheRequestIsNotBlocked(t *testing.T) {
 	e2.Configure(cfg, nil)
 	e2.poll(ctx, cfg, c.t, "", false)
 	e2.performDue(ctx, cfg)
-	if st := e2.state.Credentials["3"]; len(h.executed) != 2 || st == nil || st.Fingerprint != providers.Fingerprint(json.RawMessage(newLogin)) {
+	if st := e2.state.Credentials["3"]; len(h.executed) != 2 || st == nil || st.Fingerprint != fingerprintOf(json.RawMessage(newLogin)) {
 		t.Fatalf("the new login was not tried: %d ignitions, %+v", len(h.executed), st)
 	}
 }

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // scanWatchContext 在真实历史扫描反复检查取消时发出信号，不替代历史后端。
@@ -73,7 +73,7 @@ func TestMCPRealHistoryCloseCancelsScanning(t *testing.T) {
 			server := mcp.New(backend, "test")
 			defer server.Close()
 			address := freeMCPAddress(t)
-			server.Configure(true, address, "key")
+			server.Configure(mcp.Config{Listen: address, MCPEnabled: true, MCPKey: "key"})
 			if !server.State().Running {
 				t.Fatal(server.State())
 			}

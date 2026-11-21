@@ -1,13 +1,13 @@
 name: 支持新服务 / New service
-description: 希望 Lamplighter 支持 CPA 中的其他服务 / Ask Lamplighter to support another service in CPA
+description: 希望 Lamplighter 支持 Magpie 中的其他服务 / Ask Lamplighter to support another service in Magpie
 title: "支持 "
 labels: [enhancement]
 body:
   - type: markdown
     attributes:
       value: |
-        Lamplighter 按 CPA 管理中心额度页的方式查询额度。截图和接口返回请先去掉邮箱、token 等账号信息。
-        Lamplighter reads quota the same way as the CPA Management Center quota page. Remove emails, tokens and other account details from screenshots and responses.
+        Lamplighter 用 Magpie 中的账号直接向服务商查询额度。截图和接口返回请先去掉邮箱、token 等账号信息。
+        Lamplighter reads quota from the service with the accounts in Magpie. Remove emails, tokens and other account details from screenshots and responses.
   - type: input
     id: service
     attributes:
@@ -36,14 +36,14 @@ body:
   - type: textarea
     id: screenshot
     attributes:
-      label: CPA 管理中心额度页截图 / Screenshot of the CPA Management Center quota page
+      label: Magpie 中该服务的额度显示截图 / Screenshot of the service's quota in Magpie
     validations:
       required: true
   - type: textarea
     id: response
     attributes:
       label: 额度接口返回 / Quota API response
-      description: 在额度页打开浏览器开发者工具的网络面板，复制 api-call 请求的响应 / On the quota page, open the browser's developer tools, Network tab, and copy the response of the api-call request
+      description: Magpie 网关 GET /v1/magpie/quotas 中该服务的条目，或服务官方额度接口的响应 / The service's entry in GET /v1/magpie/quotas on the Magpie gateway, or the response of the service's own quota API
       render: json
   - type: textarea
     id: notes

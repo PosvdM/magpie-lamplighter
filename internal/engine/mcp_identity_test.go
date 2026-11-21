@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 func TestMCPAccountLabelFormat(t *testing.T) {
@@ -111,7 +111,7 @@ func TestMCPAccountLabelsAndFilters(t *testing.T) {
 func TestMCPToolsMaskEmailsAndFilterAccounts(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, _ := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
 	cfg := e.config()
@@ -266,7 +266,7 @@ func TestMCPToolsMaskUnusualEmails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 			e, _ := newTestEngine(t, standardHost(c), c)
-			if _, err := e.loadCreds(e.config()); err != nil {
+			if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 				t.Fatal(err)
 			}
 			e.creds["1"].Email, e.creds["1"].Note = tc.email, tc.note+"\nprivate@example.org"
@@ -338,7 +338,7 @@ func TestMCPToolsMaskUnusualEmails(t *testing.T) {
 func TestMCPCurrentAndRetiredAccountIsolation(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, _ := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
 	cfg := e.config()

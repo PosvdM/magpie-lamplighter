@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore: ["**.md", "docs/**", "assets/**"]
   pull_request:
     paths-ignore: ["**.md", "docs/**", "assets/**"]
@@ -27,3 +27,4 @@ jobs:
       - run: go vet ./internal/...
       - run: go test ./internal/...
       - run: node --check internal/web/page.js
+      - run: node --test 'npm/test/*.test.mjs'

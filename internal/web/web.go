@@ -3,7 +3,9 @@
 package web
 
 import (
+	"bytes"
 	_ "embed"
+	"html"
 	"strings"
 	"sync"
 )
@@ -28,4 +30,24 @@ func Page() []byte {
 		pageBytes = []byte(page)
 	})
 	return pageBytes
+}
+
+// pageTokenTag is the empty tag in page.html that PageWith fills in.
+const pageTokenTag = `<meta name="lamplighter-page" content="">`
+
+// PageWith returns the page with token, the internal listener's page
+// token, in its lamplighter-page tag; the page sends it back in the
+// X-Lamplighter-Page header of its API requests. A page without the tag is
+// returned as it is.
+func PageWith(token string) []byte {
+	return withToken(Page(), token)
+}
+
+func withToken(page []byte, token string) []byte {
+	tag := []byte(pageTokenTag)
+	if !bytes.Contains(page, tag) {
+		return page
+	}
+	filled := `<meta name="lamplighter-page" content="` + html.EscapeString(token) + `">`
+	return bytes.Replace(page, tag, []byte(filled), 1)
 }

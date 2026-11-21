@@ -9,8 +9,8 @@ import (
 )
 
 // Lock is an exclusive lock on a file in the data directory. It keeps a newly
-// loaded plugin version from running next to an older one that CPA has not
-// stopped yet.
+// started process from running next to an older one that has not stopped
+// yet, such as the program of a plugin host that Magpie is replacing.
 type Lock struct {
 	file *os.File
 }

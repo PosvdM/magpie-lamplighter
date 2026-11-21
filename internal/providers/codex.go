@@ -7,12 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/models"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/models"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// Codex endpoint and headers, the same as the CPA Management Center quota
-// page. The User-Agent matches the CPA Codex executor.
+// Codex endpoint and headers. The User-Agent matches the Codex CLI.
 const (
 	CodexUsageURL  = "https://chatgpt.com/backend-api/wham/usage"
 	CodexUserAgent = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"

@@ -12,20 +12,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/models"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/models"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 	"gopkg.in/yaml.v3"
 )
 
-// The User-Agent of Antigravity quota requests follows the CPA Antigravity
-// executor: the credential's user_agent when set, otherwise the Antigravity
-// Hub UA with the latest Hub version from the Hub update manifest. Cloud Code
-// leaves newer model groups, such as Gemini, out of the quota of older client
-// UAs.
+// The User-Agent of Antigravity quota requests is the credential's
+// user_agent when set, otherwise the Antigravity Hub UA with the latest Hub
+// version from the Hub update manifest. Cloud Code leaves newer model
+// groups, such as Gemini, out of the quota of older client UAs.
 const (
 	AntigravityHubManifestURL = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml"
-	// antigravityFallbackVersion is used until the manifest has been read,
-	// the same as the CPA Management Center.
+	// antigravityFallbackVersion is used until the manifest has been read.
 	antigravityFallbackVersion = "2.23.0"
 	antigravityHubPlatform     = "darwin/arm64"
 	// The manifest is read again after antigravityVersionTTL, and after
@@ -70,8 +68,8 @@ func (h *hubVersion) get(ctx context.Context, doer quota.Doer, now time.Time) st
 
 var hubSemver = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
-// fetchHubVersion reads the version from the Hub update manifest with the
-// same headers as CPA, through the CPA egress.
+// fetchHubVersion reads the version from the Hub update manifest, with the
+// headers of the Hub's own updater, through the environment's proxy.
 func fetchHubVersion(ctx context.Context, doer quota.Doer) (string, error) {
 	header := http.Header{}
 	header.Set("User-Agent", "electron-builder")
@@ -96,7 +94,7 @@ func fetchHubVersion(ctx context.Context, doer quota.Doer) (string, error) {
 	return version, nil
 }
 
-// antigravityUserAgent returns the User-Agent CPA uses for the credential.
+// antigravityUserAgent returns the User-Agent for the credential's requests.
 func antigravityUserAgent(ctx context.Context, doer quota.Doer, cred Credential, now time.Time) string {
 	attributes, _ := cred.Data["attributes"].(map[string]any)
 	metadata, _ := cred.Data["metadata"].(map[string]any)
@@ -107,7 +105,7 @@ func antigravityUserAgent(ctx context.Context, doer quota.Doer, cred Credential,
 	if ua == "" {
 		return "antigravity/hub/" + antigravityHub.get(ctx, doer, now) + " " + antigravityHubPlatform
 	}
-	// Like CPA, a long Antigravity UA is cut to its short form.
+	// A long Antigravity UA is cut to its short form.
 	if strings.HasPrefix(strings.ToLower(ua), "antigravity/") {
 		if i := strings.Index(strings.ToLower(ua), " google-api-nodejs-client/"); i > 0 {
 			ua = strings.TrimSpace(ua[:i])
@@ -123,12 +121,15 @@ var AntigravityQuotaURLs = []string{
 	"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
 }
 
-// AntigravityLoadCodeAssistURL states the subscription of an account, the
-// endpoint CPA reads Antigravity credits from.
+// AntigravityLoadCodeAssistURL states the subscription of an account.
 const AntigravityLoadCodeAssistURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
 var antigravity = &Provider{
-	ID:      "antigravity",
+	ID: "antigravity",
+	// Magpie serves Antigravity accounts through the agy-cli plugin
+	// (@magpie-community/opencode-agy-cli-auth), whose provider id they
+	// carry.
+	Aliases: []string{"agy-cli"},
 	Title:   "Antigravity",
 	Monitor: true,
 	Fetch:   fetchAntigravity,
@@ -219,7 +220,8 @@ func fetchAntigravity(ctx context.Context, doer quota.Doer, cred Credential, now
 }
 
 // fetchAntigravityProfile reads the plan of an Antigravity account with the
-// request body and User-Agent CPA uses for loadCodeAssist.
+// request body of Antigravity's own loadCodeAssist call and the quota
+// requests' User-Agent.
 func fetchAntigravityProfile(ctx context.Context, doer quota.Doer, cred Credential, now time.Time) (string, error) {
 	body, _ := json.Marshal(map[string]any{"metadata": map[string]string{"ideType": "ANTIGRAVITY"}})
 	header := bearer(cred)

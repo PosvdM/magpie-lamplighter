@@ -1,4 +1,6 @@
-// Package mcp serves a stateless, JSON-only MCP Streamable HTTP endpoint.
+// Package mcp runs the public listener. It serves a stateless, JSON-only
+// MCP Streamable HTTP endpoint at /mcp behind the MCP key and, when
+// enabled, the management page and API behind the admin key.
 package mcp
 
 import (
@@ -17,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 // Backend returns only model-safe DTOs, never management responses.
@@ -24,7 +28,9 @@ type Backend interface {
 	CallTool(context.Context, string, map[string]string) (any, error)
 }
 
-// State describes the listener without its authentication key.
+// State describes /mcp on the listener without its key. Enabled reports
+// mcp_enabled; Error is an empty MCP key or, while /mcp is enabled, the
+// listener's error.
 type State struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
@@ -33,23 +39,67 @@ type State struct {
 	Path    string `json:"path"`
 }
 
+// Public describes the listener as a whole. Web and MCP report what it
+// serves at the moment: the page and API, and /mcp.
+type Public struct {
+	Listen  string `json:"listen"`
+	Running bool   `json:"running"`
+	Error   string `json:"error"`
+	Web     bool   `json:"web"`
+	MCP     bool   `json:"mcp"`
+}
+
+// Config configures the public listener. The listener runs while /mcp or
+// the page is served.
+type Config struct {
+	Listen string
+	// MCPEnabled serves /mcp behind MCPKey; an empty key keeps it off.
+	MCPEnabled bool
+	MCPKey     string
+	// WebEnabled serves the handler given to SetWeb behind AdminKey; an
+	// empty key keeps it off.
+	WebEnabled bool
+	AdminKey   string
+	// Refused, when not empty, is why the configuration may not open the
+	// listener: it serves neither part, and Public and State report
+	// Refused as their error.
+	Refused string
+}
+
+const errMCPKeyEmpty = "MCP key is empty"
+
+// drainTimeout bounds how long a listener that Configure replaces serves
+// the requests it has already read. Tests shorten it.
+var drainTimeout = 5 * time.Second
+
+// handlerWait bounds how long Close waits for the handlers it cancelled. A
+// handler that ignores its context, such as one waiting on the disk,
+// would otherwise hold up the exit. Tests shorten it.
+var handlerWait = 5 * time.Second
+
 // Server owns the listener and all HTTP handler lifetimes.
 type Server struct {
 	mu         sync.Mutex
 	backend    Backend
 	version    string
-	state      State
-	key        string
+	state      State  // Error unused; see State
+	listenErr  string // bind or serve error of the listener
+	refused    string // Config.Refused
+	key        string // MCP key; empty while /mcp is off
+	adminKey   string // empty while the page is off
+	web        http.Handler
 	http       *http.Server
 	done       chan struct{}
 	handlers   sync.WaitGroup
 	serves     sync.WaitGroup
+	drains     sync.WaitGroup // replaced listeners still serving; see drainLocked
+	stopCh     chan struct{}  // closed by Close; ends the drains
 	stopped    bool
 	retry      *time.Timer
 	retries    sync.WaitGroup
 	generation uint64
 
-	requests       map[context.Context]context.CancelFunc
+	requests       map[context.Context]admitted
 	toolSlots      chan struct{}
 	queryTimeout   time.Duration
 	refreshTimeout time.Duration
@@ -59,59 +109,122 @@ func New(backend Backend, version string) *Server {
 	return &Server{
 		backend: backend, version: version,
 		state:          State{Listen: "127.0.0.1:8318", Path: "/mcp"},
-		requests:       make(map[context.Context]context.CancelFunc),
+		stopCh:         make(chan struct{}),
+		requests:       make(map[context.Context]admitted),
 		toolSlots:      make(chan struct{}, 4),
 		queryTimeout:   10 * time.Second,
 		refreshTimeout: 180 * time.Second,
 	}
 }
 
-func (s *Server) State() State { s.mu.Lock(); defer s.mu.Unlock(); return s.state }
+// admitted is a request in progress: its cancel function and whether it
+// was admitted with the MCP key.
+type admitted struct {
+	cancel context.CancelFunc
+	mcp    bool
+}
+
+// State returns the state of /mcp, the mcp object of the status API.
+func (s *Server) State() State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.state
+	switch {
+	case state.Enabled && s.refused != "":
+		state.Error = s.refused
+	case state.Enabled && s.key == "":
+		state.Error = errMCPKeyEmpty
+	case state.Enabled:
+		state.Error = s.listenErr
+	}
+	state.Error = redact.Text(state.Error)
+	return state
+}
+
+// Public returns the state of the listener, the public object of the
+// status API.
+func (s *Server) Public() Public {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	running := s.state.Running
+	err := s.listenErr
+	if s.refused != "" {
+		err = s.refused
+	}
+	return Public{
+		Listen: s.state.Listen, Running: running, Error: redact.Text(err),
+		Web: running && s.adminKey != "" && s.web != nil,
+		MCP: running && s.key != "",
+	}
+}
+
+// SetWeb sets the handler of the page and API, served behind the admin key.
+// Call it before Configure.
+func (s *Server) SetWeb(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.web = h
+}
 
 // Configure closes the old listener before binding the replacement. A failed
-// bind is retried every two seconds, including during hot-reload handover.
+// bind is retried every two seconds, so that the listener comes up once an
+// older process that still holds the address has exited. The old listener
+// stops accepting connections at once and keeps serving the page and API
+// requests it has read for up to drainTimeout, in the background: one of
+// them may be the PATCH /api/config that moved the listener, waiting for
+// Configure to return.
 //
-// A new non-empty key for a running listener on the same address replaces
-// the key without closing the listener: reverse proxies and MCP clients reuse
+// The listener is kept while it runs on the same address and still serves
+// /mcp or the page: changing a key or turning one of the two on or off
+// takes effect for the next request. Reverse proxies and MCP clients reuse
 // keep-alive connections, and a closing listener fails the next request on
-// them. serveHTTP reads the key under mu, so every request after Configure
-// returns is checked against the new key. Requests already admitted with the
-// old key are canceled, as when the listener closes.
-func (s *Server) Configure(enabled bool, listen, key string) {
+// them. serveHTTP reads the keys under mu, so every request after Configure
+// returns is checked against the new keys. MCP requests already admitted
+// with an old MCP key, or while /mcp is turned off, are canceled, as when
+// the listener closes; page and API requests run to the end.
+func (s *Server) Configure(c Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return
 	}
-	if s.state.Enabled == enabled && s.state.Listen == listen && s.state.Running {
-		if s.key == key {
-			return
-		}
-		if enabled && key != "" {
-			for _, cancel := range s.requests {
-				cancel()
+	mcpKey, adminKey := "", ""
+	if c.MCPEnabled {
+		mcpKey = c.MCPKey
+	}
+	if c.WebEnabled {
+		adminKey = c.AdminKey
+	}
+	if c.Refused != "" {
+		mcpKey, adminKey = "", ""
+	}
+	s.refused = c.Refused
+	if s.state.Running && s.state.Listen == c.Listen && (mcpKey != "" || adminKey != "" && s.web != nil) {
+		if mcpKey != s.key {
+			for _, request := range s.requests {
+				if request.mcp {
+					request.cancel()
+				}
 			}
-			s.key = key
-			return
 		}
-	}
-	s.closeLocked()
-	s.state = State{Enabled: enabled, Listen: listen, Path: "/mcp"}
-	s.key = key
-	if !enabled {
+		s.key, s.adminKey, s.state.Enabled = mcpKey, adminKey, c.MCPEnabled
 		return
 	}
-	if key == "" {
-		s.state.Error = "MCP key is empty"
-		return
+	s.drainLocked()
+	s.state = State{Enabled: c.MCPEnabled, Listen: c.Listen, Path: "/mcp"}
+	s.key, s.adminKey, s.listenErr = mcpKey, adminKey, ""
+	if s.neededLocked() {
+		s.startLocked()
 	}
-	s.startLocked()
 }
+
+// neededLocked reports whether the listener has anything to serve.
+func (s *Server) neededLocked() bool { return s.key != "" || s.adminKey != "" && s.web != nil }
 
 func (s *Server) startLocked() {
 	listener, err := net.Listen("tcp", s.state.Listen)
 	if err != nil {
-		s.state.Error = "Cannot listen on MCP address: " + err.Error()
+		s.listenErr = "Cannot listen on public address: " + err.Error()
 		generation := s.generation
 		s.retries.Add(1)
 		s.retry = time.AfterFunc(2*time.Second, func() {
@@ -122,13 +235,13 @@ func (s *Server) startLocked() {
 				return
 			}
 			s.retry = nil
-			if !s.stopped && s.state.Enabled && s.key != "" && !s.state.Running {
+			if !s.stopped && s.neededLocked() && !s.state.Running {
 				s.startLocked()
 			}
 		})
 		return
 	}
-	s.state.Error = ""
+	s.listenErr = ""
 	server := &http.Server{Handler: http.HandlerFunc(s.serveHTTP), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 190 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	s.http, s.done, s.state.Running = server, make(chan struct{}), true
 	done := s.done
@@ -140,7 +253,7 @@ func (s *Server) startLocked() {
 			defer func() {
 				if recover() != nil {
 					_ = server.Close()
-					err = errors.New("MCP listener panic")
+					err = errors.New("public listener panic")
 				}
 			}()
 			return server.Serve(listener)
@@ -151,22 +264,66 @@ func (s *Server) startLocked() {
 		if s.http == server {
 			s.state.Running = false
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				s.state.Error = "MCP listener stopped: " + err.Error()
+				s.listenErr = "Public listener stopped: " + err.Error()
 			}
 		}
 	}()
 }
 
-func (s *Server) closeLocked() {
+// stopRetryLocked stops a pending bind retry.
+func (s *Server) stopRetryLocked() {
 	s.generation++
-	for _, cancel := range s.requests {
-		cancel()
-	}
 	if s.retry != nil {
 		if s.retry.Stop() {
 			s.retries.Done()
 		}
 		s.retry = nil
+	}
+}
+
+// drainLocked replaces the listener for Configure. MCP requests are
+// canceled, as when /mcp is turned off. The listener is closed before
+// drainLocked returns, so the address is free to bind again; the page and
+// API requests in progress are answered by a background Shutdown, which
+// closes their connections after drainTimeout or when Close is called.
+func (s *Server) drainLocked() {
+	s.stopRetryLocked()
+	for _, request := range s.requests {
+		if request.mcp {
+			request.cancel()
+		}
+	}
+	if s.http != nil {
+		server := s.http
+		s.drains.Add(1)
+		go func() {
+			defer s.drains.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			go func() {
+				select {
+				case <-s.stopCh:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+			if server.Shutdown(ctx) != nil {
+				_ = server.Close()
+			}
+		}()
+		// Shutdown closes the listener first, and Serve then returns.
+		<-s.done
+		s.http = nil
+	}
+	s.state.Running = false
+}
+
+// closeLocked closes the listener and its connections and cancels every
+// request, for Close.
+func (s *Server) closeLocked() {
+	s.stopRetryLocked()
+	for _, request := range s.requests {
+		request.cancel()
 	}
 	if s.http != nil {
 		_ = s.http.Close()
@@ -176,13 +333,29 @@ func (s *Server) closeLocked() {
 	s.state.Running = false
 }
 
-// Close releases the port and waits for canceled requests before plugin unload.
+// Close releases the port, cancels every request in progress, page and API
+// requests included, and waits for the drains, and for their handlers up
+// to handlerWait. server.Server.Shutdown cancels the engine first, which
+// the management requests wait for, and waits for a configuration write
+// on its own.
 func (s *Server) Close() {
 	s.mu.Lock()
+	if !s.stopped {
+		close(s.stopCh)
+	}
 	s.stopped = true
 	s.closeLocked()
 	s.mu.Unlock()
-	s.handlers.Wait()
+	s.drains.Wait()
+	handlersDone := make(chan struct{})
+	go func() {
+		s.handlers.Wait()
+		close(handlersDone)
+	}()
+	select {
+	case <-handlersDone:
+	case <-time.After(handlerWait):
+	}
 	s.retries.Wait()
 	s.serves.Wait()
 }
@@ -236,8 +409,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// 请求登记与停止检查共用互斥锁，防止 Close 开始等待后登记新请求。
 	s.handlers.Add(1)
 	ctx, cancel := context.WithCancel(r.Context())
-	s.requests[ctx] = cancel
-	key := s.key
+	isMCP := r.URL.Path == "/mcp"
+	s.requests[ctx] = admitted{cancel: cancel, mcp: isMCP}
+	key, adminKey, web := s.key, s.adminKey, s.web
 	s.mu.Unlock()
 	defer func() {
 		cancel()
@@ -247,9 +421,47 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlers.Done()
 	}()
 	r = r.WithContext(ctx)
+	if isMCP {
+		s.serveMCP(w, r, key)
+		return
+	}
+	if adminKey == "" || web == nil {
+		writeStatus(w, http.StatusNotFound)
+		return
+	}
+	// The page itself holds no data and asks for the key when the API
+	// answers 401; a browser cannot send the key when it opens the page.
+	page := r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+	if !page && !bearer(r, adminKey) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeStatus(w, http.StatusUnauthorized)
+		return
+	}
+	web.ServeHTTP(w, r)
+}
+
+// bearer reports whether r carries "Authorization: Bearer <key>". Both
+// sides are hashed before the constant-time comparison, so neither the
+// length nor a prefix of the key leaks.
+func bearer(r *http.Request, key string) bool {
+	expected := sha256.Sum256([]byte("Bearer " + key))
+	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+	return key != "" && subtle.ConstantTimeCompare(expected[:], actual[:]) == 1
+}
+
+// writeStatus answers a page or API request with a JSON error.
+func writeStatus(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status)})
+}
+
+// serveMCP serves /mcp. key is the MCP key, empty while /mcp is off.
+func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request, key string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	if r.URL.Path != "/mcp" {
+	if key == "" {
 		w.WriteHeader(404)
 		return
 	}
@@ -257,9 +469,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 		return
 	}
-	expected := sha256.Sum256([]byte("Bearer " + key))
-	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-	if key == "" || subtle.ConstantTimeCompare(expected[:], actual[:]) != 1 {
+	if !bearer(r, key) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		w.WriteHeader(401)
 		return
@@ -413,7 +623,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, raw []byt
 			arguments[name] = text
 		}
 		if err := validateArguments(params.Name, arguments); err != nil {
-			reply(w, req.ID, nil, &rpcError{-32602, err.Error()})
+			reply(w, req.ID, nil, &rpcError{-32602, redact.Text(err.Error())})
 			return
 		}
 		value, err := s.callTool(r.Context(), params.Name, arguments)
@@ -422,7 +632,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, raw []byt
 			return
 		}
 		if err != nil {
-			reply(w, req.ID, map[string]any{"content": []any{map[string]string{"type": "text", "text": err.Error()}}, "isError": true}, nil)
+			// The error leaves the process: redacted, as every error text
+			// of the MCP answers is.
+			reply(w, req.ID, map[string]any{"content": []any{map[string]string{"type": "text", "text": redact.Text(err.Error())}}, "isError": true}, nil)
 			return
 		}
 		data, err := json.Marshal(value)
@@ -492,7 +704,7 @@ func validateArguments(name string, args map[string]string) error {
 }
 func toolDefinitions() []any {
 	descriptions := map[string]string{
-		"list_quotas":       "Read current quota windows grouped by provider and quota pool, weighted remaining totals and earliest account exhaustion. Per-account fields include remaining percent, reset/start state, percentage points consumed per hour, estimated exhaustion and pre-reset risk, seven-day even-pace budget, freshness/source/error/credential state (credential_invalid, account_suspended), next ignition, plan and weight. Time objects contain ISO 8601 with timezone and relative time. Null means unknown. Forecasts are estimates. Model filtering returns conservative candidate pools with certain=false because CPA aliases, affinity and live credential selection are unavailable to this plugin. Accounts use the first note line with embedded emails masked, else *** plus the email user name's last two characters (or all characters if shorter; e.g. ***rk), else account-number. Duplicate labels receive unique #n suffixes; full emails are never returned.",
+		"list_quotas":       "Read current quota windows grouped by provider and quota pool, weighted remaining totals and earliest account exhaustion. Per-account fields include remaining percent, reset/start state, percentage points consumed per hour, estimated exhaustion and pre-reset risk, seven-day even-pace budget, freshness/source/error/credential state (credential_invalid, account_suspended), next ignition, plan and weight. Time objects contain ISO 8601 with timezone and relative time. Null means unknown. Forecasts are estimates. Model filtering returns conservative candidate pools with certain=false because Magpie's aliases, routing rules and live account selection are not visible to this plugin. Accounts use the first note line with embedded emails masked, else *** plus the email user name's last two characters (or all characters if shorter; e.g. ***rk), else account-number. Duplicate labels receive unique #n suffixes; full emails are never returned.",
 		"get_quota_history": "Read downsampled quota history, including retired windows. At most 2000 points total and 200 per series. provider is a provider ID; account is an exact account label or email. window accepts 5h, 7d or a window ID. range accepts 1h, 3h, 6h, 12h, 24h, 26h, 4d, 8d, 15d, 1mo, 36d (default 24h). Each point has timestamp, relative time, remaining percent and active/passive source.",
 		"refresh_quotas":    "Request an active quota refresh for all accounts or one exact account label or email. Requires a running engine, but does not wait for its first full poll. A non-running engine returns ready=false, state=starting and retry_after_seconds=30; a disabled plugin returns state=disabled. These responses do not consume the refresh limit. Running-engine attempts are globally limited to once per 60 seconds, including refresh failures. Ambiguous account filters are rejected. Returns retry_after_seconds when throttled. Wait is bounded to 180 seconds; timeout does not imply upstream work was canceled. Read list_quotas afterward for per-account freshness and errors.",
 		"get_quota_events":  "Read recent quota reset, exhaustion, ignition success/failure and credential problem events, newest first. credential_invalid events carry reason auth, suspended or rate_limited and source ignite or query; credential events of an account without quota groups yet have an empty group. since is an RFC3339 timestamp with timezone; limit is an integer, 1-100 (default 50). In-memory retention is at most 200 events of all kinds. Account filters elsewhere use exact account labels or email, never credential paths.",
@@ -501,7 +713,7 @@ func toolDefinitions() []any {
 	for _, name := range []string{"list_quotas", "get_quota_history", "refresh_quotas", "get_quota_events"} {
 		props := map[string]any{}
 		for _, arg := range argumentNames(name) {
-			props[arg] = map[string]string{"type": "string", "description": map[string]string{"provider": "Provider ID, e.g. codex or claude; omitted means all.", "account": "Exact returned account label (unique), base label before #n, original first note line, or full email; omitted means all. Shared base labels or note names select multiple accounts, which refresh rejects. Exact returned labels take priority over other matches.", "model": "CPA model ID or alias. Returns conservative candidates, never a definitive routing claim.", "window": "Window kind (5h, 7d) or exact window ID.", "range": "Named history range; default 24h.", "since": "RFC3339 timestamp with timezone; omitted means all retained events.", "limit": "Integer, 1-100; default 50."}[arg]}
+			props[arg] = map[string]string{"type": "string", "description": map[string]string{"provider": "Provider ID, e.g. codex or claude; omitted means all.", "account": "Exact returned account label (unique), base label before #n, original first note line, or full email; omitted means all. Shared base labels or note names select multiple accounts, which refresh rejects. Exact returned labels take priority over other matches.", "model": "Magpie model ID or alias. Returns conservative candidates, never a definitive routing claim.", "window": "Window kind (5h, 7d) or exact window ID.", "range": "Named history range; default 24h.", "since": "RFC3339 timestamp with timezone; omitted means all retained events.", "limit": "Integer, 1-100; default 50."}[arg]}
 		}
 		if name == "get_quota_events" {
 			props["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum events, default 50."}

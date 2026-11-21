@@ -17,14 +17,14 @@ func TestMCPAndAccountOrderConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaults.MCPEnabled || defaults.MCPListen != "127.0.0.1:8318" || defaults.MCPKey != "" || defaults.MCPKeySet {
+	if defaults.MCPEnabled || defaults.WebEnabled || defaults.PublicListen != "127.0.0.1:8318" || defaults.MCPKey != "" || defaults.MCPKeySet || defaults.AdminKey != "" {
 		t.Fatalf("MCP defaults: %+v", defaults)
 	}
-	cfg, err := Parse([]byte("mcp_enabled: true\nmcp_listen: ' 127.0.0.1:9000 '\nmcp_key: ' secret '\nmcp_key_set: true\naccount_order: [b.json, a.json]\n"))
+	cfg, err := Parse([]byte("mcp_enabled: true\npublic_listen: ' 127.0.0.1:9000 '\nmcp_key: ' secret '\nmcp_key_set: true\naccount_order: [b.json, a.json]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.MCPEnabled || cfg.MCPListen != "127.0.0.1:9000" || cfg.MCPKey != "secret" || cfg.MCPKeySet || !slices.Equal(cfg.AccountOrder, []string{"b.json", "a.json"}) {
+	if !cfg.MCPEnabled || cfg.PublicListen != "127.0.0.1:9000" || cfg.MCPKey != "secret" || cfg.MCPKeySet || !slices.Equal(cfg.AccountOrder, []string{"b.json", "a.json"}) {
 		t.Fatalf("parsed config: %+v", cfg)
 	}
 	cfg.MCPKeySet = true
@@ -50,7 +50,7 @@ func TestMCPAndAccountOrderConfig(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded["mcp_enabled"] != true || decoded["mcp_listen"] != cfg.MCPListen || decoded["mcp_key"] != "secret" || decoded["mcp_key_set"] != true {
+	if decoded["mcp_enabled"] != true || decoded["public_listen"] != cfg.PublicListen || decoded["mcp_key"] != "secret" || decoded["mcp_key_set"] != true {
 		t.Fatalf("JSON fields: %s", raw)
 	}
 	if order, ok := decoded["account_order"].([]any); !ok || len(order) != 2 || order[0] != "b.json" || order[1] != "a.json" {
@@ -69,9 +69,9 @@ func TestMCPAndAccountOrderConfig(t *testing.T) {
 	if _, exists := decoded["mcp_key"]; exists {
 		t.Fatalf("empty MCP key must be omitted: %s", raw)
 	}
-	blank, err := Parse([]byte("mcp_listen: ' '\n"))
-	if err != nil || blank.MCPListen != defaults.MCPListen {
-		t.Fatalf("blank MCP listen: %q, %v", blank.MCPListen, err)
+	blank, err := Parse([]byte("public_listen: ' '\n"))
+	if err != nil || blank.PublicListen != defaults.PublicListen {
+		t.Fatalf("blank public listen: %q, %v", blank.PublicListen, err)
 	}
 }
 

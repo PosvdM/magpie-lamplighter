@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 func TestHistoryResetsPreserveRawChangesAndRangePredecessor(t *testing.T) {

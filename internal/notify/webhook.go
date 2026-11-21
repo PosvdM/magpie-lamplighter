@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
 )
 
 // Placeholders are the names a webhook may use as {{name}}.

@@ -8,18 +8,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // maxCandidates limits how many models one ignition tries.
 const maxCandidates = 6
+
+// exhaustedWindow returns a window of the group other than the 5-hour one
+// that is used up and has not reset yet. While it lasts, every request on
+// the account is rejected, so ignition waits for it.
+func exhaustedWindow(g GroupView, now time.Time) (WindowView, bool) {
+	for _, w := range g.Windows {
+		if quota.IsFiveHour(w.Window) {
+			continue
+		}
+		if w.Remaining <= notify.ExhaustedRemaining && (w.Reset.IsZero() || w.Reset.After(now)) {
+			return w, true
+		}
+	}
+	return WindowView{}, false
+}
 
 // TargetView is the ignition status of one quota group.
 type TargetView struct {
@@ -48,27 +62,57 @@ type target struct {
 	cred   *Cred
 	reset  time.Time
 	source string
+	// automatic marks the requests of an automatic ignition, which pass
+	// admit before they are sent.
+	automatic bool
 }
 
-// groupIgnitable reports whether ignition is enabled for the group.
+// groupIgnitable reports whether ignition is enabled for the group: its
+// provider is monitored and ignited, and the group is selected. For a
+// provider with group checkboxes (providers.Ignition.Groups), groups lists
+// the checked ones: an empty list selects none, and a list that is absent
+// or null selects the default groups. For other providers an empty list
+// selects every group.
 func groupIgnitable(cfg config.Config, provider, sourceLabel string) bool {
-	if spec := providers.Lookup(provider); spec == nil || spec.Ignition == nil {
+	spec := providers.Lookup(provider)
+	if spec == nil || spec.Ignition == nil {
 		return false
 	}
 	p := cfg.Provider(provider)
-	if !p.Ignite {
+	if !p.Monitor || !p.Ignite {
 		return false
 	}
-	if len(p.Groups) == 0 {
+	groups := p.Groups
+	if len(spec.Ignition.Groups) > 0 {
+		if groups == nil {
+			groups = spec.Ignition.DefaultGroups
+		}
+		if len(groups) == 0 {
+			return false
+		}
+	} else if len(groups) == 0 {
 		return true
 	}
 	label := strings.ToLower(strings.TrimSpace(sourceLabel))
-	for _, allowed := range p.Groups {
+	for _, allowed := range groups {
 		if strings.ToLower(strings.TrimSpace(allowed)) == label {
 			return true
 		}
 	}
 	return false
+}
+
+// ignitionTarget reports whether group is an ignition target under cfg: it
+// has a 5-hour window and groupIgnitable accepts it. ignition.enabled is
+// checked by the callers: a manual ignition ignores it. Automatic and
+// manual ignition, the admission of each automatic request (admit) and the
+// magpie_warmup list of the status all use this rule.
+func ignitionTarget(cfg config.Config, group *GroupView) bool {
+	if !groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+		return false
+	}
+	_, ok := group.fiveHour()
+	return ok
 }
 
 // collectTargets returns the groups that have a 5-hour window and ignition
@@ -79,13 +123,10 @@ func (e *Engine) collectTargets(cfg config.Config) []target {
 	var out []target
 	for _, group := range e.groups {
 		cred := e.creds[group.AuthIndex]
-		if cred == nil || !groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+		if cred == nil || !ignitionTarget(cfg, group) {
 			continue
 		}
-		w, ok := group.fiveHour()
-		if !ok {
-			continue
-		}
+		w, _ := group.fiveHour()
 		snapshot := *group
 		snapshot.Windows = append([]WindowView(nil), group.Windows...)
 		out = append(out, target{group: snapshot, cred: cred, reset: w.Reset, source: string(w.Source)})
@@ -199,10 +240,89 @@ func (e *Engine) performDue(ctx context.Context, cfg config.Config) bool {
 		if due.After(now.Add(250 * time.Millisecond)) {
 			continue
 		}
+		if !e.mayIgnite(t) {
+			continue
+		}
 		e.igniteTarget(ctx, cfg, t, false)
 		attempted = true
 	}
 	return attempted
+}
+
+// errIgnitionWithdrawn ends an automatic ignition whose target stopped
+// qualifying before its next request; see mayIgnite.
+var errIgnitionWithdrawn = errors.New("点火条件已不满足，未发送的请求已放弃")
+
+// mayIgnite reports whether an automatic ignition of t may start. See
+// mayIgniteLocked.
+func (e *Engine) mayIgnite(t target) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.mayIgniteLocked(t)
+}
+
+// mayIgniteLocked reports whether an automatic ignition of t may send its
+// next request under the current settings. The caller holds mu. The
+// settings are read again for every request: a round runs for minutes with
+// candidate models and confirmations, and the user can turn ignition off
+// meanwhile. The target must still qualify: ignition.enabled, the daily
+// ignition hours, a loaded account, and ignitionTarget, which includes
+// monitoring and ignition of its provider and the quota group.
+func (e *Engine) mayIgniteLocked(t target) bool {
+	cfg := e.cfg
+	if !cfg.Ignition.Enabled || !e.schedule(cfg).InWindow(e.now()) {
+		return false
+	}
+	group := e.groups[t.group.Key]
+	return e.creds[t.cred.AuthIndex] != nil && group != nil && ignitionTarget(cfg, group)
+}
+
+// admission is the automatic ignition request being opened. Configure
+// withdraws it when the new settings no longer let its target ignite, and
+// cancel stops a request that is about to be sent or waits for its
+// response headers. Once the headers arrive the request has reached the
+// provider and is no longer withdrawn.
+type admission struct {
+	target    target
+	cancel    context.CancelCauseFunc
+	withdrawn bool
+}
+
+// admit checks under mu that the automatic ignition of t may send its next
+// request, and registers it as e.admission, so that a configuration
+// applied by Configure after the check withdraws it. The returned context
+// carries the request; opened ends the admission once OpenModelStream has
+// returned and reports false when the request was withdrawn meanwhile.
+// A stopped engine admits nothing, and Cancel cancels the admitted request.
+func (e *Engine) admit(ctx context.Context, t target) (context.Context, func() bool, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped || !e.mayIgniteLocked(t) {
+		return ctx, nil, false
+	}
+	reqCtx, cancel := context.WithCancelCause(ctx)
+	a := &admission{target: t, cancel: cancel}
+	e.admission = a
+	opened := func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.admission == a {
+			e.admission = nil
+		}
+		return !a.withdrawn
+	}
+	return reqCtx, opened, true
+}
+
+// withdrawLocked withdraws the admitted request when the settings just
+// applied no longer let its target ignite. The caller holds mu.
+func (e *Engine) withdrawLocked() {
+	a := e.admission
+	if a == nil || a.withdrawn || e.mayIgniteLocked(a.target) {
+		return
+	}
+	a.withdrawn = true
+	a.cancel(errIgnitionWithdrawn)
 }
 
 // configuredModel returns the model override for the target, if any.
@@ -216,6 +336,76 @@ func configuredModel(cfg config.Config, provider, groupLabel string) string {
 	return p.Model
 }
 
+// gatewayModels holds the models of one Magpie provider from the gateway's
+// list. Magpie names a model "<provider>/<model>", such as
+// "claude/claude-haiku-4-5" or "agy-cli/gemini-3-flash"; the candidate rules
+// of internal/providers read the model name alone. bare lists the names, and
+// ids maps each back to the id the request names. An id without a
+// provider is kept as it is.
+type gatewayModels struct {
+	bare []string
+	ids  map[string]string
+}
+
+// modelsFor returns the models in available whose provider part is accepted
+// by owns.
+func modelsFor(available []string, owns func(provider string) bool) gatewayModels {
+	m := gatewayModels{ids: map[string]string{}}
+	for _, id := range available {
+		name := id
+		if provider, rest, ok := strings.Cut(id, "/"); ok {
+			if !owns(provider) {
+				continue
+			}
+			name = rest
+		}
+		if _, seen := m.ids[name]; !seen && name != "" {
+			m.ids[name] = id
+			m.bare = append(m.bare, name)
+		}
+	}
+	return m
+}
+
+// credModels returns the models of the Magpie provider of cred. A request
+// pinned to an account can only use its own provider's models.
+func credModels(available []string, cred *Cred) gatewayModels {
+	return modelsFor(available, func(provider string) bool {
+		if cred.HostProvider != "" {
+			return strings.EqualFold(provider, cred.HostProvider)
+		}
+		p := providers.Lookup(provider)
+		return p != nil && p.ID == cred.Provider
+	})
+}
+
+// id returns the gateway id of a model name.
+func (m gatewayModels) id(name string) string {
+	if id, ok := m.ids[name]; ok {
+		return id
+	}
+	return name
+}
+
+// overrideName returns a configured model as a name of cred's provider: a
+// value written as "<provider>/<model>" loses its provider part when it is
+// cred's provider.
+func overrideName(override string, cred *Cred) string {
+	if provider, rest, ok := strings.Cut(override, "/"); ok && cred.HostProvider != "" && strings.EqualFold(provider, cred.HostProvider) {
+		return rest
+	}
+	return override
+}
+
+// overrideID returns the id a configured model is sent as when the model
+// list cannot be read.
+func overrideID(override string, cred *Cred) string {
+	if strings.Contains(override, "/") || cred.HostProvider == "" {
+		return override
+	}
+	return cred.HostProvider + "/" + override
+}
+
 // igniteTarget sends the ignition request, confirms it and records the
 // outcome. It returns the error shown for a manual ignition.
 func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, manual bool) error {
@@ -227,19 +417,68 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// The fingerprint of the credential the request goes out with; a
 	// rejection waits for another one. When it cannot be read, a rejection
 	// keeps it unknown: the file read after the request may already hold a
-	// new login the request did not use. See noteFingerprint.
+	// new login the request did not use. See noteFingerprint. For an
+	// agy-cli account it is the sign-in confirmed before the last request
+	// that went out (sentResponse.fingerprint).
+	//
+	// The gateway sends an agy-cli account's request with whichever Google
+	// account its agy is signed in to. The account is confirmed before
+	// every ignition, manual ones too, and again before each request
+	// (execute); an account that cannot be confirmed gets no request. See
+	// identityChecked.
 	fingerprint := ""
-	if !manual {
-		fingerprint = e.credentialFingerprint(t.cred)
+	var err error
+	if !manual || identityChecked(t.cred) {
+		fingerprint, err = e.ignitionCredential(ctx, t.cred)
 	}
+	base := e.ignitionBase(t.group.Key, start)
 
-	model, resp, err := e.execute(ctx, cfg, t)
+	var model string
+	var resp sentResponse
 	if err == nil {
-		err = e.confirm(ctx, cfg, t, start, resp, manual)
+		model, resp, err = e.execute(ctx, cfg, t, manual)
+	}
+	if err == nil {
+		// Confirmation needs a reading taken after the request that
+		// worked was sent; the model list and refused candidates before it
+		// can take a while.
+		if resp.sentAt.After(base.start) {
+			base.start = resp.sentAt
+		}
+		err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+	}
+	if resp.confirmed {
+		// The sign-in confirmed right before the last request that went
+		// out, which agy may have changed since the first confirmation.
+		fingerprint = resp.fingerprint
+	}
+	if errors.Is(err, host.ErrIdentity) {
+		// An unconfirmed sign-in has no fingerprint to wait on; the first
+		// readable credential counts as changed (noteFingerprint).
+		fingerprint = ""
 	}
 	now := e.now()
+	if errors.Is(err, errIgnitionWithdrawn) {
+		// Not a failure: the target no longer qualifies for automatic
+		// ignition, and the next round reads the settings again.
+		e.logf("info", "%s：%v", t.group.Label, err)
+		return err
+	}
+	if (e.stopping() || ctx.Err() != nil) && errors.Is(err, context.Canceled) {
+		// The process exits: the model list, the request, its stream or
+		// its confirmation was cut short by the stop and says nothing about
+		// the account. An error the provider had already answered is not
+		// context.Canceled and is handled below.
+		e.logf("info", "%s：退出时取消点火，不计为失败", t.group.Label)
+		return err
+	}
 	if err != nil {
 		d := failure.Diagnose(err)
+		if errors.Is(err, host.ErrIdentity) {
+			// A credential problem: retrying cannot help until the account
+			// can be confirmed, and no provider limited anything.
+			d.Reason = failure.ReasonAuth
+		}
 		if manual {
 			// Keep the automatic retry, circuit and credential state
 			// unchanged. manual=1 without retry_seconds tells the page that
@@ -293,7 +532,7 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		} else {
 			retry := retryText(outcome.RetryIn)
 			if outcome.Cooldown {
-				retry = "CPA 冷却结束，" + retry
+				retry = "Magpie 账号休息结束，" + retry
 			}
 			params := map[string]string{"retry_seconds": strconv.Itoa(int(outcome.RetryIn.Round(time.Second).Seconds())), "error": err.Error(), "summary": d.Summary}
 			if outcome.Cooldown {
@@ -339,29 +578,53 @@ func (e *Engine) group(key string) (GroupView, bool) {
 }
 
 // execute sends the ignition request with the newest candidate model. It
-// tries the next candidate when CPA rejects a model for the pinned
-// credential, and once per ignition when the provider refuses a model.
-func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, pluginapi.HostModelExecutionResponse, error) {
-	var empty pluginapi.HostModelExecutionResponse
+// tries the next candidate when Magpie refuses a model for the pinned
+// account, and once per ignition when the provider refuses a model. The
+// response carries when the returned candidate was sent, and for an
+// agy-cli account the sign-in confirmed before the last request that went
+// out, also with an error.
+//
+// Each request of an automatic ignition passes admit, which checks that
+// the target still qualifies; otherwise the requests not sent yet are
+// dropped with errIgnitionWithdrawn. Each request of an agy-cli account
+// confirms the account right before it is sent (confirmIdentity): agy can
+// sign in to another account while the model list is read or a candidate
+// is refused. An account not confirmed before a later candidate returns
+// an error that names that candidate, as the ones before it went out.
+//
+// A model list that fails because the engine stops or ctx ends returns
+// context.Canceled.
+func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manual bool) (string, sentResponse, error) {
+	var empty sentResponse
+	t.automatic = !manual
 	spec := providers.Lookup(t.group.Provider)
 	override := configuredModel(cfg, t.group.Provider, t.group.SourceLabel)
 	ts := e.state.Target(t.group.Key)
 
-	available, err := e.lister.List(ctx, cfg.CPABaseURL, cfg.ModelsAPIKey)
+	available, err := e.lister.List(ctx, e.host.Models)
+	if err != nil && (ctx.Err() != nil || e.stopping()) {
+		// The host's error need not tell that the stop cut it short.
+		return "", empty, context.Canceled
+	}
 	e.noteModels(available, err)
 	var candidates []string
 	switch {
 	case err != nil && override != "":
-		candidates = []string{override}
+		candidates = []string{overrideID(override, t.cred)}
 	case err != nil && ts.LastModel != "":
 		// Keep igniting with the last working model while the list is unavailable.
 		candidates = []string{ts.LastModel}
 	case err != nil:
 		return "", empty, err
 	default:
-		candidates, err = providers.Candidates(spec, t.group.SourceLabel, override, available)
+		// Candidates are picked by model name and sent by gateway id.
+		own := credModels(available, t.cred)
+		names, err := providers.Candidates(spec, t.group.SourceLabel, overrideName(override, t.cred), own.bare)
 		if err != nil {
 			return "", empty, fmt.Errorf("%w: %v", ignite.ErrNoModel, err)
+		}
+		for _, name := range names {
+			candidates = append(candidates, own.id(name))
 		}
 	}
 	if override == "" {
@@ -373,6 +636,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 
 	var lastErr, refusedErr error
 	refused := ""
+	// sent is the sign-in of the last request that went out, for the
+	// returns after the loop.
+	var sent sentResponse
 	for i, model := range candidates {
 		if ctx.Err() != nil || e.stopping() {
 			return model, empty, context.Canceled
@@ -381,30 +647,34 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 		if err != nil {
 			return "", empty, err
 		}
-		forced := t.cred.HostProvider
-		if forced == "" {
-			forced = t.group.Provider
+		fingerprint := ""
+		if identityChecked(t.cred) {
+			if fingerprint, err = e.confirmIdentity(ctx, t.cred, i+1); err != nil {
+				return model, empty, err
+			}
 		}
-		resp, err := e.executeStream(ctx, t, pluginapi.HostModelExecutionRequest{
-			EntryProtocol:  protocol,
-			ExitProtocol:   protocol,
-			Model:          model,
-			Stream:         true,
-			Body:           body,
-			ForcedProvider: forced,
-			AuthID:         t.cred.ID,
+		resp, err := e.executeStream(ctx, t, host.ModelRequest{
+			Account:  t.cred.AuthIndex,
+			Protocol: protocol,
+			Model:    model,
+			Body:     body,
 		}, ignitionOutputWindow)
+		resp.confirmed, resp.fingerprint = identityChecked(t.cred), fingerprint
+		sent = sentResponse{confirmed: resp.confirmed, fingerprint: fingerprint}
 		if err == nil {
 			if refused != "" {
 				e.noteRefused(t, refused, model)
 			}
 			return model, resp, nil
 		}
+		if errors.Is(err, errIgnitionWithdrawn) {
+			return model, resp, err
+		}
 		if ignite.Classify(err) == ignite.Unsupported {
 			lastErr = err
 			continue
 		}
-		// CPA lists a new model for every credential of the provider, and one
+		// Magpie lists a new model for every account of the provider, and one
 		// account may not be able to use it yet. A second refusal points at
 		// the request or the account, so it ends the ignition.
 		if refused == "" && i < len(candidates)-1 && ignite.ModelRejected(err) {
@@ -423,9 +693,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 		return model, resp, err
 	}
 	if refused != "" {
-		return "", empty, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
+		return "", sent, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
 	}
-	return "", empty, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
+	return "", sent, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
 }
 
 // refusedFor is how long a model the provider refused for a quota group is
@@ -469,28 +739,16 @@ func (e *Engine) skipRefused(key string, candidates []string) []string {
 	return out
 }
 
-// maybeReadModels reads the CPA model list after a start and after a change
-// of the CPA address or models key, so that the settings show the next
-// automatic model without waiting for an ignition. Otherwise the list is only
-// read for an ignition. A failed read is retried with the next poll.
-func (e *Engine) maybeReadModels(ctx context.Context, cfg config.Config, pollDue bool) {
-	source := ""
-	if cfg.ModelsAPIKey != "" {
-		source = cfg.CPABaseURL + "\x00" + cfg.ModelsAPIKey
-	}
-	if source != e.modelsSource {
-		// Models and errors of another CPA or key do not describe the next
-		// ignition.
-		e.modelsSource, e.modelsTried, e.modelsOK = source, false, false
-		e.mu.Lock()
-		e.nextModels, e.modelsErr = nil, ""
-		e.mu.Unlock()
-	}
-	if source == "" || e.modelsOK || (e.modelsTried && !pollDue) {
+// maybeReadModels reads the model list after a start, so that the settings
+// show the next automatic model without waiting for an ignition. Otherwise
+// the list is only read for an ignition. A failed read is retried with the
+// next poll.
+func (e *Engine) maybeReadModels(ctx context.Context, pollDue bool) {
+	if e.modelsOK || (e.modelsTried && !pollDue) {
 		return
 	}
 	e.modelsTried = true
-	available, err := e.lister.List(ctx, cfg.CPABaseURL, cfg.ModelsAPIKey)
+	available, err := e.lister.List(ctx, e.host.Models)
 	e.noteModels(available, err)
 	e.modelsOK = err == nil
 }
@@ -511,8 +769,9 @@ func (e *Engine) noteModels(available []string, err error) {
 		if p.Ignition == nil {
 			continue
 		}
-		if candidates, err := providers.Candidates(p, p.Ignition.HintGroup, "", available); err == nil {
-			next[p.ID] = candidates[0]
+		own := modelsFor(available, func(provider string) bool { return providers.Lookup(provider) == p })
+		if candidates, err := providers.Candidates(p, p.Ignition.HintGroup, "", own.bare); err == nil {
+			next[p.ID] = own.id(candidates[0])
 		}
 	}
 	e.nextModels = next
@@ -526,29 +785,66 @@ func truncateText(text string, n int) string {
 	return string(runes[:n])
 }
 
+// ignitionBase is what confirmation compares with: when the request that
+// worked was sent, and the reset of the 5-hour window it is meant to
+// replace.
+type ignitionBase struct {
+	// start is the start of the ignition until execute returns, then when
+	// the request that worked entered OpenModelStream.
+	start time.Time
+	// oldReset is the reset of a window that had ended or not started at
+	// start (a past reset or a rolling placeholder), zero otherwise. A
+	// reading with this reset still describes that window.
+	oldReset time.Time
+}
+
+// ignitionBase records the 5-hour window of key before an ignition at
+// start.
+func (e *Engine) ignitionBase(key string, start time.Time) ignitionBase {
+	base := ignitionBase{start: start}
+	group, ok := e.group(key)
+	if !ok {
+		return base
+	}
+	if w, ok := group.fiveHour(); ok && (e.state.Target(key).RollingReset || !w.Reset.After(start)) {
+		base.oldReset = w.Reset
+	}
+	return base
+}
+
 // confirmed reports whether the target's 5-hour window has a fixed future
-// reset observed after start.
-func (e *Engine) confirmed(key string, start, now time.Time) bool {
+// reset read after the ignition request was sent (base.start), other than
+// base.oldReset. The time of the reading counts, not when it was applied:
+// Magpie's kept quota can hold a reading taken before the request and
+// handed over after it.
+func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 	group, ok := e.group(key)
 	if !ok {
 		return false
 	}
 	w, ok := group.fiveHour()
-	if !ok || w.ObservedAt.Before(start) || w.Reset.IsZero() || !w.Reset.After(now) {
+	if !ok || w.ReadAt.Before(base.start) || w.Reset.IsZero() || !w.Reset.After(now) {
+		return false
+	}
+	if !base.oldReset.IsZero() && w.Reset.Equal(base.oldReset) {
 		return false
 	}
 	return !e.state.Target(key).RollingReset
 }
 
 // confirm checks that the ignition started a window. Claude responses carry
-// the new reset in their headers; Codex reports it through the usage record
-// of the same request. When neither arrives, and for providers without quota
-// in their headers, the credential is queried actively. The queries of a
-// manual ignition leave the credential state alone, like its failure.
-func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start time.Time, resp pluginapi.HostModelExecutionResponse, manual bool) error {
+// the new reset in their headers, which Magpie's gateway writes back. The
+// gateway does not pass on Codex's x-codex-* headers, and Antigravity has no
+// quota in its headers: for them, and when the headers carry no new window,
+// the credential is queried actively. The queries of a manual ignition
+// leave the credential state alone, like its failure. A stop or an ended
+// ctx before the window is confirmed returns context.Canceled, also when
+// it cuts a query short.
+func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, base ignitionBase, resp host.ModelResponse, manual bool) error {
+	start := base.start
 	var groups []quota.RawGroup
 	if spec := providers.Lookup(t.group.Provider); spec != nil && spec.Headers != nil {
-		groups = spec.Headers(resp.Headers, e.now())
+		groups = spec.Headers(resp.Header, e.now())
 	}
 	if len(groups) > 0 {
 		now := e.now()
@@ -556,21 +852,27 @@ func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start
 		e.notePassiveFable(t.cred, groups)
 		e.applyGroups(ctx, cfg, t.cred, groups, quota.SourcePassive, now, start, true)
 	}
-	if e.confirmed(t.group.Key, start, e.now()) {
+	if e.confirmed(t.group.Key, base, e.now()) {
 		return nil
 	}
 	for _, delay := range confirmDelays {
 		if !e.waitWithUsage(ctx, delay) {
 			return context.Canceled
 		}
-		if e.confirmed(t.group.Key, start, e.now()) {
+		if e.confirmed(t.group.Key, base, e.now()) {
 			return nil
 		}
-		if err := e.queryCred(ctx, cfg, t.cred, !manual); err != nil {
+		err := e.queryCred(ctx, cfg, t.cred, !manual)
+		if e.confirmed(t.group.Key, base, e.now()) {
+			return nil
+		}
+		if ctx.Err() != nil || e.stopping() {
+			// The stop cut the query short, or came before the next one:
+			// the window is neither confirmed nor refuted.
+			return context.Canceled
+		}
+		if err != nil {
 			e.logf("warn", "点火确认时刷新额度失败：%s：%v", t.group.Label, err)
-		}
-		if e.confirmed(t.group.Key, start, e.now()) {
-			return nil
 		}
 	}
 	return ignite.ErrNotConfirmed

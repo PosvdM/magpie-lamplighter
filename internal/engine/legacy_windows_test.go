@@ -10,9 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 func TestLegacyAbsentWindowMigrationSurvivesFailedActiveQuery(t *testing.T) {
@@ -55,7 +54,7 @@ func TestLegacyAbsentWindowMigrationSurvivesFailedActiveQuery(t *testing.T) {
 				t.Fatalf("migration: %+v", stored)
 			}
 			beforeRebase := stored.Windows[quota.WindowFiveHour].Rebase
-			h.http = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse { return pluginapi.HTTPResponse{StatusCode: 503} }
+			h.http = func(httpRequest) httpResponse { return httpResponse{StatusCode: 503} }
 			e.poll(context.Background(), cfg, c.t, "1", true)
 			if e.pollErrs["1"] == "" {
 				t.Fatal("active query must fail")
@@ -90,8 +89,8 @@ func TestLegacyAbsentWindowMigrationSurvivesFailedActiveQuery(t *testing.T) {
 				t.Fatal("new group must allow a passive first baseline")
 			}
 			c.add(time.Minute)
-			h.http = func(pluginapi.HTTPRequest) pluginapi.HTTPResponse {
-				return pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":%d},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_at":%d}}}`, c.t.Add(30*time.Minute).Unix(), c.t.Add(6*24*time.Hour).Unix()))}
+			h.http = func(httpRequest) httpResponse {
+				return httpResponse{StatusCode: 200, Body: []byte(fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":%d},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_at":%d}}}`, c.t.Add(30*time.Minute).Unix(), c.t.Add(6*24*time.Hour).Unix()))}
 			}
 			e.poll(context.Background(), cfg, c.t, "1", true)
 			if err := e.pollErrs["1"]; err != "" {

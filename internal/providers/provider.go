@@ -2,9 +2,8 @@
 // service, in its own file, says how to read its quota, which response
 // headers carry quota, and how to ignite its 5-hour window.
 //
-// Active reads call the provider usage endpoints with the same URLs and
-// headers as the CPA Management Center. Passive reads parse the rate-limit
-// headers that CPA records from real model responses.
+// Active reads call the vendor usage endpoints with the account's own
+// token. Headers parses the rate-limit headers of an ignition response.
 package providers
 
 import (
@@ -16,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/models"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/models"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // Provider is one service.
@@ -25,7 +24,7 @@ type Provider struct {
 	// ID is the provider name in the config, in quota group keys and on the
 	// page, such as "codex".
 	ID string
-	// Aliases are other names CPA uses for the provider of a credential.
+	// Aliases are other names Magpie uses for the provider of an account.
 	Aliases []string
 	// Title is the display name, such as "GPT".
 	Title string
@@ -51,7 +50,7 @@ type Provider struct {
 
 // Ignition describes the ignition request of a provider.
 type Ignition struct {
-	// Protocol is the CPA entry protocol of the request body.
+	// Protocol is the gateway request format of the body; see host.ModelRequest.
 	Protocol string
 	// Body returns the request body for model.
 	Body func(model string) map[string]any
@@ -63,7 +62,10 @@ type Ignition struct {
 	HintGroup string
 	// Groups are the quota groups the settings offer as checkboxes, with
 	// GroupsHint below them, and DefaultGroups those ignited by default.
-	// Without Groups, every group of the provider is ignited.
+	// With Groups, the configured groups list names the checked ones: an
+	// empty list ignites none, and an absent one keeps DefaultGroups.
+	// Without Groups, an empty or absent list ignites every group of the
+	// provider.
 	Groups        []string
 	GroupsHint    Text
 	DefaultGroups []string
@@ -75,7 +77,7 @@ type Text struct {
 	En string `json:"en"`
 }
 
-var registry = []*Provider{codex, claude, antigravity, kimi, xai}
+var registry = []*Provider{codex, claude, antigravity}
 
 // All returns the providers in display order.
 func All() []*Provider { return registry }
@@ -89,7 +91,7 @@ func IDs() []string {
 	return out
 }
 
-// Lookup returns the provider for a provider name from CPA or the config,
+// Lookup returns the provider for a provider name from Magpie or the config,
 // or nil when Lamplighter does not support it.
 func Lookup(name string) *Provider {
 	name = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
@@ -130,7 +132,7 @@ func Title(provider string) string {
 // groupOrder lists quota groups in the order the page shows them: the main
 // group of each service, then the separately counted ones. Other groups
 // follow.
-var groupOrder = []string{"Claude", "GPT", "Gemini", "Kimi", "Grok", "Fable", "Claude / GPT"}
+var groupOrder = []string{"Claude", "GPT", "Gemini", "Fable", "Claude / GPT"}
 
 // GroupOrder returns the display order of quota groups by source label.
 func GroupOrder() []string { return groupOrder }
@@ -179,14 +181,14 @@ func Candidates(p *Provider, group, override string, available []string) ([]stri
 				return []string{override}, nil
 			}
 		}
-		return nil, fmt.Errorf("指定点火模型 %s 不在 CPA 模型列表中", override)
+		return nil, fmt.Errorf("指定点火模型 %s 不在 Magpie 模型列表中", override)
 	}
 	var out []string
 	if p.Ignition != nil {
 		out = models.Unique(p.Ignition.Candidates(group, available))
 	}
 	if len(out) == 0 {
-		return nil, errors.New("CPA 模型列表中没有适合该凭证的点火模型")
+		return nil, errors.New("Magpie 模型列表中没有适合该账号的点火模型")
 	}
 	return out, nil
 }

@@ -12,11 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // MCPBackend exposes a separate, model-safe view of the engine.
@@ -46,18 +47,9 @@ func describeTime(t, now time.Time) *modelTime {
 }
 
 // maskEmail keeps the last two characters of the unquoted email local part,
-// such as "***rk". The domain and the length of the local part are left out.
-func maskEmail(email string) string {
-	local := email
-	if at := strings.LastIndexByte(email, '@'); at >= 0 {
-		local = email[:at]
-	}
-	runes := []rune(strings.ReplaceAll(local, "\"", ""))
-	if len(runes) > 2 {
-		runes = runes[len(runes)-2:]
-	}
-	return "***" + string(runes)
-}
+// such as "***rk". The domain and the length of the local part are left out
+// (redact.Email).
+func maskEmail(email string) string { return redact.Email(email) }
 
 // noteEmail matches entire non-whitespace fragments containing @, including
 // quoted local parts and domain literals. Unicode whitespace also separates fragments.
@@ -194,8 +186,8 @@ func selectedAccounts(s Status, args map[string]string) map[string]string {
 const startupRetrySeconds = 30
 
 // notReady returns the result for a tool call that arrives before the
-// engine has quota data: while it waits after CPA starts, before its first
-// full poll, and while the plugin is disabled. Empty lists at that time
+// engine has quota data: while it waits after the start, and before its
+// first full poll. Empty lists at that time
 // would read as accounts without quota. nil means the engine is ready. A
 // failed credential listing counts as ready; list_quotas then shows no
 // accounts.
@@ -212,8 +204,6 @@ func (b *MCPBackend) notReadyLocked(needPoll bool) map[string]any {
 	e := b.engine
 	polled := !e.lastPoll.IsZero() || e.pollErrs[""] != ""
 	switch {
-	case !e.enabled:
-		return map[string]any{"ready": false, "state": "disabled", "certain": false, "note": "Lamplighter is disabled in the CPA config and reports no quota data."}
 	case !e.running || e.stopped || needPoll && !polled:
 		return map[string]any{"ready": false, "state": "starting", "certain": false, "retry_after_seconds": startupRetrySeconds, "note": "Lamplighter is starting and has not loaded quota data yet; this is not an empty quota list. Retry after retry_after_seconds."}
 	}
@@ -262,11 +252,9 @@ type quotaAccountDTO struct {
 	Account           string           `json:"account"`
 	Plan              string           `json:"plan"`
 	Weight            float64          `json:"weight"`
-	Unavailable       bool             `json:"unavailable"`
 	CredentialInvalid bool             `json:"credential_invalid"`
 	Suspended         bool             `json:"account_suspended"`
 	Error             string           `json:"recent_error,omitempty"`
-	Cooldown          *modelTime       `json:"cooldown_until"`
 	NextIgnition      *modelTime       `json:"next_ignition"`
 	Windows           []quotaWindowDTO `json:"windows"`
 }
@@ -349,8 +337,8 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 				continue
 			}
 			hasWindows = true
-			// CPA applies aliases, request affinity and per-model credential cooldowns
-			// during live selection. No SDK callback exposes that decision here, so
+			// Magpie applies aliases, routing rules and account rests when it picks
+			// an account for a request. Nothing exposes that decision to a plugin, so
 			// a model query retains every candidate instead of guessing from its name.
 			key := a.Provider + "|" + g.SourceLabel
 			group := byGroup[key]
@@ -360,7 +348,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 				groups = append(groups, group)
 			}
 			queryErr := safeQueryError(a)
-			account := quotaAccountDTO{Account: label, Plan: a.Plan, Weight: weight, Unavailable: a.Unavailable, CredentialInvalid: credentialInvalid(a), Suspended: a.CredentialProblem == failure.ReasonSuspended, Error: queryErr, Cooldown: describeTime(a.CooldownUntil, s.Now), NextIgnition: describeTime(targets[g.Key].NextDue, s.Now), Windows: []quotaWindowDTO{}}
+			account := quotaAccountDTO{Account: label, Plan: a.Plan, Weight: weight, CredentialInvalid: credentialInvalid(a), Suspended: a.CredentialProblem == failure.ReasonSuspended, Error: queryErr, NextIgnition: describeTime(targets[g.Key].NextDue, s.Now), Windows: []quotaWindowDTO{}}
 			for _, w := range g.Windows {
 				target := targets[g.Key]
 				target.Rolling = startStates[g.Key][1]
@@ -395,7 +383,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 			group.Accounts = append(group.Accounts, account)
 		}
 		if !hasWindows {
-			withoutWindows = append(withoutWindows, map[string]any{"account": label, "provider": a.Provider, "plan": a.Plan, "weight": weight, "unavailable": a.Unavailable, "credential_invalid": credentialInvalid(a), "account_suspended": a.CredentialProblem == failure.ReasonSuspended, "recent_error": safeQueryError(a)})
+			withoutWindows = append(withoutWindows, map[string]any{"account": label, "provider": a.Provider, "plan": a.Plan, "weight": weight, "credential_invalid": credentialInvalid(a), "account_suspended": a.CredentialProblem == failure.ReasonSuspended, "recent_error": safeQueryError(a)})
 		}
 	}
 	for _, g := range groups {
@@ -403,7 +391,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 			total.Remaining /= total.weight
 		}
 	}
-	return map[string]any{"as_of": describeTime(s.Now, s.Now), "model": args["model"], "certain": args["model"] == "", "routing_note": "Model requests list conservative candidate pools: CPA aliases, affinity, exclusions and live credential selection cannot be resolved through the plugin SDK.", "forecast_note": "Rates are percentage points/hour. Forecasts assume unchanged consumption; null means unknown or stale. Seven-day rate is this cycle's average; five-hour rate is a recent piecewise linear fit.", "groups": groups, "accounts_without_windows": withoutWindows}, nil
+	return map[string]any{"as_of": describeTime(s.Now, s.Now), "model": args["model"], "certain": args["model"] == "", "routing_note": "Model requests list conservative candidate pools: Magpie's aliases, routing rules and live account selection are not visible to this plugin.", "forecast_note": "Rates are percentage points/hour. Forecasts assume unchanged consumption; null means unknown or stale. Seven-day rate is this cycle's average; five-hour rate is a recent piecewise linear fit.", "groups": groups, "accounts_without_windows": withoutWindows}, nil
 }
 
 func forecastWindow(w WindowStatus, target TargetView, points [][3]float64, now time.Time, poll time.Duration) quotaWindowDTO {
@@ -721,7 +709,7 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	b.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	cmd := command{kind: "refresh", arg: auth, reply: make(chan commandReply, 1)}
+	cmd := newCommand(ctx, "refresh", auth)
 	select {
 	case e.cmdCh <- cmd:
 	case <-ctx.Done():
@@ -732,7 +720,7 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	select {
 	case result := <-cmd.reply:
 		if result.err != nil {
-			return nil, errors.New("Quota refresh failed; read list_quotas for per-account state")
+			return map[string]any{"ok": false, "error": redact.Text(refreshReason(result.err))}, nil
 		}
 		return map[string]any{"ok": true, "as_of": describeTime(e.now(), e.now())}, nil
 	case <-ctx.Done():
@@ -741,6 +729,23 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 		return nil, errors.New("Quota engine stopped")
 	}
 }
+
+// refreshReason is the error of a failed refresh as refresh_quotas gives
+// it: the reason when Magpie could not refresh or brought no new reading
+// (refreshFailure), otherwise a pointer to list_quotas. Other error texts
+// can carry provider responses and account names, so they are not passed
+// on.
+func refreshReason(err error) string {
+	var failure *refreshFailure
+	switch {
+	case errors.As(err, &failure) && failure.stale:
+		return failure.reason
+	case failure != nil:
+		return "Magpie 刷新额度失败：" + failure.reason
+	}
+	return "额度刷新失败，各账号的状态见 list_quotas"
+}
+
 func (b *MCPBackend) events(ctx context.Context, args map[string]string) (any, error) {
 	since := time.Time{}
 	if args["since"] != "" {

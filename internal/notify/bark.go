@@ -25,7 +25,6 @@ const (
 	KindQuota      = "quota"
 	KindRecovery   = "recovery"
 	KindReminder   = "reminder"
-	KindCooldown   = "cooldown"
 	KindCircuit    = "circuit"
 	KindPlan       = "plan"
 	KindCodexReset = "codex_reset"

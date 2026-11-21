@@ -54,11 +54,22 @@ test("config tokens are 16 hexadecimal digits", () => {
   assert.notEqual(a, b);
 });
 
-test("account names preserve trailing note lines and clearing removes the whole note", () => {
-  const ctx = context(["accountNote"]);
-  assert.equal(ctx.accountNote("old\r\nsecond\r\nthird", "new"), "new\nsecond\nthird");
-  assert.equal(ctx.accountNote("old\nsecond", ""), "");
-  assert.equal(ctx.accountNote("", "new"), "new");
+test("account names are saved in account_names by pin and clearing removes the entry", async () => {
+  const writes = [];
+  const ctx = context(["saveAccountName"], {
+    rawConfig: { account_names: { "codex/b": "B" } }, status: { accounts: [{ auth_index: "codex/a" }] },
+    API: "api",
+    patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
+    loadConfig: async () => {}, api: async () => ({}), renderStatus: () => {}, loadHistory: () => {},
+  });
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "A");
+  assert.deepEqual(writes.pop(), { account_names: { "codex/b": "B", "codex/a": "A" } });
+  assert.equal(ctx.status.accounts[0].note, "A");
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "");
+  assert.deepEqual(writes.pop(), { account_names: { "codex/b": "B" } });
+  ctx.rawConfig.account_names = { "codex/a": "A" };
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "");
+  assert.deepEqual(writes.pop(), { account_names: null });
 });
 
 test("drag targets use layout midpoints rather than animated rectangles", () => {
@@ -76,7 +87,7 @@ test("drag targets use layout midpoints rather than animated rectangles", () => 
 
 test("queued inline weights merge changes and an empty field removes only its own override", async () => {
   const states = [], writes = [];
-  const ctx = context(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
     rawConfig: {}, saveQueue: Promise.resolve(), history: null,
     saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     translate: (key) => key, setSaveState: (...args) => states.push(args),
@@ -105,7 +116,7 @@ test("queued inline weights merge changes and an empty field removes only its ow
 });
 
 test("an earlier account name save does not overwrite a newer unsaved edit", async () => {
-  const ctx = context(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
     saveQueue: Promise.resolve(), history: null, saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     claimState: () => () => {}, translate: (key) => key, renderAccounts: () => {},
     saveAccountName: async () => {},
@@ -161,7 +172,7 @@ function accountSaveContext(fail) {
   const heading = saveNode("H2", { id: "account-order-state" });
   const section = { tagName: "SECTION", querySelector: selector => { assert.equal(selector, ".card-title"); return heading; } };
   const row = { account: { name: "a", note: "old" }, getAttribute: () => "a" };
-  const ctx = stateContext(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight", "saveAccountOrder"], {
+  const ctx = stateContext(["saveAccountField", "accountFieldHost", "fmtWeight", "saveAccountOrder"], {
     fail, rawConfig: {}, saveQueue: Promise.resolve(), history: null, pendingOrder: null,
     $: () => heading, toast: () => {},
     showApplied: say => { say("waiting", "waiting"); say("saved", "applied"); },
@@ -568,9 +579,7 @@ test("normal saves use the backend URL defaults and generate a key when enabling
     inputs = [{ name, value, type: type || "text", checked: value, getAttribute: () => null }];
     return JSON.parse(JSON.stringify(ctx.buildPatch(name)));
   }
-  assert.deepEqual(patch("cpa_base_url", " http://127.0.0.1:8317/// "), { cpa_base_url: "http://127.0.0.1:8317" });
-  assert.deepEqual(patch("cpa_base_url", ""), { cpa_base_url: "http://127.0.0.1:8317" });
-  assert.deepEqual(patch("mcp_listen", ""), { mcp_listen: "127.0.0.1:8318" });
+  assert.deepEqual(patch("public_listen", ""), { public_listen: "127.0.0.1:8318" });
   assert.deepEqual(patch("bark_url", "https://api.day.app/test/"), { bark_url: "https://api.day.app/test" });
   ctx.rawConfig.mcp_key = "  ";
   assert.deepEqual(patch("mcp_enabled", true, "checkbox"), { mcp_enabled: true, mcp_key: "llmcp_generated" });
@@ -772,13 +781,6 @@ test("matching needs the same group, the order, the time limit and the windows",
   assert.deepEqual(plain(built.rows.map((r) => r.event.params.window)), ["gemini-weekly"]);
   assert.equal(built.hidden, 1);
   assert.equal(built.fiveHour, 1);
-  // Older notifications have no group: their label decides.
-  built = ctx.eventRows([
-    event("notify", 20, { label: "Gemini", params: { title: "⚠️ Gemini 额度已恢复，CPA 仍在冷却" } }),
-    event("cooldown_stale", 10, { label: "Gemini", params: { until: "2026-11-17T00:00:00Z" } }),
-  ], false);
-  assert.equal(built.rows.length, 1);
-  assert.equal(built.rows[0].event.kind, "cooldown_stale");
 });
 
 test("older notifications are told by their titles", () => {
@@ -789,8 +791,6 @@ test("older notifications are told by their titles", () => {
   assert.equal(kind("⚠️ Gemini 点火已暂停"), "circuit");
   assert.equal(kind("⚠️ Gemini ignition paused"), "circuit");
   assert.equal(kind("🎫 GPT · 套餐 plus → free"), "plan");
-  assert.equal(kind("⚠️ GPT 额度已恢复，CPA 仍在冷却"), "cooldown");
-  assert.equal(kind("⚠️ GPT quota is back, CPA still cooling down"), "cooldown");
   assert.equal(kind("🟡 GPT · 5h 45%"), "quota");
   assert.equal(kind("🔴 GPT · 5h 5%"), "quota");
   assert.equal(kind("⏰ GPT · 5h 重置提醒"), "reminder");
@@ -1100,4 +1100,357 @@ test("older failure events without params hide their whole detail when masked", 
   assert.ok(nodes.detail.some((n) => n.text.includes("Claude Old")));
   // Events with params keep the masking by names and error texts.
   assert.equal(ctx.eventView(event("ignite_failed", 0, { label: "Claude", params: { manual: "1", error: "x", summary: "y" } })).whole, false);
+});
+
+test("the theme and language follow Magpie, else the browser", () => {
+  const ctx = context(["pageTheme", "pageLanguage"]);
+  assert.equal(ctx.pageTheme({ dark: true, lang: "en" }, false), "dark");
+  assert.equal(ctx.pageTheme({ dark: false, lang: "en" }, true), "light");
+  assert.equal(ctx.pageTheme(null, true), "dark");
+  assert.equal(ctx.pageTheme({}, false), "light");
+  assert.equal(ctx.pageLanguage({ dark: false, lang: "zh-TW" }, "en-US"), "zh");
+  assert.equal(ctx.pageLanguage({ dark: false, lang: "ja" }, "zh-CN"), "en");
+  assert.equal(ctx.pageLanguage(null, "zh-CN"), "zh");
+  assert.equal(ctx.pageLanguage({ dark: true }, "fr"), "en");
+  assert.equal(ctx.pageLanguage(null, ""), "en");
+});
+
+test("the page speaks Magpie's bridge protocol to its parent only", async () => {
+  const posted = [], calls = { theme: 0, language: 0, refresh: 0 };
+  const parent = { postMessage: (msg, target) => posted.push([plain(msg), target]) };
+  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible"], {
+    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 },
+    status: null, history: null, renderChart: () => {},
+    applyTheme: () => calls.theme++, applyLanguage: () => calls.language++,
+    loadStatus: () => { calls.refresh++; return Promise.resolve(); }, refreshHistory: () => {},
+  });
+  const hello = ctx.magpieCall("hello");
+  assert.deepEqual(posted, [[{ magpie: 1, id: 1, method: "hello" }, "*"]]);
+  // Another window's answer, or one without the marker, is ignored.
+  ctx.magpieMessage({ source: {}, data: { magpie: 1, id: 1, result: { dark: false } } });
+  ctx.magpieMessage({ source: parent, data: { id: 1, result: { dark: false } } });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 1, result: { dark: true, lang: "zh", tokens: {}, visible: true } } });
+  assert.deepEqual(plain(await hello), { dark: true, lang: "zh", tokens: {}, visible: true });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "theme", data: { dark: false, lang: "en", tokens: { bg: "#fff" } } } });
+  assert.deepEqual(plain(ctx.magpie.theme), { dark: false, lang: "en" });
+  assert.equal(calls.theme, 1);
+  assert.equal(calls.language, 1);
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: false } } });
+  assert.equal(ctx.magpie.visible, false);
+  ctx.status = {};
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: true } } });
+  assert.equal(ctx.magpie.visible, true);
+  assert.equal(calls.refresh, 1);
+  const copy = ctx.magpieCall("image.copy", { png: "blob" });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 2, error: "A picture is a PNG of 16 MB at most" } });
+  await assert.rejects(copy, /16 MB/);
+  // The page never reports errors to Magpie, which would replace it.
+  assert.doesNotMatch(source, /method: "error"|magpieCall\("error"/);
+});
+
+test("opened on its own the page asks nothing of a parent", async () => {
+  const win = {};
+  win.parent = win;
+  const ctx = context(["inFrame", "magpieCall"], { window: win, magpie: { calls: {}, next: 0 } });
+  assert.equal(ctx.inFrame(), false);
+  await assert.rejects(ctx.magpieCall("hello"), /not in Magpie/);
+});
+
+test("the sandbox drops neither storage errors nor confirmations", () => {
+  // Every use of localStorage tolerates the sandbox's SecurityError.
+  const lines = source.split("\n");
+  lines.forEach((line, i) => {
+    if (!/localStorage\./.test(line) || /^\s*\/\//.test(line)) return;
+    const guarded = /try \{/.test(line) || /try \{\s*$/.test(lines[i - 1]) || /try \{\s*$/.test(lines[i - 2]);
+    assert.ok(guarded, "line " + (i + 1) + ": " + line.trim());
+  });
+  assert.doesNotMatch(source, /parentRoot|watchParent|cli-proxy|sessionStorage|document\.cookie|\balert\(|\bprompt\(/);
+  // confirm() is called only where it can ask.
+  assert.deepEqual(lines.filter((line) => /\bconfirm\(/.test(line) && !/^\s*\/\//.test(line)).map((line) => line.trim()), ["if (!SANDBOXED) return confirm(message);"]);
+
+  const toasts = [];
+  let now = 1000;
+  const ctx = context(["confirmed"], {
+    SANDBOXED: true, toast: (text) => toasts.push(text), translate: (key, arg) => key + ":" + arg,
+    confirm: () => { throw new Error("no dialogs in the sandbox"); },
+    Date: { now: () => now },
+  });
+  const button = {};
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  assert.deepEqual(toasts, ["confirm_again:Ignite?"]);
+  now += 4000;
+  assert.equal(ctx.confirmed(button, "Ignite?"), true);
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  now += 6000;
+  assert.equal(ctx.confirmed(button, "Ignite?"), false);
+  ctx.SANDBOXED = false;
+  ctx.confirm = (text) => text === "Ignite?";
+  assert.equal(ctx.confirmed(button, "Ignite?"), true);
+});
+
+test("Magpie's warm-up accounts are named as the page names them", () => {
+  const ctx = context(["warmupNames"]);
+  const title = (p) => ({ claude: "Claude", codex: "Codex" })[p] || p;
+  const accounts = [
+    { auth_index: "claude/a", provider: "claude", note: "Work\nsecond line", email: "a@example.com" },
+    { auth_index: "codex/b", provider: "codex", email: "b@example.com" },
+  ];
+  assert.deepEqual(plain(ctx.warmupNames(["claude/a", "codex/b", "claude/gone", "claude/off", "", 3], accounts, { "claude/off": "Spare" }, title)),
+    ["Claude Work", "Codex b@example.com", "claude/gone", "Spare"]);
+  assert.deepEqual(plain(ctx.warmupNames(undefined, accounts, {}, title)), []);
+  assert.deepEqual(plain(ctx.warmupNames(null, accounts, {}, title)), []);
+});
+
+test("enabling the page on the public listener saves a new admin key with it", () => {
+  let inputs = [];
+  const ctx = context(["topKey", "setPath", "buildPatch", "mcpKey", "adminKey"], {
+    rawConfig: {}, status: { config: {} },
+    $: () => ({ elements: inputs }),
+    newMcpKey: () => "llmcp_generated", newAdminKey: () => "lladm_generated",
+  });
+  function patch(name, value) {
+    inputs = [{ name, value, type: "checkbox", checked: value, getAttribute: () => null }];
+    return JSON.parse(JSON.stringify(ctx.buildPatch(name)));
+  }
+  assert.deepEqual(patch("web_enabled", true), { web_enabled: true, admin_key: "lladm_generated" });
+  assert.deepEqual(patch("web_enabled", false), { web_enabled: false });
+  ctx.rawConfig.admin_key = "lladm_saved";
+  assert.deepEqual(patch("web_enabled", true), { web_enabled: true });
+});
+
+test("generated keys are 32 random bytes in base64url after their prefix", () => {
+  const ctx = context(["newSecret", "newMcpKey", "newAdminKey"], { crypto: require("node:crypto").webcrypto, Uint8Array, btoa });
+  assert.match(ctx.newAdminKey(), /^lladm_[A-Za-z0-9_-]{43}$/);
+  assert.match(ctx.newMcpKey(), /^llmcp_[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(ctx.newAdminKey(), ctx.newAdminKey());
+});
+
+test("the public listener state falls back to the MCP state", () => {
+  const ctx = context(["publicState"]);
+  const pub = { listen: "0.0.0.0:8318", running: true, error: "", web: true, mcp: false };
+  assert.equal(ctx.publicState({ public: pub, mcp: { running: false } }), pub);
+  assert.deepEqual(plain(ctx.publicState({ mcp: { enabled: true, listen: "127.0.0.1:8318", running: false, error: "bind" } })),
+    { listen: "127.0.0.1:8318", running: false, error: "bind", web: null, mcp: false });
+  assert.equal(ctx.publicState({}), null);
+  assert.equal(ctx.publicState(null), null);
+});
+
+test("a 401 asks for the key unless the page changed the key meanwhile", async () => {
+  const asked = [];
+  const ctx = context(["api"], {
+    key: "", PAGE_TOKEN: "", translate: (k) => k, setTimeout, clearTimeout, askForKey: (message) => asked.push(message),
+    fetch: async () => ({ status: 401, ok: false, json: async () => ({ error: "unauthorized" }) }),
+  });
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.deepEqual(asked, [""]);
+  ctx.key = "old";
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.deepEqual(asked, ["", "key_invalid"]);
+  ctx.fetch = async (path, opts) => {
+    assert.equal(opts.headers.Authorization, "Bearer old");
+    ctx.key = "new";
+    return { status: 401, ok: false, json: async () => ({}) };
+  };
+  await assert.rejects(ctx.api("GET", "api/status"), /unauthorized/);
+  assert.equal(asked.length, 2);
+});
+
+test("the key form works without form submission", () => {
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  assert.match(html, /<button id="key-submit"[^>]+type="button"/);
+  assert.match(source, /\$\("key-submit"\)\.addEventListener\("click", submitKey\)/);
+  assert.match(source, /\$\("key-input"\)\.addEventListener\("keydown"/);
+  // The admin key is generated, shown and copied like the MCP key.
+  for (const id of ["admin-key-view", "admin-key-show", "admin-key-copy", "admin-key-new", "public-status"]) assert.match(html, new RegExp('id="' + id + '"'));
+  assert.match(html, /name="web_enabled" type="checkbox"/);
+});
+
+test("API requests carry the page token only when the page has one", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  // The internal listener replaces this exact tag (web.PageWith).
+  assert.equal(html.split('<meta name="lamplighter-page" content="">').length, 2);
+  const meta = (content) => ({ querySelector: (sel) => {
+    assert.equal(sel, 'meta[name="lamplighter-page"]');
+    return content === null ? null : { getAttribute: () => content };
+  } });
+  const token = context(["pageToken"]);
+  assert.equal(token.pageToken(meta("tok_123")), "tok_123");
+  assert.equal(token.pageToken(meta("")), "");
+  assert.equal(token.pageToken(meta(null)), "");
+
+  const sent = [];
+  const ctx = context(["api"], {
+    key: "", PAGE_TOKEN: "tok_123", translate: (k) => k, setTimeout, clearTimeout, askForKey: () => {},
+    fetch: async (p, opts) => { sent.push(opts.headers); return { status: 200, ok: true, json: async () => ({}) }; },
+  });
+  await ctx.api("GET", "api/status");
+  await ctx.api("PATCH", "api/config", { a: 1 });
+  assert.equal(sent[0]["X-Lamplighter-Page"], "tok_123");
+  assert.equal(sent[1]["X-Lamplighter-Page"], "tok_123");
+  ctx.PAGE_TOKEN = "";
+  await ctx.api("GET", "api/status");
+  assert.equal("X-Lamplighter-Page" in sent[2], false);
+  // Requests go out only through api(), and never on a parent's message.
+  assert.equal(source.match(/\bfetch\(/g).length, 1);
+  const handler = source.match(/  function magpieMessage\([^]*?\n  }/)[0];
+  assert.doesNotMatch(handler, /api\(|fetch\(/);
+});
+
+// ---- Time zone and ignition settings ----
+
+const pageHtml = () => fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+
+function timezoneContext(rawConfig, statusConfig) {
+  const input = saveNode("INPUT", { name: "timezone" });
+  input.type = "text";
+  input.accountDirty = undefined;
+  const unsaved = { hidden: true };
+  const ctx = context(["effectiveConfig", "browserTimezone", "renderTimezone", "fillInput", "getPath"], {
+    rawConfig, status: { config: statusConfig || {} }, MCP_LISTEN: "127.0.0.1:8318",
+    Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: "Asia/Shanghai" }) }) },
+    document: { activeElement: null },
+    $: (id) => id === "settings" ? { elements: { timezone: input } } : id === "timezone-unsaved" ? unsaved : null,
+  });
+  const fill = () => { ctx.fillInput(input, ctx.effectiveConfig()); ctx.renderTimezone(); };
+  return { ctx, input, unsaved, fill };
+}
+
+test("without a saved time zone the field shows the browser's, marked as not saved", () => {
+  const { ctx, input, unsaved, fill } = timezoneContext({}, { timezone: "" });
+  fill();
+  assert.equal(input.value, "Asia/Shanghai");
+  assert.equal(unsaved.hidden, false);
+  // The field being edited, a draft or a failed value is left alone.
+  input.value = "";
+  ctx.document.activeElement = input;
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  ctx.document.activeElement = null;
+  input.settingsDirty = true;
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  input.settingsDirty = false;
+  input.setAttribute("aria-invalid", "true");
+  ctx.renderTimezone();
+  assert.equal(input.value, "");
+  input.removeAttribute("aria-invalid");
+  // The saved name shows without the mark, whatever the status reports.
+  ctx.rawConfig.timezone = "Europe/Berlin";
+  fill();
+  assert.equal(input.value, "Europe/Berlin");
+  assert.equal(unsaved.hidden, true);
+  // A browser that reports no time zone leaves the field empty and unmarked.
+  const none = timezoneContext({});
+  none.ctx.Intl = { DateTimeFormat: () => { throw new Error("no Intl"); } };
+  none.fill();
+  assert.equal(none.input.value, "");
+  assert.equal(none.unsaved.hidden, true);
+  // Filling the field writes nothing: the page has no save in that path.
+  const render = source.match(/  function renderTimezone\([^]*?\n  }/)[0];
+  assert.doesNotMatch(render, /saveField|patchConfig|api\(/);
+});
+
+test("the time zone datalist lists the browser's names, or none to type in", () => {
+  const ctx = context(["timezoneOptions"]);
+  ctx.Intl = { supportedValuesOf: (kind) => { assert.equal(kind, "timeZone"); return ["Asia/Shanghai", "Europe/Berlin"]; } };
+  assert.deepEqual(plain(ctx.timezoneOptions()), ["Asia/Shanghai", "Europe/Berlin", "UTC"]);
+  ctx.Intl = { supportedValuesOf: () => ["UTC", "Asia/Tokyo"] };
+  assert.deepEqual(plain(ctx.timezoneOptions()), ["UTC", "Asia/Tokyo"]);
+  ctx.Intl = {};
+  assert.deepEqual(plain(ctx.timezoneOptions()), []);
+  ctx.Intl = { supportedValuesOf: () => { throw new RangeError("unsupported"); } };
+  assert.deepEqual(plain(ctx.timezoneOptions()), []);
+  const html = pageHtml();
+  assert.match(html, /<input name="timezone" type="text" list="timezone-options"/);
+  assert.match(html, /<datalist id="timezone-options"><\/datalist>/);
+  assert.match(source, /timezoneOptions\(\)\.forEach\(function \(name\) \{ \$\("timezone-options"\)\.appendChild\(el\("option", \{ value: name \}\)\); \}\);/);
+});
+
+function timezoneSaveContext(reply) {
+  const heading = saveNode("H2");
+  const section = { tagName: "SECTION", querySelector: (selector) => { assert.equal(selector, ".card-title"); return heading; } };
+  const input = saveNode("INPUT", { name: "timezone" });
+  input.type = "text";
+  input.closest = (selector) => selector === ".settings-section" ? section : null;
+  const sent = [], refilled = [];
+  const ctx = stateContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "patchConfig", "api"], {
+    rawConfig: {}, status: { config: {} }, saveQueue: Promise.resolve(), savedTokens: [],
+    THRESHOLDS: ["notice_threshold", "low_threshold", "critical_threshold"],
+    CONFIG_API: "api/config", key: "", PAGE_TOKEN: "", askForKey: () => {}, setTimeout, clearTimeout,
+    newConfigToken: () => "0123456789abcdef",
+    $: () => ({ elements: [input] }),
+    fetch: async (p, opts) => { sent.push(JSON.parse(opts.body)); return reply(JSON.parse(opts.body)); },
+    showApplied: (say) => { say("saved", "applied"); return Promise.resolve(true); },
+    refillSaved: (intent) => refilled.push(intent),
+    loadConfig: async () => { Object.assign(ctx.rawConfig, { timezone: sent.at(-1).timezone }); },
+  });
+  return { ctx, heading, input, sent, refilled };
+}
+
+test("saving the filled-in time zone writes it to the config", async () => {
+  const { ctx, heading, input, sent, refilled } = timezoneSaveContext(() => ({ status: 200, ok: true, json: async () => ({}) }));
+  // The browser's time zone shown in the field, saved with the button.
+  input.value = "Asia/Shanghai";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [{ timezone: "Asia/Shanghai", config_token: "0123456789abcdef" }]);
+  assert.equal(ctx.rawConfig.timezone, "Asia/Shanghai");
+  assert.equal(heading.textContent, "applied");
+  assert.equal(refilled.length, 1);
+  assert.match(source, /\$\("timezone-save"\)\.addEventListener\("click", function \(\) \{ saveField\(\{ target: \$\("settings"\)\.elements\.timezone \}\); \}\);/);
+});
+
+test("saving an empty time zone writes an empty string, which leaves it unset", async () => {
+  const { ctx, input, sent } = timezoneSaveContext(() => ({ status: 200, ok: true, json: async () => ({}) }));
+  ctx.rawConfig.timezone = "Asia/Shanghai";
+  input.value = "  ";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  await new Promise((resolve) => setImmediate(resolve));
+  // internal/config treats "" as no timezone and does not reject it.
+  assert.deepEqual(sent, [{ timezone: "", config_token: "0123456789abcdef" }]);
+});
+
+test("a time zone the plugin rejects shows its 400 error as a save failure", async () => {
+  const error = 'unknown time zone "Mars/Olympus"';
+  const { ctx, heading, input, sent } = timezoneSaveContext(() => ({ status: 400, ok: false, json: async () => ({ error }) }));
+  input.value = " Mars/Olympus ";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  assert.equal(sent[0].timezone, "Mars/Olympus");
+  assert.equal(ctx.rawConfig.timezone, undefined);
+  assert.equal(heading.textContent, "✕ Save failed✕ timezone save failed: " + error);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(input.value, " Mars/Olympus ");
+});
+
+test("the ignition switch shows the saved config and assumes no default", () => {
+  const effective = (raw, statusEnabled) => {
+    const { ctx } = timezoneContext(raw, { ignition: { enabled: statusEnabled, start_hour: 7 } });
+    return plain(ctx.effectiveConfig().ignition);
+  };
+  assert.deepEqual(effective({ ignition: { enabled: false } }, true), { enabled: false, start_hour: 7 });
+  assert.deepEqual(effective({ ignition: { enabled: true } }, false), { enabled: true, start_hour: 7 });
+  // A config file without the key shows what the plugin applies.
+  assert.equal(effective({}, false).enabled, false);
+  assert.equal(effective({ ignition: {} }, true).enabled, true);
+  const html = pageHtml();
+  assert.match(html, /<input name="ignition\.enabled" type="checkbox">/);
+  // The hint about the time zone and Magpie's warm-up sits by the switch.
+  assert.match(html, /name="ignition\.enabled"[^\n]*\n\s*<\/div>\n\s*<p class="hint" id="ignition-enable-hint" data-i18n="ignition_enable_hint">/);
+  for (const language of ["zh", "en"]) {
+    const dictionary = source.match(new RegExp("\\n    " + language + ": \\{[^]*?\\n    \\}"))[0];
+    for (const name of ["ignition_enable_hint", "timezone", "timezone_name", "timezone_save", "timezone_unsaved", "timezone_hint"]) {
+      assert.match(dictionary, new RegExp("\\b" + name + ": \""), language + " " + name);
+    }
+  }
+  assert.match(source, /ignition_enable_hint: "开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。"/);
+});
+
+test("no text refers to CPA settings the Magpie plugin does not have", () => {
+  const html = pageHtml();
+  for (const text of [source, html]) {
+    assert.doesNotMatch(text, /ignition_models_hint|no_models_key|API key|模型列表 API|管理中心|Management (key|Center)|CLIProxy|lock_error/i);
+  }
 });

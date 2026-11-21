@@ -11,38 +11,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
 )
 
 // streamHost blocks reads until a chunk arrives or Close cancels the upstream.
 // This models the host bridge rather than timing out only the caller's wait.
 type streamHost struct {
 	*fakeHost
-	chunks    chan pluginapi.HostModelStreamReadResponse
+	chunks    chan host.StreamChunk
 	closed    chan struct{}
 	reading   chan struct{}
 	closeOnce sync.Once
 	mu        sync.Mutex
 	closes    int
 	calls     int
-	opened    pluginapi.HostModelStreamResponse
+	opened    host.ModelStream
 	openErr   error
 	open      func()
 	messages  []string
-	lineMode  bool
 }
 
 func newStreamHost() *streamHost {
 	return &streamHost{
-		fakeHost: &fakeHost{}, chunks: make(chan pluginapi.HostModelStreamReadResponse, 10),
+		fakeHost: &fakeHost{}, chunks: make(chan host.StreamChunk, 10),
 		closed: make(chan struct{}), reading: make(chan struct{}, 10),
-		opened: pluginapi.HostModelStreamResponse{StatusCode: 200, StreamID: "stream-1", Headers: http.Header{"X-Test": {"quota"}}},
+		opened: host.ModelStream{StatusCode: 200, ID: "stream-1", Header: http.Header{"X-Test": {"quota"}}},
 	}
 }
 
-func (h *streamHost) ModelExecuteStream(req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelStreamResponse, error) {
+func (h *streamHost) OpenModelStream(_ context.Context, req host.ModelRequest) (host.ModelStream, error) {
 	h.calls++
 	if h.open != nil {
 		h.open()
@@ -50,7 +48,7 @@ func (h *streamHost) ModelExecuteStream(req pluginapi.HostModelExecutionRequest)
 	return h.opened, h.openErr
 }
 
-func (h *streamHost) ModelStreamRead(string) (pluginapi.HostModelStreamReadResponse, error) {
+func (h *streamHost) ReadModelStream(string) (host.StreamChunk, error) {
 	select {
 	case h.reading <- struct{}{}:
 	default:
@@ -59,11 +57,11 @@ func (h *streamHost) ModelStreamRead(string) (pluginapi.HostModelStreamReadRespo
 	case chunk := <-h.chunks:
 		return chunk, nil
 	case <-h.closed:
-		return pluginapi.HostModelStreamReadResponse{}, errors.New("upstream canceled SECRET")
+		return host.StreamChunk{}, errors.New("upstream canceled SECRET")
 	}
 }
 
-func (h *streamHost) ModelStreamClose(string) error {
+func (h *streamHost) CloseModelStream(string) error {
 	h.mu.Lock()
 	h.closes++
 	h.mu.Unlock()
@@ -76,14 +74,10 @@ func (h *streamHost) Log(_ string, message string, _ map[string]any) {
 }
 
 func (h *streamHost) raw(s string) {
-	h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(s)}
+	h.chunks <- host.StreamChunk{Payload: []byte(s)}
 }
 
 func (h *streamHost) event(s string) {
-	if h.lineMode {
-		h.raw("data: " + s)
-		return
-	}
 	h.raw("data: " + s + "\n\n")
 }
 
@@ -91,8 +85,8 @@ func streamTarget() target {
 	return target{group: GroupView{Provider: "codex", AuthIndex: "42"}}
 }
 
-func streamRequest() pluginapi.HostModelExecutionRequest {
-	return pluginapi.HostModelExecutionRequest{Model: "test-model", Stream: true, ExitProtocol: "openai-response", Body: []byte("SECRET request"), AuthID: "SECRET credential"}
+func streamRequest() host.ModelRequest {
+	return host.ModelRequest{Model: "test-model", Protocol: "openai-response", Body: []byte("SECRET request"), Account: "SECRET credential"}
 }
 
 func streamRecord(t *testing.T, h *streamHost) map[string]any {
@@ -116,8 +110,7 @@ func streamRecord(t *testing.T, h *streamHost) map[string]any {
 
 func TestIgnitionStreamWatchdogClosesBlockedRead(t *testing.T) {
 	h := newStreamHost()
-	h.lineMode = true
-	h.raw("event: response.output_text.delta")
+	h.raw("event: response.output_text.delta\n")
 	h.event(`{"type":"response.output_text.delta","delta":"OK"}`)
 	e := New(Options{Host: h})
 	started := time.Now()
@@ -126,7 +119,7 @@ func TestIgnitionStreamWatchdogClosesBlockedRead(t *testing.T) {
 	if err != nil || elapsed < 1900*time.Millisecond || elapsed > 5*time.Second || h.closes != 1 {
 		t.Fatalf("err=%v elapsed=%s closes=%d", err, elapsed, h.closes)
 	}
-	if resp.Headers.Get("X-Test") != "quota" {
+	if resp.Header.Get("X-Test") != "quota" {
 		t.Fatal("lost headers for quota confirmation")
 	}
 	r := streamRecord(t, h)
@@ -158,25 +151,28 @@ func TestIgnitionStreamNaturalEndAndLog(t *testing.T) {
 	}
 }
 
-func TestIgnitionCodexScannerLines(t *testing.T) {
-	for _, metadata := range []bool{false, true} {
-		t.Run(strconv.FormatBool(metadata), func(t *testing.T) {
+// The gateway sends Responses events as standard SSE with event lines and
+// keepalive comments, split anywhere.
+func TestIgnitionResponsesSSE(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(strconv.FormatBool(split), func(t *testing.T) {
 			h := newStreamHost()
-			h.lineMode = true
-			for _, event := range []struct{ name, data string }{
-				{"response.created", `{"type":"response.created"}`},
-				{"response.output_text.delta", `{"type":"response.output_text.delta","delta":"OK"}`},
-				{"response.completed", `{"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":3}}}`},
-			} {
-				if metadata {
-					h.raw("event: " + event.name)
+			wire := ": keepalive\n\n" +
+				"event: response.created\ndata: {\"type\":\"response.created\"}\n\n" +
+				"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n" +
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}}\n\n"
+			// More chunks than the channel holds: feed them as they are read.
+			go func() {
+				rest := wire
+				if split {
+					for len(rest) > 7 {
+						h.raw(rest[:7])
+						rest = rest[7:]
+					}
 				}
-				h.event(event.data)
-			}
-			if metadata {
-				h.raw(": keepalive")
-			}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+				h.raw(rest)
+				h.chunks <- host.StreamChunk{Done: true}
+			}()
 			e := New(Options{Host: h})
 			_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
 			if err != nil || h.closes != 1 {
@@ -190,15 +186,14 @@ func TestIgnitionCodexScannerLines(t *testing.T) {
 	}
 }
 
-func TestIgnitionCodexScannerFailures(t *testing.T) {
+func TestIgnitionResponsesFailures(t *testing.T) {
 	for _, typ := range []string{"response.failed", "response.incomplete", "response.created", "response.output_text.delta"} {
 		t.Run(typ, func(t *testing.T) {
 			h := newStreamHost()
-			h.lineMode = true
-			h.raw(": keepalive")
-			h.raw("event: " + typ)
+			h.raw(": keepalive\n\n")
+			h.raw("event: " + typ + "\n")
 			h.event(`{"type":"` + typ + `","delta":"OK"}`)
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Done: true}
 			e := New(Options{Host: h})
 			_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
 			if err == nil || h.closes != 1 {
@@ -215,32 +210,38 @@ func TestIgnitionCodexScannerFailures(t *testing.T) {
 	}
 }
 
-func TestIgnitionHostChatJSONChunks(t *testing.T) {
-	for _, cutoff := range []bool{false, true} {
+// The gateway's Chat stream is SSE ending in data: [DONE]; a stream that
+// ends without it still ends at EOF after its finish_reason.
+func TestIgnitionChatSSE(t *testing.T) {
+	for _, mode := range []string{"done", "eof", "cutoff"} {
 		h := newStreamHost()
-		h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}`)}
-		if !cutoff {
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+		h.event(`{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}`)
+		if mode != "cutoff" {
+			h.event(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+			h.event(`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
+			if mode == "done" {
+				h.event(`[DONE]`)
+			} else {
+				h.chunks <- host.StreamChunk{Done: true}
+			}
 		}
 		e := New(Options{Host: h})
 		req := streamRequest()
-		req.EntryProtocol, req.ExitProtocol = "openai", "openai"
+		req.Protocol = "openai"
 		_, err := e.executeStream(context.Background(), streamTarget(), req, 20*time.Millisecond)
 		if err != nil || h.closes != 1 {
-			t.Fatalf("cutoff=%v err=%v closes=%d", cutoff, err, h.closes)
+			t.Fatalf("%s: err=%v closes=%d", mode, err, h.closes)
 		}
 		r := streamRecord(t, h)
 		if r["reply"] != "OK" || r["first_output_wait_ms"] == nil {
 			t.Fatal(r)
 		}
-		if cutoff {
+		if mode == "cutoff" {
 			if r["end_reason"] != "output_timeout" || r["usage_completeness"] != "missing" {
 				t.Fatal(r)
 			}
 		} else if r["end_reason"] != "completed" || r["usage_completeness"] != "partial" {
-			t.Fatal(r)
+			t.Fatal(mode, r)
 		}
 	}
 }
@@ -268,16 +269,12 @@ func TestIgnitionStreamUsageProvenance(t *testing.T) {
 		t.Run(tc.provider+"/"+tc.chunks[0], func(t *testing.T) {
 			h := newStreamHost()
 			for _, chunk := range tc.chunks {
-				if tc.protocol == "openai" {
-					h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(chunk)}
-				} else {
-					h.event(chunk)
-				}
+				h.event(chunk)
 			}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Done: true}
 			e := New(Options{Host: h})
 			target, req := streamTarget(), streamRequest()
-			target.group.Provider, req.ExitProtocol = tc.provider, tc.protocol
+			target.group.Provider, req.Protocol = tc.provider, tc.protocol
 			_, err := e.executeStream(context.Background(), target, req, ignitionOutputWindow)
 			if err != nil || h.closes != 1 || len(h.messages) != 1 {
 				t.Fatalf("err=%v closes=%d logs=%v", err, h.closes, h.messages)
@@ -286,7 +283,7 @@ func TestIgnitionStreamUsageProvenance(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(h.messages[0], "Lamplighter ignition ")), &record); err != nil {
 				t.Fatal(err)
 			}
-			if record["usage_completeness"] != tc.completeness || record["usage_source"] != "cpa_host" || record["end_reason"] != "completed" {
+			if record["usage_completeness"] != tc.completeness || record["usage_source"] != "magpie_gateway" || record["end_reason"] != "completed" {
 				t.Fatal(record)
 			}
 		})
@@ -323,7 +320,7 @@ func TestIgnitionStreamStopAndStartupCancellation(t *testing.T) {
 			case "before call":
 				close(e.stopCh)
 			case "during startup":
-				// Cancellation cannot reach CPA until the startup call returns.
+				// Stopping while the request starts cancels it.
 				h.open = func() { close(e.stopCh) }
 			case "blocked read":
 				stopperDone = make(chan struct{})
@@ -360,16 +357,16 @@ func TestIgnitionStreamErrorsAndPartialUsage(t *testing.T) {
 			h := newStreamHost()
 			switch mode {
 			case "startup":
-				h.opened = pluginapi.HostModelStreamResponse{}
-				h.openErr = &host.Error{Code: "auth_not_found", Message: "SECRET", Status: 503}
+				h.opened = host.ModelStream{}
+				h.openErr = &host.Error{Code: "gateway_http_error", Message: "SECRET", Status: 503}
 			case "http":
 				h.opened.StatusCode = 400
 			case "error":
 				h.event(`{"error":{"message":"SECRET"}}`)
 			case "read terminal error":
-				h.chunks <- pluginapi.HostModelStreamReadResponse{Error: "SECRET", Done: true}
+				h.chunks <- host.StreamChunk{Error: "SECRET", Done: true}
 			case "eof":
-				h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+				h.chunks <- host.StreamChunk{Done: true}
 			case "invalid":
 				h.event(`SECRET invalid json`)
 			case "partial cutoff":
@@ -489,19 +486,19 @@ func TestStreamWatchdogOwnershipAndPanic(t *testing.T) {
 
 type cleanupStreamHost struct {
 	*streamHost
-	read    func() (pluginapi.HostModelStreamReadResponse, error)
+	read    func() (host.StreamChunk, error)
 	cleanup func() error
 }
 
-func (h *cleanupStreamHost) ModelStreamRead(id string) (pluginapi.HostModelStreamReadResponse, error) {
+func (h *cleanupStreamHost) ReadModelStream(id string) (host.StreamChunk, error) {
 	if h.read != nil {
 		return h.read()
 	}
-	return h.streamHost.ModelStreamRead(id)
+	return h.streamHost.ReadModelStream(id)
 }
 
-func (h *cleanupStreamHost) ModelStreamClose(id string) error {
-	_ = h.streamHost.ModelStreamClose(id)
+func (h *cleanupStreamHost) CloseModelStream(id string) error {
+	_ = h.streamHost.CloseModelStream(id)
 	return h.cleanup()
 }
 
@@ -518,14 +515,14 @@ func TestIgnitionStreamCleanupPriority(t *testing.T) {
 				case "output_timeout":
 					h.event(`{"type":"response.output_text.delta","delta":"OK"}`)
 				case "read_error", "canceled":
-					h.read = func() (pluginapi.HostModelStreamReadResponse, error) {
+					h.read = func() (host.StreamChunk, error) {
 						if owner == "canceled" {
 							cancel()
 							// Block until the watchdog closes upstream, ensuring
 							// cancellation owns the terminal result first.
 							<-h.closed
 						}
-						return pluginapi.HostModelStreamReadResponse{}, errors.New("SECRET")
+						return host.StreamChunk{}, errors.New("SECRET")
 					}
 				}
 				h.cleanup = func() error {
@@ -558,7 +555,7 @@ func TestIgnitionStreamCleanupPriority(t *testing.T) {
 
 func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 	for _, channel := range []string{"host", "error", "response.failed"} {
-		for _, failure := range []string{"rate_limit_exceeded", "authentication_error", "model_not_found", "normalized_authentication", "explicit_authentication_status", "usage_limit_reached", "suspended"} {
+		for _, failure := range []string{"rate_limit_exceeded", "authentication_error", "model_not_found", "magpie_rate_limit", "explicit_authentication_status", "usage_limit_reached", "suspended"} {
 			t.Run(channel+"/"+failure, func(t *testing.T) {
 				c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 				base := claudeIgnitionHost(c, nil)
@@ -566,7 +563,7 @@ func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 				e.poll(context.Background(), e.config(), c.t, "", false)
 				h := newStreamHost()
 				h.fakeHost = base
-				h.opened.Headers = http.Header{
+				h.opened.Header = http.Header{
 					"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"},
 					"Anthropic-Ratelimit-Unified-5h-Reset":       {strconv.FormatInt(c.t.Add(5*time.Hour).Unix(), 10)},
 				}
@@ -582,10 +579,12 @@ func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 					h.event(`{"type":"message_start"}`)
 					detail := `{"code":"` + failure + `","type":"` + failure + `","message":"SECRET"}`
 					switch failure {
-					case "normalized_authentication":
-						detail = `{"code":"auth_unavailable","type":"authentication_error","message":"SECRET"}`
+					case "magpie_rate_limit":
+						// Magpie's stream error after its keepalive 200: the
+						// status only in the fixed suffix of the message.
+						detail = `{"type":"api_error","message":"SECRET upstream said no (429: you can retry your request)"}`
 					case "explicit_authentication_status":
-						detail = `{"status":401,"code":"auth_unavailable","message":"SECRET"}`
+						detail = `{"status":401,"message":"SECRET"}`
 					case "usage_limit_reached":
 						detail = `{"type":"usage_limit_reached","message":"SECRET"}`
 					case "suspended":
@@ -593,7 +592,7 @@ func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 					}
 					switch channel {
 					case "host":
-						h.chunks <- pluginapi.HostModelStreamReadResponse{Error: `{"error":` + detail + `}`, Done: true}
+						h.chunks <- host.StreamChunk{Error: `{"error":` + detail + `}`, Done: true}
 					case "error":
 						h.event(`{"type":"error","error":` + detail + `}`)
 					case "response.failed":
@@ -644,7 +643,7 @@ func TestIgnitionCutoffConfirmsQuotaWindow(t *testing.T) {
 	e.poll(context.Background(), e.config(), c.t, "", false)
 	h := newStreamHost()
 	h.fakeHost = base
-	h.opened.Headers = http.Header{
+	h.opened.Header = http.Header{
 		"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"},
 		"Anthropic-Ratelimit-Unified-5h-Reset":       {strconv.FormatInt(c.t.Add(5*time.Hour).Unix(), 10)},
 	}
@@ -663,7 +662,7 @@ func TestIgnitionCutoffConfirmsQuotaWindow(t *testing.T) {
 		t.Fatalf("err=%v calls=%d closes=%d", err, h.calls, h.closes)
 	}
 	ts := e.state.Target(chosen.group.Key)
-	if ts.LastSuccessEpoch == 0 || ts.ConsecutiveFailures != 0 || ts.CircuitOpenUntilEpoch != 0 || !e.confirmed(chosen.group.Key, c.t, c.t) {
+	if ts.LastSuccessEpoch == 0 || ts.ConsecutiveFailures != 0 || ts.CircuitOpenUntilEpoch != 0 || !e.confirmed(chosen.group.Key, ignitionBase{start: c.t}, c.t) {
 		t.Fatalf("quota window not confirmed: %+v", ts)
 	}
 	if ev := e.events[len(e.events)-1]; ev.Kind != "ignite_manual" || ev.Params["model"] == "" {
@@ -709,5 +708,42 @@ func TestIgnitionCutoffDoesNotFallbackOrConfirmFromBody(t *testing.T) {
 	}
 	if e.state.Target(chosen.group.Key).LastSuccessEpoch != 0 {
 		t.Fatal("body incorrectly established ignition success")
+	}
+}
+
+// A stream that sends nothing but keepalives ends at ignitionStreamTimeout,
+// and its request is cancelled.
+func TestIgnitionStreamTimeout(t *testing.T) {
+	old := ignitionStreamTimeout
+	ignitionStreamTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { ignitionStreamTimeout = old })
+	h := newStreamHost()
+	h.raw(": keepalive\n\n")
+	e := New(Options{Host: h})
+	_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
+	if !errors.Is(err, errIgnitionTimeout) || h.closes != 1 {
+		t.Fatalf("err=%v closes=%d", err, h.closes)
+	}
+	if ignite.Classify(err) != ignite.Transient {
+		t.Fatal("a timeout must be retried, not paused")
+	}
+	if r := streamRecord(t, h); r["end_reason"] != "timeout" {
+		t.Fatal(r)
+	}
+}
+
+// The gateway's error status arrives with OpenModelStream's error.
+func TestIgnitionStreamOpenHTTPError(t *testing.T) {
+	h := newStreamHost()
+	h.opened = host.ModelStream{StatusCode: 429}
+	h.openErr = &host.Error{Code: "gateway_http_error", Message: "SECRET", Status: 429}
+	e := New(Options{Host: h})
+	_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
+	if host.StatusOf(err) != 429 || h.closes != 0 {
+		t.Fatalf("err=%v closes=%d", err, h.closes)
+	}
+	r := streamRecord(t, h)
+	if r["end_reason"] != "http_error" || r["status_code"] != float64(429) {
+		t.Fatal(r)
 	}
 }

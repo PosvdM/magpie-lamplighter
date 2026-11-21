@@ -25,7 +25,7 @@ func TestCodexPlansAreWeightedByPrice(t *testing.T) {
 	if got := PlanOf("codex", ""); got != (Plan{Weight: 1}) {
 		t.Errorf("unknown plan: %+v", got)
 	}
-	if got := PlanOf("kimi", "pro"); got != (Plan{Weight: 1}) {
+	if got := PlanOf("unknown", "pro"); got != (Plan{Weight: 1}) {
 		t.Errorf("provider without plans: %+v", got)
 	}
 }

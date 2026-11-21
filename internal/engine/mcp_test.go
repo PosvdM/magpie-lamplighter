@@ -9,19 +9,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 func TestMCPDTOsAndTools(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, _ := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
 	cfg := e.config()
 	cfg.MCPKey = "secret-mcp-token"
-	cfg.ModelsAPIKey = "secret-models-token"
-	cfg.AccountWeights = map[string]float64{"codex-a.json": 5}
+	cfg.AccountWeights = map[string]float64{"1": 5}
 	e.Configure(cfg, nil)
 	e.creds["1"].Note = "Primary\nprivate note"
 	e.creds["2"].Note = "Secondary"
@@ -149,7 +148,7 @@ func TestQuotaEventsIndependentOfNotifications(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, _ := newTestEngine(t, standardHost(c), c)
 	cfg := e.config()
-	if _, err := e.loadCreds(cfg); err != nil {
+	if _, err := e.loadCreds(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	e.creds["1"].Note = "Primary"
@@ -189,7 +188,7 @@ func TestActivePoolDisappearanceAndPassiveTombstone(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, sender := newTestEngine(t, standardHost(c), c)
 	cfg := e.config()
-	if _, err := e.loadCreds(cfg); err != nil {
+	if _, err := e.loadCreds(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	raw := []quota.RawGroup{{Key: "gpt", SourceLabel: "GPT", Windows: []quota.Window{{ID: quota.WindowFiveHour, Label: "5h", Remaining: 0, Reset: c.t.Add(time.Hour)}}}}
@@ -260,11 +259,13 @@ func TestMCPRefreshFailureIsSanitized(t *testing.T) {
 		cmd := <-e.cmdCh
 		cmd.reply <- commandReply{err: errors.New("secret token /private/auth.json")}
 	}()
-	_, err := b.refresh(context.Background(), nil)
-	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "/private") {
-		t.Fatalf("refresh error %v", err)
-	}
 	value, err := b.refresh(context.Background(), nil)
+	result, _ := value.(map[string]any)
+	text, _ := result["error"].(string)
+	if err != nil || result["ok"] != false || text == "" || strings.Contains(text, "secret") || strings.Contains(text, "/private") {
+		t.Fatalf("refresh result %#v, %v", value, err)
+	}
+	value, err = b.refresh(context.Background(), nil)
 	if err != nil || value.(map[string]any)["retry_after_seconds"] != 60 {
 		t.Fatalf("failed refresh must consume the limit: %#v, %v", value, err)
 	}

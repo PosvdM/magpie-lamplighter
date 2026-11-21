@@ -10,8 +10,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
 
 const replyLimit = 4096
@@ -19,17 +19,68 @@ const streamFrameLimit = 1 << 20
 
 // Only protocol identifiers in this allowlist may reach persisted errors.
 // Never classify or retain free-form provider messages: they can contain secrets.
+//
+// "rate_limit" is Claude Code's name of a rate-limited turn, which Magpie's
+// Claude Code bridge writes as the stream error's code (internal/gateway
+// claude_subscription.go, the error kind of the failed turn).
 var streamErrorCodes = map[string]int{
 	"rate_limit_error": 429, "rate_limit_exceeded": 429, "insufficient_quota": 429, "quota_exceeded": 429,
-	"usage_limit_reached":  429,
+	"usage_limit_reached": 429, "rate_limit": 429,
 	"authentication_error": 401, "invalid_api_key": 401, "unauthorized": 401,
 	"permission_error": 403, "permission_denied": 403, "forbidden": 403,
 	"not_found_error": 404, "not_found": 404, "model_not_found": 404,
 	"invalid_request_error": 400, "invalid_request": 400, "invalid_model": 400,
 	"unsupported_model": 400, "model_not_supported": 400,
-	"overloaded_error": 529, "server_error": 500, "api_error": 500, "internal_server_error": 500,
-	"auth_not_found": 0, "auth_unavailable": 0,
+	"overloaded_error": 529, "server_is_overloaded": 529,
+	"server_error": 500, "api_error": 500, "internal_server_error": 500,
 }
+
+// magpieRetryStatus matches the fixed suffix Magpie's gateway appends to the
+// message of a stream error whose status it can no longer send, when the
+// status is 408, 429 or 5xx (internal/gateway saysPassing): "(429: you can
+// retry your request)". Only this anchored marker is read from a message.
+var magpieRetryStatus = regexp.MustCompile(`\(([0-9]{3}): you can retry your request\)\s*$`)
+
+// genericStreamCodes are the types and codes Magpie's encoders write when
+// the upstream error named none (internal/gateway: the Claude and Chat
+// encoders' api_error, the Responses encoder's server_error). They tell
+// nothing about the status, but mark an error Magpie wrote; an error
+// without either is not read for words.
+var genericStreamCodes = map[string]bool{"": true, "api_error": true, "server_error": true}
+
+// magpiePassingWords are the words for which Magpie's saysPassing leaves out
+// the status suffix, because the message already says the error passes
+// (passingSaid). Only these decide a status, and only for an error with a
+// generic code; the message itself is dropped. Other passing words, such
+// as "timed out" or "server error", keep the generic code's 500.
+var magpiePassingWords = []struct {
+	pattern *regexp.Regexp
+	status  int
+}{
+	{regexp.MustCompile(`(?i)\b429\b|rate.?limit|too many requests`), 429},
+	{regexp.MustCompile(`(?i)overloaded`), 529},
+}
+
+// claudeUsageLimit matches Claude Code's fixed wording of a used-up
+// subscription, "Claude AI usage limit reached|<unix reset>", which
+// Magpie's Claude Code bridge passes on as the message of a stream error
+// without a status when the turn fails after the stream started. Magpie
+// reads the same marker for the reset (internal/gateway routing.go,
+// resetsWords). Only the marker is read; the message is dropped.
+var claudeUsageLimit = regexp.MustCompile(`(?i)\busage limit reached\|[0-9]{10}\b`)
+
+// claudeUsageLimitBare matches Claude Code's wording without the reset,
+// when it is the whole message: "Claude AI usage limit reached". It counts
+// only for an error with a generic code (genericStreamCodes), as Magpie's
+// bridge writes it.
+var claudeUsageLimitBare = regexp.MustCompile(`(?i)^\s*Claude AI usage limit reached[.!]?\s*$`)
+
+// magpieHeldOpening matches the opening of Magpie's cappedError: every
+// account that could take the request is held at a cap set in Magpie, or
+// set not to spend beyond its allowance. It is Magpie's own answer, no
+// rate limit of the vendor; a vendor's "usage limit reached|<unix>" does
+// not match.
+var magpieHeldOpening = regexp.MustCompile(`^(?:X-Magpie-Account: )?(usage cap reached|spend cap reached|usage limit reached): every (?:account|key) `)
 
 // streamAppealURL allowlists the appeal forms of suspended accounts kept from
 // a stream error, such as Google's https://forms.gle/... link.
@@ -95,7 +146,40 @@ func streamError(v map[string]any) error {
 			}
 		}
 	}
+	rawMessage := str(detail["message"])
+	if status == 0 {
+		if match := magpieRetryStatus.FindStringSubmatch(rawMessage); match != nil {
+			status = allowedStreamStatus(match[1])
+		}
+	}
+	// Magpie's own hold is read first: its "usage limit reached: every
+	// account" is no limit of the vendor.
+	held := magpieHeldOpening.FindStringSubmatch(rawMessage)
+	code, typ := str(detail["code"]), str(detail["type"])
+	generic := genericStreamCodes[code] && genericStreamCodes[typ] && code+typ != ""
+	if status == 0 && held == nil && (claudeUsageLimit.MatchString(rawMessage) || generic && claudeUsageLimitBare.MatchString(rawMessage)) {
+		status = 429
+	}
 	explicit := status
+	if held != nil {
+		// Worded like the pinned refusal before the headers, so that
+		// ignite.PinHeld and failure.Diagnose treat both alike.
+		if status == 0 {
+			status = 429
+		}
+		return &host.Error{Method: "model stream", Code: "magpie_account_held", Status: status,
+			Message: "ignition provider stream error: X-Magpie-Account: " + held[1] + ": every account is held by Magpie"}
+	}
+	// A status read from Magpie's passing words; see magpiePassingWords.
+	worded := 0
+	if status == 0 && generic {
+		for _, words := range magpiePassingWords {
+			if words.pattern.MatchString(rawMessage) {
+				status, worded = words.status, words.status
+				break
+			}
+		}
+	}
 	for _, key := range []string{"code", "type"} {
 		if status == 0 {
 			status = streamErrorCodes[str(detail[key])]
@@ -123,8 +207,11 @@ func streamError(v map[string]any) error {
 		}
 	}
 	message := "ignition provider stream error"
-	phrase := failure.SuspendedPhrase(str(detail["message"]))
-	if phrase != "" && (explicit == 0 || explicit == 400 || explicit == 401 || explicit == 403) {
+	// A phrase alone cannot tell a suspension from a rate limit or a
+	// passing error that mentions the account: those stay ordinary
+	// failures.
+	phrase := failure.SuspendedPhrase(rawMessage)
+	if phrase != "" && worded == 0 && (explicit == 0 || explicit == 400 || explicit == 401 || explicit == 403) {
 		message += ": " + phrase
 	} else {
 		phrase = ""
@@ -132,7 +219,7 @@ func streamError(v map[string]any) error {
 	switch {
 	case len(identifiers) == 0 && phrase == "":
 		appeal = ""
-	case explicit == 0:
+	case explicit == 0 && worded == 0:
 		// Without an explicit status, a suspension is sorted like
 		// Google's 403 rather than by its type: OpenAI sends
 		// account_deactivated as invalid_request_error, which would read
@@ -141,27 +228,21 @@ func streamError(v map[string]any) error {
 	}
 	for _, key := range []string{"code", "type"} {
 		value := str(detail[key])
-		// CPA also uses auth_unavailable for normalized upstream authentication
-		// failures. Do not let its local-cooldown marker override that failure.
-		if value == "auth_unavailable" && (status == 401 || str(detail["type"]) == "authentication_error") {
-			continue
-		}
 		if _, ok := streamErrorCodes[value]; ok {
 			identifiers = append(identifiers, value)
 		}
 	}
-	code := "provider_stream_error"
+	errCode := "provider_stream_error"
 	if len(identifiers) > 0 {
-		code = strings.Join(identifiers, "/")
+		errCode = strings.Join(identifiers, "/")
 	}
-	return &host.Error{Method: "host.model.stream_read", Code: code, Status: status, Message: message, AppealURL: appeal}
+	return &host.Error{Method: "model stream", Code: errCode, Status: status, Message: message, AppealURL: appeal}
 }
 
-// streamCapture parses CPA's translated chunks without retaining raw responses or
+// streamCapture parses the gateway's SSE body without retaining raw responses or
 // opaque reasoning. Only visible text is included in the bounded log reply.
 type streamCapture struct {
 	pending      []byte
-	byteStream   bool
 	eventData    []byte
 	reply        strings.Builder
 	replyChars   int
@@ -197,43 +278,11 @@ func (s *streamCapture) markOutput(v string) {
 	}
 }
 
-// feedChunk follows the model callback wire format. OpenAI chat chunks are
-// JSON objects; the public HTTP handler adds SSE framing and [DONE] later.
-// Claude always carries SSE bytes. Responses carries complete scanner lines
-// until a chunk with a newline identifies standard SSE bytes.
-func (s *streamCapture) feedChunk(protocol string, payload []byte) error {
-	if protocol == "openai-response" {
-		if bytes.IndexByte(payload, '\n') >= 0 {
-			s.byteStream = true
-		}
-		if !s.byteStream && len(s.pending) == 0 {
-			return s.scannerLine(payload)
-		}
-	}
-	if protocol != "openai" {
-		return s.feed(payload)
-	}
-	if len(payload) > streamFrameLimit {
-		return errors.New("ignition stream frame too large")
-	}
-	return s.event(bytes.TrimSpace(payload))
-}
-
-// scannerLine receives one whole line with its newline removed by CPA.
-// Complete data events dispatch immediately because empty lines are omitted.
-func (s *streamCapture) scannerLine(payload []byte) error {
-	if len(payload) > streamFrameLimit {
-		return errors.New("ignition stream frame too large")
-	}
-	if err := s.line(bytes.TrimSuffix(payload, []byte{'\r'})); err != nil {
-		return err
-	}
-	data := bytes.TrimSpace(s.eventData)
-	if json.Valid(data) || bytes.Equal(data, []byte("[DONE]")) {
-		s.eventData = nil
-		return s.event(data)
-	}
-	return nil
+// feedChunk takes the next bytes of the body. The gateway answers all three
+// protocols with standard SSE, split at any byte: Chat chunks as data lines
+// ending in data: [DONE], Claude and Responses as their events.
+func (s *streamCapture) feedChunk(_ string, payload []byte) error {
+	return s.feed(payload)
 }
 
 func (s *streamCapture) feed(payload []byte) error {
@@ -292,8 +341,9 @@ func (s *streamCapture) finish() error {
 	if err := s.line(nil); err != nil {
 		return err
 	}
-	// The host chat stream ends at EOF rather than an HTTP-layer [DONE].
-	// Wait for EOF so a separate final usage chunk is not discarded.
+	// A Chat stream that ends without [DONE] still ends at EOF after its
+	// finish_reason. Wait for EOF so a separate final usage chunk is not
+	// discarded.
 	if s.chatFinished {
 		s.terminal = true
 	}
@@ -363,8 +413,8 @@ func (s *streamCapture) event(data []byte) error {
 			}
 			s.text(str(object(d["function_call"])["arguments"]))
 		}
-		// CPA can synthesize missing Chat counters as zero or translate token
-		// categories. Field presence cannot establish upstream completeness.
+		// The gateway can synthesize missing Chat counters as zero or translate
+		// token categories. Field presence cannot establish upstream completeness.
 		s.recordUsage(v["usage"], false)
 	}
 	return nil
@@ -384,7 +434,7 @@ func (s *streamCapture) completeUsage(provider, protocol string) bool {
 	return native && s.usageFinal && input && output
 }
 
-// recordUsage keeps allowlisted counters supplied by the CPA host, which may
+// recordUsage keeps allowlisted counters supplied by the gateway, which may
 // include translated or synthesized values. The plugin does not infer totals
 // or turn absent values into zero.
 func (s *streamCapture) recordUsage(v any, final bool) {

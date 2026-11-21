@@ -1,9 +1,9 @@
 // Package engine runs Lamplighter's background loop: quota polling, passive
 // quota updates, ignition, notifications and history.
 //
-// One goroutine owns the state and performs all network work in order.
-// usage.handle and the management API talk to it through channels, so the
-// host callbacks never block on upstream requests.
+// One goroutine owns the state and performs all network work in order. The
+// HTTP API talks to it through channels, so a request never waits on an
+// upstream request it did not ask for.
 package engine
 
 import (
@@ -17,25 +17,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/egress"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/models"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/release"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/egress"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
+	"github.com/PosvdM/magpie-lamplighter/internal/models"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
+	"github.com/PosvdM/magpie-lamplighter/internal/release"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 const (
-	// startupDelay gives CPA time to load credentials and executors.
-	startupDelay       = 20 * time.Second
-	enabledCheckPeriod = 30 * time.Second
-	lockRetryPeriod    = 10 * time.Second
-	pruneInterval      = 6 * time.Hour
-	maxEvents          = 200
-	maxSleep           = time.Hour
-	restartDelay       = 30 * time.Second
+	// startupDelay gives Magpie's gateway time to start with the host.
+	startupDelay = 5 * time.Second
+	// keptInterval is how often Magpie's kept quotas are read as passive
+	// data. The read sends no request to a vendor.
+	keptInterval  = time.Minute
+	pruneInterval = 6 * time.Hour
+	maxEvents     = 200
+	maxSleep      = time.Hour
+	restartDelay  = 30 * time.Second
 	// The latest release is read again after releaseCheckPeriod, and after
 	// releaseRetryPeriod when a read fails.
 	releaseCheckPeriod = 6 * time.Hour
@@ -51,10 +54,14 @@ var confirmDelays = []time.Duration{5 * time.Second, 10 * time.Second, 15 * time
 
 // Options configures an Engine.
 type Options struct {
-	Host           host.Host
-	Version        string
-	DataDir        string
-	HostConfigPath string
+	Host    host.Host
+	Version string
+	// DataDir holds state.json and the history. The caller holds the
+	// instance lock of the directory before it creates the engine; see
+	// main.go.
+	DataDir string
+	// Doer sends the quota requests; nil uses package egress.
+	Doer quota.Doer
 	// Now and Sleep can be replaced in tests.
 	Now func() time.Time
 }
@@ -64,7 +71,6 @@ type Engine struct {
 	host           host.Host
 	version        string
 	defaultDataDir string
-	hostConfigPath string
 	now            func() time.Time
 
 	// mu guards the fields read by the management API and usage.handle.
@@ -78,9 +84,7 @@ type Engine struct {
 	configAppliedToken string
 	cfgErr             string
 	dataDir            string
-	enabled            bool
 	running            bool
-	lockErr            string
 	creds              map[string]*Cred
 	groups             map[string]*GroupView
 	targets            []TargetView
@@ -107,6 +111,8 @@ type Engine struct {
 	// credProblems is the reason of the credential problem per auth index,
 	// a copy of state.Credentials.
 	credProblems map[string]string
+	// admission is the automatic ignition request being opened; see admit.
+	admission *admission
 
 	// Owned by the loop goroutine.
 	state *store.State
@@ -118,6 +124,7 @@ type Engine struct {
 	history         *store.History
 	dirty           bool
 	egress          *egress.Egress
+	doer            quota.Doer
 	lister          *models.Lister
 	alerts          *notify.Alerts
 	passiveAt       map[string]time.Time
@@ -129,13 +136,12 @@ type Engine struct {
 	probed      map[string][]time.Time
 	lastSample  map[string]sampleMark
 	pendingSamp map[string]store.Record
-	lock        *store.Lock
-	// modelsSource is the CPA address and models key the model list is read
-	// from outside an ignition; modelsTried and modelsOK tell whether it was
-	// read and whether that worked.
-	modelsSource string
-	modelsTried  bool
-	modelsOK     bool
+	// modelsTried and modelsOK tell whether the model list was read outside
+	// an ignition and whether that worked.
+	modelsTried bool
+	modelsOK    bool
+	// keptAt is the time of the last kept quota applied per account.
+	keptAt map[string]time.Time
 	// refused holds when the provider refused a model for a quota group,
 	// keyed by group key and model.
 	refused map[string]time.Time
@@ -160,10 +166,9 @@ func New(opts Options) *Engine {
 		host:           opts.Host,
 		version:        opts.Version,
 		defaultDataDir: opts.DataDir,
-		hostConfigPath: opts.HostConfigPath,
 		now:            now,
 		cfg:            cfg,
-		enabled:        true,
+		keptAt:         map[string]time.Time{},
 		creds:          map[string]*Cred{},
 		groups:         map[string]*GroupView{},
 		plans:          map[string]string{},
@@ -180,12 +185,18 @@ func New(opts Options) *Engine {
 		stopCh:         make(chan struct{}),
 		doneCh:         make(chan struct{}),
 	}
-	e.egress = &egress.Egress{Host: opts.Host, Timeout: cfg.RequestTimeout()}
+	e.egress = &egress.Egress{Timeout: cfg.RequestTimeout()}
+	e.doer = opts.Doer
+	if e.doer == nil {
+		e.doer = e.egress
+	}
 	return e
 }
 
 // Configure 接收有效配置并返回实例内接收序号，后台循环负责运行时应用。
 // 解析失败时保留上一份配置、记录状态错误并返回 0。
+// 新配置在同一临界区内撤销已准入、尚未收到响应头的自动点火请求，
+// 前提是新配置下它的目标不再满足点火条件；见 admit。
 func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	e.mu.Lock()
 	if parseErr != nil {
@@ -197,6 +208,7 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	revision := e.cfgRevision
 	e.cfg = cfg
 	e.cfgErr = ""
+	e.withdrawLocked()
 	e.mu.Unlock()
 	e.wake()
 	return revision
@@ -261,17 +273,32 @@ func (e *Engine) Start() {
 	go e.supervise()
 }
 
-// Stop ends the loop and waits up to timeout for it to finish. A stopped
-// engine never starts again; CPA loads a new instance instead.
-func (e *Engine) Stop(timeout time.Duration) {
+// Cancel tells the loop to stop without waiting for it. From then on the
+// management operations return ErrStopped at once, those waiting for the
+// loop included, and a queued operation the loop has not started is
+// dropped; the network work of the operation in progress is canceled,
+// an automatic ignition request waiting for its response headers
+// included, and no further ignition request is admitted.
+// A stopped engine never starts again; the process exits after it.
+func (e *Engine) Cancel() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.stopped {
-		e.mu.Unlock()
 		return
 	}
 	e.stopped = true
-	started := e.started
 	close(e.stopCh)
+	if a := e.admission; a != nil {
+		a.cancel(context.Canceled)
+	}
+}
+
+// Stop cancels the loop (see Cancel) and waits up to timeout for it to
+// finish.
+func (e *Engine) Stop(timeout time.Duration) {
+	e.Cancel()
+	e.mu.Lock()
+	started := e.started
 	e.mu.Unlock()
 	if !started {
 		return
@@ -303,11 +330,11 @@ func (e *Engine) sleep(d time.Duration) bool {
 	}
 }
 
-// supervise restarts the loop after a panic. A panic inside the plugin would
-// otherwise terminate the whole CPA process.
+// supervise restarts the loop after a panic, which would otherwise end the
+// process and with it the page and the tools.
 func (e *Engine) supervise() {
 	defer close(e.doneCh)
-	defer e.releaseLock()
+	defer e.notRunning()
 	for !e.stopping() {
 		func() {
 			defer func() {
@@ -323,11 +350,8 @@ func (e *Engine) supervise() {
 	}
 }
 
-func (e *Engine) releaseLock() {
-	if e.lock != nil {
-		e.lock.Release()
-		e.lock = nil
-	}
+// notRunning reports the loop as stopped in the status API.
+func (e *Engine) notRunning() {
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
@@ -338,42 +362,14 @@ func (e *Engine) logf(level, format string, args ...any) {
 		return
 	}
 	defer func() { _ = recover() }()
-	e.host.Log(level, fmt.Sprintf(format, args...), nil)
+	e.host.Log(level, redact.Text(fmt.Sprintf(format, args...)), nil)
 }
 
-func (e *Engine) resolveDataDir(cfg config.Config) string {
-	if cfg.DataDir != "" {
-		return cfg.DataDir
-	}
+func (e *Engine) resolveDataDir(config.Config) string {
 	if e.defaultDataDir != "" {
 		return e.defaultDataDir
 	}
-	return filepath.Join("plugins", "data", config.PluginID)
-}
-
-// checkEnabled reads the CPA config file. When the file cannot be read, the
-// plugin assumes it is enabled.
-func (e *Engine) checkEnabled() bool {
-	enabled := true
-	if e.hostConfigPath != "" {
-		if raw, err := os.ReadFile(e.hostConfigPath); err == nil {
-			if value, err := config.PluginEnabled(raw); err == nil {
-				enabled = value
-			}
-		}
-	}
-	e.mu.Lock()
-	changed := e.enabled != enabled
-	e.enabled = enabled
-	e.mu.Unlock()
-	if changed {
-		if enabled {
-			e.logf("info", "插件已重新启用")
-		} else {
-			e.logf("info", "插件已在 CPA 配置中停用，暂停所有后台任务")
-		}
-	}
-	return enabled
+	return config.PluginID
 }
 
 func (e *Engine) openStores(cfg config.Config) error {
@@ -411,32 +407,6 @@ func (e *Engine) openStores(cfg config.Config) error {
 	return nil
 }
 
-func (e *Engine) acquireLock(dir string) bool {
-	for !e.stopping() {
-		lock, ok, err := store.TryLock(filepath.Join(dir, "instance.lock"))
-		if err != nil {
-			e.mu.Lock()
-			e.lockErr = err.Error()
-			e.mu.Unlock()
-			return false
-		}
-		if ok {
-			e.lock = lock
-			e.mu.Lock()
-			e.lockErr = ""
-			e.mu.Unlock()
-			return true
-		}
-		e.mu.Lock()
-		e.lockErr = "另一个 Lamplighter 实例仍在运行，等待它退出"
-		e.mu.Unlock()
-		if !e.sleep(lockRetryPeriod) {
-			return false
-		}
-	}
-	return false
-}
-
 func (e *Engine) saveState() {
 	if !e.dirty || e.stateFile == nil {
 		return
@@ -449,8 +419,8 @@ func (e *Engine) saveState() {
 }
 
 func (e *Engine) applyRuntimeConfig(cfg config.Config) {
-	e.egress.Timeout = cfg.RequestTimeout()
-	userAgent := "cpa-plugin-lamplighter/" + e.version
+	e.egress.SetTimeout(cfg.RequestTimeout())
+	userAgent := "magpie-lamplighter/" + e.version
 	client := &http.Client{Timeout: cfg.RequestTimeout()}
 	fanout := &notify.Fanout{
 		OnChannelError: func(msg notify.Message, err error) { e.notifyFailed("", msg, err) },
@@ -516,9 +486,6 @@ func (e *Engine) run() {
 		e.addEvent("error", "error", "", err.Error())
 		return
 	}
-	if !e.acquireLock(e.dataDir) {
-		return
-	}
 	e.mu.Lock()
 	e.running = true
 	e.mu.Unlock()
@@ -537,7 +504,7 @@ func (e *Engine) run() {
 	nextPoll := now
 	nextFeed := now
 	nextRelease := now
-	nextEnabledCheck := now
+	nextKept := now
 	nextPrune := now
 	appliedCfg := cfg
 	for !e.stopping() {
@@ -548,71 +515,64 @@ func (e *Engine) run() {
 			nextPoll = now
 		}
 		appliedCfg = cfg
-		if !now.Before(nextEnabledCheck) {
-			e.checkEnabled()
-			nextEnabledCheck = now.Add(enabledCheckPeriod)
+		e.drainUsage(ctx)
+		if cfg.CodexResetUpdates.Enabled && !now.Before(nextFeed) {
+			e.pollResetFeed(ctx, cfg)
+			nextFeed = alignedAfter(e.now(), time.Duration(cfg.CodexResetUpdates.PollSeconds)*time.Second)
 		}
-		e.mu.Lock()
-		enabled := e.enabled
-		e.mu.Unlock()
-
-		if enabled {
-			e.drainUsage(ctx)
-			if cfg.CodexResetUpdates.Enabled && !now.Before(nextFeed) {
-				e.pollResetFeed(ctx, cfg)
-				nextFeed = alignedAfter(e.now(), time.Duration(cfg.CodexResetUpdates.PollSeconds)*time.Second)
-			}
-			e.maybeReadModels(ctx, cfg, !now.Before(nextPoll))
-			if !now.Before(nextPoll) {
-				e.poll(ctx, cfg, nextPoll, "", false)
-				nextPoll = alignedAfter(e.now(), cfg.PollInterval())
-			}
-			e.runProbes(ctx, cfg, e.now())
-			if cfg.Ignition.Enabled {
-				e.performDue(ctx, cfg)
-			}
-			if !now.Before(nextPrune) {
-				e.history.Prune(e.now(), time.Duration(cfg.HistoryRetentionDays)*24*time.Hour)
-				nextPrune = e.now().Add(pruneInterval)
-			}
-			// Last in the round: queries and ignitions that are due run first.
-			// The request still holds the loop for up to the request timeout
-			// when GitHub does not answer, like Did Codex Reset.
-			if release.Comparable(e.version) && !now.Before(nextRelease) {
-				nextRelease = e.checkRelease(ctx, cfg)
-			}
-			e.flushSamples(e.now(), false)
-			e.refreshTargets(cfg)
-			e.saveState()
+		e.maybeReadModels(ctx, !now.Before(nextPoll))
+		if !now.Before(nextPoll) {
+			e.poll(ctx, cfg, nextPoll, "", false)
+			nextPoll = alignedAfter(e.now(), cfg.PollInterval())
 		}
+		// After the poll, which loads the accounts the readings belong to.
+		if !now.Before(nextKept) {
+			e.pollKept(ctx)
+			nextKept = e.now().Add(keptInterval)
+		}
+		e.runProbes(ctx, cfg, e.now())
+		if cfg.Ignition.Enabled {
+			e.performDue(ctx, cfg)
+		}
+		if !now.Before(nextPrune) {
+			e.history.Prune(e.now(), time.Duration(cfg.HistoryRetentionDays)*24*time.Hour)
+			nextPrune = e.now().Add(pruneInterval)
+		}
+		// Last in the round: queries and ignitions that are due run first.
+		// The request still holds the loop for up to the request timeout
+		// when GitHub does not answer, like Did Codex Reset.
+		if release.Comparable(e.version) && !now.Before(nextRelease) {
+			nextRelease = e.checkRelease(ctx, cfg)
+		}
+		e.flushSamples(e.now(), false)
+		e.refreshTargets(cfg)
+		e.saveState()
 		e.mu.Lock()
 		e.nextPoll = nextPoll
 		e.mu.Unlock()
 
 		wakeAt := now.Add(maxSleep)
-		for _, candidate := range []time.Time{nextPoll, nextEnabledCheck, nextPrune} {
+		for _, candidate := range []time.Time{nextPoll, nextKept, nextPrune} {
 			if candidate.Before(wakeAt) {
 				wakeAt = candidate
 			}
 		}
-		if enabled && cfg.CodexResetUpdates.Enabled && nextFeed.Before(wakeAt) {
+		if cfg.CodexResetUpdates.Enabled && nextFeed.Before(wakeAt) {
 			wakeAt = nextFeed
 		}
-		if enabled && release.Comparable(e.version) && nextRelease.Before(wakeAt) {
+		if release.Comparable(e.version) && nextRelease.Before(wakeAt) {
 			wakeAt = nextRelease
 		}
-		if enabled && cfg.Ignition.Enabled {
+		if cfg.Ignition.Enabled {
 			if due := e.nextDue(cfg); !due.IsZero() && due.Before(wakeAt) {
 				wakeAt = due
 			}
 		}
-		if enabled {
-			// A query that came due while this round ran is run right away.
-			if due, probe := e.probes(e.now()); len(due) > 0 {
-				wakeAt = e.now()
-			} else if !probe.IsZero() && probe.Before(wakeAt) {
-				wakeAt = probe
-			}
+		// A query that came due while this round ran is run right away.
+		if due, probe := e.probes(e.now()); len(due) > 0 {
+			wakeAt = e.now()
+		} else if !probe.IsZero() && probe.Before(wakeAt) {
+			wakeAt = probe
 		}
 		if len(e.pendingSamp) > 0 {
 			if flush := e.now().Add(time.Minute); flush.Before(wakeAt) {
@@ -631,9 +591,7 @@ func (e *Engine) run() {
 			timer.Stop()
 		case ev := <-e.usageCh:
 			timer.Stop()
-			if enabled {
-				e.applyUsage(ctx, ev)
-			}
+			e.applyUsage(ctx, ev)
 		case cmd := <-e.cmdCh:
 			timer.Stop()
 			e.runCommand(ctx, cmd)
@@ -664,11 +622,10 @@ func (e *Engine) checkRelease(ctx context.Context, cfg config.Config) time.Time 
 // CheckRelease reads the latest release when the management page opens,
 // unless a read is under way or was tried within releaseRecheckPeriod, so
 // that page loads do not queue up when GitHub does not answer. Like the
-// periodic check, it reads nothing for a development build or while the
-// plugin is disabled.
+// periodic check, it reads nothing for a development build.
 func (e *Engine) CheckRelease() error {
 	e.mu.Lock()
-	ready := e.running && e.enabled
+	ready := e.running
 	e.mu.Unlock()
 	if !ready {
 		return ErrNotRunning
@@ -698,7 +655,7 @@ func (e *Engine) CheckRelease() error {
 // monitoring.
 func (e *Engine) readRelease(ctx context.Context, cfg config.Config) error {
 	e.releaseTried = e.now()
-	latest, err := release.Latest(ctx, &http.Client{Timeout: cfg.RequestTimeout()}, "cpa-plugin-lamplighter/"+e.version)
+	latest, err := release.Latest(ctx, &http.Client{Timeout: cfg.RequestTimeout()}, "magpie-lamplighter/"+e.version)
 	if err != nil {
 		e.logf("debug", "检查新版本失败：%v", err)
 		return err

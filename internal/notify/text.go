@@ -5,15 +5,15 @@ import (
 	"strings"
 )
 
-// Notification languages. The management page reports the language of the
-// Management Center, and notifications use the last one reported; Chinese
-// is used until a page has reported one.
+// Notification languages. The management page reports the language it
+// shows, and notifications use the last one reported; Chinese is used until
+// a page has reported one.
 const (
 	LangZH = "zh"
 	LangEN = "en"
 )
 
-// NormalizeLang maps a Management Center language such as "zh-CN" or "en"
+// NormalizeLang maps a page language such as "zh-CN" or "en"
 // to a notification language. Chinese variants map to Chinese and every
 // other language to English, the languages the texts exist in.
 func NormalizeLang(value string) string {
@@ -34,8 +34,6 @@ var texts = map[string]map[string]string{
 		"recovered":            "✅ %s · %s 已恢复",
 		"previous_cycle":       "上周期剩余：%s",
 		"reset_reminder":       "⏰ %s · %s 重置提醒",
-		"cooldown_title":       "⚠️ %s 额度已恢复，CPA 仍在冷却",
-		"cooldown_body":        "CPA 把这个账号冷却到 %s，期间的请求和点火都会被拒绝。在 CPA 管理中心清除这个账号的冷却后恢复。",
 		"circuit_title":        "⚠️ %s 点火已暂停",
 		"circuit_body":         "连续或高风险错误触发保护，停止自动重试到 %s。\n%s",
 		"plan_title":           "🎫 %s · 套餐 %s → %s",
@@ -80,8 +78,6 @@ var texts = map[string]map[string]string{
 		"recovered":            "✅ %s · %s recovered",
 		"previous_cycle":       "Left last cycle: %s",
 		"reset_reminder":       "⏰ %s · %s resets soon",
-		"cooldown_title":       "⚠️ %s quota is back, CPA still cooling down",
-		"cooldown_body":        "CPA cools this account down until %s and rejects requests and ignition until then. Clear the cooldown of this account in the CPA Management Center.",
 		"circuit_title":        "⚠️ %s ignition paused",
 		"circuit_body":         "Repeated or high-risk errors tripped the protection; automatic retries stop until %s.\n%s",
 		"plan_title":           "🎫 %s · plan %s → %s",
