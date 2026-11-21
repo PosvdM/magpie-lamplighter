@@ -171,7 +171,7 @@ func (h *Host) OpenModelStream(ctx context.Context, mr host.ModelRequest) (host.
 	if err != nil {
 		stopFollowing()
 		cancel()
-		return host.ModelStream{}, fmt.Errorf("model stream: %w", failedRequest("POST "+path, err))
+		return host.ModelStream{}, fmt.Errorf("model stream: %w", failedRequest(ctx, "POST "+path, err))
 	}
 	// The request has reached the provider. A cancellation of ctx at the
 	// same moment may already have cut the body; the status still counts.

@@ -144,9 +144,20 @@ func counted(w keptWindow) (bool, error) {
 		return false, nil
 	}
 	if w.Used == nil {
-		return false, fmt.Errorf("%w: window %q has no used", host.ErrFormat, w.Name)
+		return false, fmt.Errorf("%w: %s has no used", host.ErrFormat, windowName(w.Name))
 	}
 	return w.ResetsAt != nil || *w.Used != 0, nil
+}
+
+// windowName names the window called name in an error: by its name when
+// it is one Lamplighter converts, otherwise as "a window", since the name
+// comes from Magpie's card and may be any text.
+func windowName(name string) string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if _, known := claudeKept[key]; known || codexSpan.MatchString(key) {
+		return fmt.Sprintf("window %q", key)
+	}
+	return "a window"
 }
 
 func keptWindowOf(w keptWindow, id, label string, period time.Duration) quota.Window {
@@ -378,9 +389,12 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 // The time of the account's kept reading (GET ?kept=1) is read before the
 // refresh. When the card the refresh answers is no newer reading
 // (refreshStale), it returns a *host.Error with codeRefreshStale, and the
-// card when it has one. A newer card that does not convert is settled by
-// keptAfter: an error that wraps host.ErrFormat, unless the kept quota has
-// a newer reading that does.
+// card when it converts. A card that is no newer reading and does not
+// convert, and a newer card with no window Lamplighter reads, give an
+// error that wraps host.ErrFormat. A newer card that does not convert is
+// settled by keptAfter: that error, unless the kept quota has a newer
+// reading that converts. So a call without an error always returns a
+// card newer than the reading before the refresh.
 //
 // The account list and the kept reading end within refreshLookTimeout,
 // and the refresh itself within refreshTimeout, so that a slow reading
@@ -435,8 +449,8 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	cancelLook()
 	// A caller that has ended sends no refresh, which would start the
 	// account's gap for nothing.
-	if err := caller.Err(); err != nil {
-		return host.KeptQuota{}, false, fmt.Errorf("%s: %w", route, context.Cause(caller))
+	if caller.Err() != nil {
+		return host.KeptQuota{}, false, fmt.Errorf("%s: %w", route, ended(caller))
 	}
 	// Checked again: another call may have sent a refresh meanwhile.
 	if err := h.refreshAllowed(a, true); err != nil {
@@ -468,13 +482,48 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		card = states[i]
 		k, usable, convErr = (*resp.Data)[i].kept(a.Pin, answered)
 	}
-	if reason := refreshStale(card, i >= 0, before); reason != "" {
-		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
-	}
-	if convErr != nil {
+	stale := refreshStale(card, i >= 0, before)
+	switch {
+	case convErr != nil && stale == "":
 		return h.keptAfter(ctx, a, before, fmt.Errorf("%s: %s: %w", route, a.Pin, convErr))
+	case convErr != nil:
+		// The card is no new reading and does not convert either: the
+		// format is wrong, whatever the refresh did.
+		return host.KeptQuota{}, false, fmt.Errorf("%s: %s: %w", route, a.Pin, convErr)
+	case stale != "":
+		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: stale}
+	case !usable:
+		// Magpie read the account again, but its card has no window
+		// Lamplighter reads, such as an Antigravity card or a Claude
+		// account none of whose windows has started. Its kept quota has
+		// no newer reading either, so the refresh brought none to apply.
+		return host.KeptQuota{}, false, fmt.Errorf("%s: %s: %w: %s", route, a.Pin, host.ErrFormat, errNoWindows)
 	}
-	return k, usable, nil
+	return k, true, nil
+}
+
+// errNoWindows is why a new card that converts to no KeptQuota is no
+// refresh: it has no window Lamplighter reads.
+const errNoWindows = "the new reading has no window Lamplighter reads"
+
+// contextEnded is the error of a context that has ended: its text is the
+// context's cause, and it wraps both the cause and the context's own
+// error, so that errors.Is tells context.DeadlineExceeded or
+// context.Canceled also for a context that ended with a cause of its own.
+type contextEnded struct{ err, cause error }
+
+func (c contextEnded) Error() string { return c.cause.Error() }
+
+func (c contextEnded) Unwrap() []error {
+	if c.cause == c.err {
+		return []error{c.err}
+	}
+	return []error{c.err, c.cause}
+}
+
+// ended is the error of ctx, which has ended.
+func ended(ctx context.Context) error {
+	return contextEnded{err: ctx.Err(), cause: context.Cause(ctx)}
 }
 
 // keptAfter reads Magpie's kept quota again after a refresh whose card

@@ -112,13 +112,13 @@ func (h *Host) gatewayJSON(ctx context.Context, method, path string, out any) er
 	req.Header.Set("Accept", "application/json")
 	resp, err := gatewayClient.Do(req)
 	if err != nil {
-		failed := failedRequest(route, err)
+		failed := failedRequest(ctx, route, err)
 		return &unreachable{err: &host.Error{Method: route, Code: "gateway_unreachable", Message: failed.text}, cause: failed.cause}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGatewayBody))
 	if err != nil {
-		return failedRequest(route, err)
+		return failedRequest(ctx, route, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gatewayError(route, resp.StatusCode, body)
@@ -137,7 +137,8 @@ func (h *Host) gatewayJSON(ctx context.Context, method, path string, out any) er
 // query and the kind of failure (failureOf), never the URL: the query of
 // a request can name the account, such as the user of a quota refresh,
 // and *url.Error quotes the whole URL. A request ended by its context
-// wraps context.Canceled or context.DeadlineExceeded.
+// wraps context.Canceled or context.DeadlineExceeded, also when the
+// context ended with a cause of its own.
 type requestFailed struct {
 	text  string
 	cause error
@@ -147,15 +148,24 @@ func (f *requestFailed) Error() string { return f.text }
 func (f *requestFailed) Unwrap() error { return f.cause }
 
 // failedRequest is requestFailed for err of the request route, such as
-// "POST /v1/magpie/quotas/refresh".
-func failedRequest(route string, err error) *requestFailed {
-	kind, cause := failureOf(err)
+// "POST /v1/magpie/quotas/refresh", sent with ctx.
+func failedRequest(ctx context.Context, route string, err error) *requestFailed {
+	kind, cause := failureOf(ctx, err)
 	return &requestFailed{text: route + ": " + kind, cause: cause}
 }
 
-// failureOf is the kind of a failed request, and the context error that
-// ended it, nil for none.
-func failureOf(err error) (string, error) {
+// failureOf is the kind of a request sent with ctx that failed with err,
+// and the context error that ended it, nil for none. A context that ended
+// with a cause (context.WithDeadlineCause, WithCancelCause) has the
+// transport return that cause in place of context.DeadlineExceeded or
+// context.Canceled, so ctx itself tells how the request ended.
+func failureOf(ctx context.Context, err error) (string, error) {
+	switch ctx.Err() {
+	case context.Canceled:
+		return "request canceled", context.Canceled
+	case context.DeadlineExceeded:
+		return "request timed out", context.DeadlineExceeded
+	}
 	var netErr net.Error
 	var opErr *net.OpError
 	switch {

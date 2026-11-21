@@ -176,8 +176,10 @@ const (
  {"provider":"codex","kind":"subscription","user":"a@example.com · Team","readAt":"2026-11-21T07:00:00Z","windows":[]},
  {"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"2026-11-21T07:00:00Z","windows":[]}]}`
 	cardsAfter = `{"object":"list","data":[
- {"provider":"codex","name":"Codex","user":"a@example.com · Team","readAt":"2026-11-21T08:00:00Z","windows":[]},
- {"provider":"claude","name":"Claude Code","user":"B@example.com","readAt":"2026-11-21T08:00:00Z","windows":[]}]}`
+ {"provider":"codex","name":"Codex","user":"a@example.com · Team","readAt":"2026-11-21T08:00:00Z","windows":` + usableWindows + `},
+ {"provider":"claude","name":"Claude Code","user":"B@example.com","readAt":"2026-11-21T08:00:00Z","windows":` + usableWindows + `}]}`
+	// usableWindows are the windows of a card that converts.
+	usableWindows = `[{"name":"5 hours","used":10,"resetsAt":"2026-11-21T12:00:00Z"}]`
 )
 
 // RefreshQuota checks the account again right before it asks the gateway,
@@ -264,7 +266,7 @@ func TestRefreshQuotaStale(t *testing.T) {
 		_, h := newGateway(t, map[string]string{
 			"GET /v1/magpie/accounts":        accountsJSON,
 			"GET /v1/magpie/quotas":          kept,
-			"POST /v1/magpie/quotas/refresh": card(`"readAt":"2026-11-21T07:00:01Z"`),
+			"POST /v1/magpie/quotas/refresh": card(`"readAt":"2026-11-21T07:00:01Z","windows":` + usableWindows),
 		})
 		if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); err != nil {
 			t.Errorf("%s reading: %v", name, err)

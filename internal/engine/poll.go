@@ -577,17 +577,25 @@ func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota) {
 // outcome of applying the last reading.
 //
 // A host.KeptRefresher answers the account's card with the refresh, which
-// is applied as it is. Otherwise, as after a refresh that failed, the kept
-// quota is read again within keptRereadWait, which manualPoll keeps free
-// after renew.
+// is applied as it is. It answers a card only when the card is newer than
+// Magpie's reading from before the refresh, so the refresh counts only
+// with a card: one that succeeds without a card is a format error. Without
+// a host.KeptRefresher, and after a refresh that failed, the kept quota is
+// read again within keptRereadWait, which manualPoll keeps free after
+// renew; then the refresh counts when its reading is newer than the one
+// applied before.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
 	before := e.keptAt[cred.AuthIndex]
 	var refreshErr error
 	var card host.KeptQuota
 	answered := false
-	if r, ok := e.host.(host.KeptRefresher); ok {
+	r, cards := e.host.(host.KeptRefresher)
+	if cards {
 		card, answered, refreshErr = r.RefreshKept(renew, cred.AuthIndex)
 		answered = answered && card.Pin == cred.AuthIndex
+		if refreshErr == nil && !answered {
+			refreshErr = fmt.Errorf("%w: 刷新没有返回这个账号可用的额度卡", host.ErrFormat)
+		}
 	} else {
 		refreshErr = e.host.RefreshQuota(renew, cred.AuthIndex)
 	}
@@ -610,7 +618,7 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 		readAt, err = e.applyKept(reread, cred)
 		cancel()
 	}
-	if refreshErr == nil && err == nil && !readAt.After(before) {
+	if !cards && refreshErr == nil && err == nil && !readAt.After(before) {
 		// Magpie reported the refresh as done, but its reading is the one
 		// applied before.
 		refreshErr = staleRefresh("", nil)

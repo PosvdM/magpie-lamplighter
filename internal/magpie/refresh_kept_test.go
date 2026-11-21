@@ -67,14 +67,51 @@ func TestRefreshKeptAnswersTheCard(t *testing.T) {
 		t.Fatalf("stale: %+v found=%v err=%v", k, found, err)
 	}
 
-	// An Antigravity card has no windows Lamplighter reads.
-	_, h = newGateway(t, map[string]string{
-		"GET /v1/magpie/accounts":        accountsJSON,
-		"GET /v1/magpie/quotas":          `{"object":"list","data":[]}`,
-		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[{"provider":"agy-cli","user":"c@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"Gemini · 5 hours","used":1}]}]}`,
-	})
-	if k, found, err := h.RefreshKept(context.Background(), "agy-cli/ffeeddccbbaa9988"); err != nil || found {
-		t.Fatalf("agy-cli: %+v found=%v err=%v", k, found, err)
+}
+
+// A new card with no window Lamplighter reads, such as an Antigravity
+// card or that of a Claude account none of whose windows has started, is
+// no refresh to apply: a format error, neither success nor refresh_stale.
+// The engine would otherwise take a kept reading from before the refresh
+// for the refresh's.
+func TestRefreshKeptNewCardWithoutWindows(t *testing.T) {
+	for _, c := range []struct{ name, accounts, pin, after string }{
+		{"agy-cli", accountsJSON, "agy-cli/ffeeddccbbaa9988",
+			`{"object":"list","data":[{"provider":"agy-cli","user":"c@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"Gemini · 5 hours","used":1}]}]}`},
+		{"Claude, nothing started", claudeOn, "claude/0f0e0d0c0b0a0908",
+			`{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"5 hours","used":0}]}]}`},
+	} {
+		_, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts":        c.accounts,
+			"GET /v1/magpie/quotas":          cardsBefore,
+			"POST /v1/magpie/quotas/refresh": c.after,
+		})
+		k, found, err := h.RefreshKept(context.Background(), c.pin)
+		var hostErr *host.Error
+		if found || !errors.Is(err, host.ErrFormat) || errors.As(err, &hostErr) {
+			t.Errorf("%s: %+v found=%v err=%v", c.name, k, found, err)
+		}
+	}
+}
+
+// A card of the refresh that is no new reading and does not convert is a
+// format error, not refresh_stale: the kept quota, which the engine reads
+// after a stale refresh, holds the same card.
+func TestRefreshKeptStaleCardThatDoesNotConvert(t *testing.T) {
+	for name, after := range map[string]string{
+		"old reading":    `{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T07:00:00Z","windows":[{"name":"5 hours","resetsAt":"2026-11-21T12:00:00Z"}]}]}`,
+		"failed reading": `{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T07:00:00Z","readError":"timeout","windows":[{"name":"7 days"}]}]}`,
+	} {
+		_, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts":        claudeOn,
+			"GET /v1/magpie/quotas":          cardsBefore,
+			"POST /v1/magpie/quotas/refresh": after,
+		})
+		k, found, err := h.RefreshKept(context.Background(), "claude/0f0e0d0c0b0a0908")
+		var hostErr *host.Error
+		if found || !errors.Is(err, host.ErrFormat) || errors.As(err, &hostErr) {
+			t.Errorf("%s: %+v found=%v err=%v", name, k, found, err)
+		}
 	}
 }
 

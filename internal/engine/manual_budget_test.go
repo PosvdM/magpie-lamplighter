@@ -66,13 +66,17 @@ func TestManualRefreshAppliesTheRefreshedCard(t *testing.T) {
 		t.Fatalf("stale card: err = %v after %d kept readings", err, cards.keptReads)
 	}
 
-	// No card of the account: the kept quota is read again.
+	// No card of the account: the kept quota is read again and shown, but
+	// the refresh does not count. The kept reading, newer than the one
+	// applied before, may still be older than Magpie's reading before the
+	// refresh, which only package magpie knows.
 	renew.refresh = nil
 	cards.card = host.KeptQuota{}
 	c.add(time.Minute)
 	h.kept = []host.KeptQuota{keptClaude("3", c.t, 22)}
-	if err := manualRefresh(e, "3"); err != nil {
-		t.Fatal(err)
+	err := manualRefresh(e, "3")
+	if !errors.Is(err, host.ErrFormat) || !strings.Contains(err.Error(), "Magpie 刷新额度失败") {
+		t.Fatalf("no card: err = %v", err)
 	}
 	if w := claudeWindow(e); w.Remaining != 22 || cards.keptReads != 1 {
 		t.Fatalf("window %+v after %d kept readings", w, cards.keptReads)
