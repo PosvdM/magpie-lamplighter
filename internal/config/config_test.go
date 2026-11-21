@@ -226,6 +226,24 @@ func TestPatchRefusesSameKeysAndInvalidTimezone(t *testing.T) {
 	}
 }
 
+// The settings page saves an empty time zone as "": no timezone, which
+// Patch accepts.
+func TestPatchAcceptsEmptyTimezone(t *testing.T) {
+	store, _, err := Open(filepath.Join(t.TempDir(), FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Patch(map[string]json.RawMessage{"timezone": json.RawMessage(`"Asia/Shanghai"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{`""`, `" "`} {
+		cfg, err := store.Patch(map[string]json.RawMessage{"timezone": json.RawMessage(value)})
+		if err != nil || cfg.Timezone != "" {
+			t.Fatalf("timezone %s: %+v %v", value, cfg.Timezone, err)
+		}
+	}
+}
+
 // A file written by hand may hold what Patch refuses. Open keeps it: an
 // invalid timezone falls back to the process time zone with a warning.
 func TestOpenKeepsCheckedSettings(t *testing.T) {

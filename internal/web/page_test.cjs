@@ -1401,6 +1401,17 @@ test("saving the filled-in time zone writes it to the config", async () => {
   assert.match(source, /\$\("timezone-save"\)\.addEventListener\("click", function \(\) \{ saveField\(\{ target: \$\("settings"\)\.elements\.timezone \}\); \}\);/);
 });
 
+test("saving an empty time zone writes an empty string, which leaves it unset", async () => {
+  const { ctx, input, sent } = timezoneSaveContext(() => ({ status: 200, ok: true, json: async () => ({}) }));
+  ctx.rawConfig.timezone = "Asia/Shanghai";
+  input.value = "  ";
+  ctx.saveField({ target: input });
+  await ctx.saveQueue;
+  await new Promise((resolve) => setImmediate(resolve));
+  // internal/config treats "" as no timezone and does not reject it.
+  assert.deepEqual(sent, [{ timezone: "", config_token: "0123456789abcdef" }]);
+});
+
 test("a time zone the plugin rejects shows its 400 error as a save failure", async () => {
   const error = 'unknown time zone "Mars/Olympus"';
   const { ctx, heading, input, sent } = timezoneSaveContext(() => ({ status: 400, ok: false, json: async () => ({ error }) }));

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -290,5 +292,46 @@ func TestCrossSitePatchIsRefused(t *testing.T) {
 	_, status := do(t, s.Handler(), http.MethodGet, "/api/status", "")
 	if cfg := status["config"].(map[string]any); cfg["mcp_enabled"] != false {
 		t.Fatalf("applied: %v", cfg)
+	}
+}
+
+// The page opened in a browser tab on the internal listener, and in
+// Magpie's sandboxed frame, reaches the API with the token it was served.
+func TestPageReachesTheAPIWithItsToken(t *testing.T) {
+	s, store := newServer(t)
+	h := s.Handler()
+	host := "127.0.0.1:8317"
+	page := internalRequest(h, http.MethodGet, "/", host, map[string]string{"Sec-Fetch-Site": "none"})
+	m := regexp.MustCompile(`<meta name="lamplighter-page" content="([^"]*)">`).FindSubmatch(page.Body.Bytes())
+	if page.Code != http.StatusOK || m == nil {
+		t.Fatalf("page %d without a token", page.Code)
+	}
+	token := html.UnescapeString(string(m[1]))
+	for _, c := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"tab", map[string]string{"Origin": "http://" + host, "Sec-Fetch-Site": "same-origin"}},
+		{"frame", map[string]string{"Origin": "null", "Sec-Fetch-Site": "cross-site"}},
+	} {
+		get := map[string]string{pageHeader: token, "Sec-Fetch-Site": c.headers["Sec-Fetch-Site"]}
+		if c.name == "frame" {
+			get["Origin"] = "null"
+		}
+		if rec := internalRequest(h, http.MethodGet, "/api/status", host, get); rec.Code != http.StatusOK {
+			t.Fatalf("%s: GET /api/status %d %s", c.name, rec.Code, rec.Body)
+		}
+		req := httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"config_token":"`+c.name+`","bark_url":"https://b/`+c.name+`"}`))
+		req.Host = host
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(pageHeader, token)
+		for name, value := range c.headers {
+			req.Header.Set(name, value)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || string(store.Raw()["bark_url"]) != `"https://b/`+c.name+`"` {
+			t.Fatalf("%s: PATCH /api/config %d %s, config %v", c.name, rec.Code, rec.Body, store.Raw())
+		}
 	}
 }
