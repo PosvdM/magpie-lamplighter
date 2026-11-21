@@ -270,3 +270,71 @@ func TestInWindow(t *testing.T) {
 		}
 	}
 }
+
+func overnight() Schedule {
+	s := schedule()
+	s.Cfg.StartHour, s.Cfg.EndHour, s.Cfg.EndGraceMinutes = 22, 2, 30
+	return s
+}
+
+func TestInWindowAcrossMidnight(t *testing.T) {
+	s := overnight()
+	for _, c := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{local(21, 59), false}, {local(22, 0), true}, {local(23, 59), true},
+		{local(0, 0), true}, {local(1, 0), true}, {local(2, 30), true},
+		{local(2, 31), false}, {local(12, 0), false},
+	} {
+		if got := s.InWindow(c.at); got != c.want {
+			t.Errorf("%v: got %v want %v", c.at, got, c.want)
+		}
+	}
+}
+
+func TestInWindowWhenGraceCrossesMidnight(t *testing.T) {
+	s := schedule()
+	s.Cfg.StartHour, s.Cfg.EndHour, s.Cfg.EndGraceMinutes = 7, 23, 90
+	for _, c := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{local(0, 15), true}, {local(0, 30), true}, {local(0, 31), false}, {local(6, 59), false},
+	} {
+		if got := s.InWindow(c.at); got != c.want {
+			t.Errorf("%v: got %v want %v", c.at, got, c.want)
+		}
+	}
+}
+
+func TestOvernightWindowUsesResetAfterMidnight(t *testing.T) {
+	s := overnight()
+	// After midnight, inside the window that started yesterday.
+	due := s.DueAt(&store.TargetState{}, local(1, 30), local(1, 0))
+	if !due.Equal(local(1, 30).Add(3 * time.Second)) {
+		t.Fatalf("due %v", due.In(shanghai))
+	}
+	// Before midnight, with the reset falling after midnight.
+	due = s.DueAt(&store.TargetState{}, local(1, 0).AddDate(0, 0, 1), local(23, 0))
+	if !due.Equal(local(1, 0).AddDate(0, 0, 1).Add(3 * time.Second)) {
+		t.Fatalf("due %v", due.In(shanghai))
+	}
+}
+
+func TestOvernightWindowWaitsAfterEnd(t *testing.T) {
+	s := overnight()
+	due := s.DueAt(&store.TargetState{}, time.Time{}, local(1, 0))
+	if !due.Equal(local(1, 0)) {
+		t.Fatalf("inside the window: due %v", due.In(shanghai))
+	}
+	due = s.DueAt(&store.TargetState{}, time.Time{}, local(3, 0))
+	if !due.Equal(local(22, 0)) {
+		t.Fatalf("after the window: due %v", due.In(shanghai))
+	}
+	// A reset after the window ends waits for the next start.
+	due = s.DueAt(&store.TargetState{}, local(3, 0), local(1, 0))
+	if !due.Equal(local(22, 0)) {
+		t.Fatalf("reset after the end: due %v", due.In(shanghai))
+	}
+}

@@ -38,13 +38,28 @@ type Schedule struct {
 	Loc *time.Location
 }
 
+// window returns the ignition window that starts on the local date of day.
+// An end_hour not after start_hour, or end_grace_minutes, can carry the end
+// into the next day.
+func (s Schedule) window(day time.Time) (start, end time.Time) {
+	start = time.Date(day.Year(), day.Month(), day.Day(), s.Cfg.StartHour, 0, 0, 0, s.Loc)
+	end = time.Date(day.Year(), day.Month(), day.Day(), s.Cfg.EndHour, 0, 0, 0, s.Loc)
+	if !end.After(start) {
+		end = time.Date(day.Year(), day.Month(), day.Day()+1, s.Cfg.EndHour, 0, 0, 0, s.Loc)
+	}
+	return start, end.Add(time.Duration(s.Cfg.EndGraceMinutes) * time.Minute)
+}
+
+// bounds returns the window that covers now: the one that started yesterday
+// while it is still running, otherwise today's.
 func (s Schedule) bounds(now time.Time) (localNow, start, end time.Time) {
 	localNow = now.In(s.Loc)
-	start = time.Date(localNow.Year(), localNow.Month(), localNow.Day(), s.Cfg.StartHour, 0, 0, 0, s.Loc)
-	end = time.Date(localNow.Year(), localNow.Month(), localNow.Day(), s.Cfg.EndHour, 0, 0, 0, s.Loc).
-		Add(time.Duration(s.Cfg.EndGraceMinutes) * time.Minute)
-	if !end.After(start) {
-		end = end.AddDate(0, 0, 1)
+	start, end = s.window(localNow)
+	if localNow.Before(start) {
+		yesterday := time.Date(localNow.Year(), localNow.Month(), localNow.Day()-1, 12, 0, 0, 0, s.Loc)
+		if prevStart, prevEnd := s.window(yesterday); !localNow.After(prevEnd) {
+			start, end = prevStart, prevEnd
+		}
 	}
 	return localNow, start, end
 }
@@ -112,9 +127,7 @@ func (s Schedule) DueAt(ts *store.TargetState, reset, now time.Time) time.Time {
 	}
 	if !reset.IsZero() && reset.After(now) {
 		target := reset.Add(time.Duration(s.Cfg.GraceSeconds) * time.Second)
-		targetLocal := target.In(s.Loc)
-		sameDay := targetLocal.Year() == localNow.Year() && targetLocal.YearDay() == localNow.YearDay()
-		if sameDay && !targetLocal.Before(start) && !targetLocal.After(end) {
+		if !target.Before(start) && !target.After(end) {
 			return target.UTC()
 		}
 		return s.NextDailyStart(now)
