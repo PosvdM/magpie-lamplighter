@@ -115,7 +115,7 @@ func TestIgnitionErrorIsRedactedAtTheExits(t *testing.T) {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 			refused := &host.Error{Code: "model_execution_failed", Status: status,
-				Message: `{"error":{"type":"authentication_error","message":"` + leaky + `"}}`}
+				Message: `{"error":{"type":"authentication_error","message":"` + leaky + `","details":[{"metadata":{"appeal_url":"https://forms.gle/x?user=carol%40corp.example"}}]}}`}
 			if status == http.StatusForbidden {
 				refused.Message = `{"error":{"type":"permission_error","message":"` + leaky + `"}}`
 			}

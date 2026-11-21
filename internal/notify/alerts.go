@@ -571,7 +571,8 @@ func PlanMessage(lang, label, from, to string) Message {
 
 // CircuitMessage is sent once when ignition pauses until the next day.
 // summary is the error in one sentence, see failure.Diagnose; it is
-// redacted (redact.Text), as are the summaries of CredentialMessage.
+// redacted (redact.Text), as are the summary and the appeal link of
+// CredentialMessage.
 func CircuitMessage(lang, label string, until time.Time, summary string, loc *time.Location) Message {
 	return Message{
 		Kind:  KindCircuit,
@@ -608,14 +609,16 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 		source = T(lang, "source_ignite")
 	}
 	summary := truncate(redact.Text(p.Summary), 220)
+	// The appeal link comes from the provider's error, like the summary.
+	appeal := redact.Text(p.AppealURL)
 	var title string
 	var lines []string
 	switch p.Kind {
 	case KindSuspended:
 		title = T(lang, "suspended_title", label)
 		lines = append(lines, joinNonEmpty(" · ", head, T(lang, "suspended_reason")), summary, T(lang, "line_source", source))
-		if p.AppealURL != "" {
-			lines = append(lines, T(lang, "line_appeal", p.AppealURL))
+		if appeal != "" {
+			lines = append(lines, T(lang, "line_appeal", appeal))
 		}
 	case KindRateLimited:
 		title = T(lang, "rate_limited_title", label)
@@ -635,8 +638,8 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 			msg.Body = joinNonEmpty("\n", msg.Body, line)
 		}
 	}
-	if p.Kind == KindSuspended && strings.HasPrefix(p.AppealURL, "https://") {
-		msg.JumpURL = p.AppealURL
+	if p.Kind == KindSuspended && strings.HasPrefix(appeal, "https://") {
+		msg.JumpURL = appeal
 	}
 	return msg
 }

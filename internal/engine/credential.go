@@ -316,7 +316,7 @@ func (e *Engine) noteCredentialProblem(ctx context.Context, cred *Cred, group st
 	ignited := source == sourceIgnite || st.Reason != "" && !st.Changed && ignitionConfirmed(st)
 	now := e.now()
 	*st = store.CredentialState{
-		Reason: d.Reason, Status: d.StatusText(), Code: d.Code, Summary: credentialSummary(d), AppealURL: d.AppealURL,
+		Reason: d.Reason, Status: d.StatusText(), Code: d.Code, Summary: credentialSummary(d), AppealURL: redact.Text(d.AppealURL),
 		Source: source, Group: group, Since: now.Unix(), Fingerprint: fingerprint, Ignited: ignited,
 		Notice: noticeProblem, NoticeAt: now.Unix(),
 	}
