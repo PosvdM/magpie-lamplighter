@@ -13,6 +13,15 @@ import (
 
 const ignitionOutputWindow = 2 * time.Second
 
+// ignitionStreamTimeout bounds one ignition request from sending it to the
+// end of its body. The gateway sends keepalives while it waits for a slow
+// start, such as a Claude Code run, so a stream can otherwise stay open
+// without output and hold up the background loop.
+var ignitionStreamTimeout = 2 * time.Minute
+
+// errIgnitionTimeout ends a stream that reached ignitionStreamTimeout.
+var errIgnitionTimeout = errors.New("点火请求超时")
+
 // streamEnd gives the reader and watchdog a single terminal owner. Closing done
 // publishes the result; a late deadline, cancellation or panic cannot replace it.
 type streamEnd struct {
@@ -143,14 +152,33 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 		return resp, context.Canceled
 	}
 
-	// Cancelling ctx cancels the request while it waits for headers.
-	opened, err := e.host.OpenModelStream(ctx, req)
+	// streamCtx carries the request: cancelling ctx, stopping or reaching
+	// ignitionStreamTimeout cancels it, also while it waits for headers.
+	streamCtx, cancelStream := context.WithTimeout(ctx, ignitionStreamTimeout)
+	defer cancelStream()
+	go func() {
+		select {
+		case <-e.stopCh:
+			cancelStream()
+		case <-streamCtx.Done():
+		}
+	}()
+	timedOut := func() bool {
+		return ctx.Err() == nil && errors.Is(streamCtx.Err(), context.DeadlineExceeded)
+	}
+	opened, err := e.host.OpenModelStream(streamCtx, req)
 	resp.StatusCode, resp.Header = opened.StatusCode, opened.Header
 	streamID = opened.ID
 	if err != nil {
-		if ctx.Err() != nil || e.stopping() {
+		switch {
+		case ctx.Err() != nil || e.stopping():
 			reason = "canceled"
 			return resp, context.Canceled
+		case timedOut():
+			reason = "timeout"
+			return resp, errIgnitionTimeout
+		case host.StatusOf(err) != 0 || opened.StatusCode != 0:
+			reason = "http_error"
 		}
 		return resp, err
 	}
@@ -181,6 +209,14 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 		defer close(watchDone)
 		watchStream(ctx, e.stopCh, first, outputWindow, end, closeStream, newStreamTimer)
 	}()
+	// The deadline closes the stream for any host, also one whose read does
+	// not follow streamCtx.
+	stopDeadline := context.AfterFunc(streamCtx, func() {
+		if timedOut() && end.claim("timeout", errIgnitionTimeout) {
+			closeStream()
+		}
+	})
+	defer stopDeadline()
 	defer func() {
 		// Also release the watchdog if the reader unwinds through a panic.
 		end.claim("read_error", errors.New("ignition stream reader failed"))
@@ -206,6 +242,12 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 		}
 		chunk, readErr := e.host.ReadModelStream(streamID)
 		if readErr != nil {
+			if timedOut() {
+				return finish("timeout", errIgnitionTimeout)
+			}
+			if ctx.Err() != nil || e.stopping() {
+				return finish("canceled", context.Canceled)
+			}
 			return finish("read_error", errors.New("ignition stream read failed"))
 		}
 		if parseErr := capture.feedChunk(req.Protocol, chunk.Payload); parseErr != nil {
