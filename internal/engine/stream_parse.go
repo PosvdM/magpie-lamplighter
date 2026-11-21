@@ -69,6 +69,12 @@ var magpiePassingWords = []struct {
 // resetsWords). Only the marker is read; the message is dropped.
 var claudeUsageLimit = regexp.MustCompile(`(?i)\busage limit reached\|[0-9]{10}\b`)
 
+// claudeUsageLimitBare matches Claude Code's wording without the reset,
+// when it is the whole message: "Claude AI usage limit reached". It counts
+// only for an error with a generic code (genericStreamCodes), as Magpie's
+// bridge writes it.
+var claudeUsageLimitBare = regexp.MustCompile(`(?i)^\s*Claude AI usage limit reached[.!]?\s*$`)
+
 // magpieHeldOpening matches the opening of Magpie's cappedError: every
 // account that could take the request is held at a cap set in Magpie, or
 // set not to spend beyond its allowance. It is Magpie's own answer, no
@@ -149,7 +155,9 @@ func streamError(v map[string]any) error {
 	// Magpie's own hold is read first: its "usage limit reached: every
 	// account" is no limit of the vendor.
 	held := magpieHeldOpening.FindStringSubmatch(rawMessage)
-	if status == 0 && held == nil && claudeUsageLimit.MatchString(rawMessage) {
+	code, typ := str(detail["code"]), str(detail["type"])
+	generic := genericStreamCodes[code] && genericStreamCodes[typ] && code+typ != ""
+	if status == 0 && held == nil && (claudeUsageLimit.MatchString(rawMessage) || generic && claudeUsageLimitBare.MatchString(rawMessage)) {
 		status = 429
 	}
 	explicit := status
@@ -164,8 +172,7 @@ func streamError(v map[string]any) error {
 	}
 	// A status read from Magpie's passing words; see magpiePassingWords.
 	worded := 0
-	code, typ := str(detail["code"]), str(detail["type"])
-	if status == 0 && genericStreamCodes[code] && genericStreamCodes[typ] && code+typ != "" {
+	if status == 0 && generic {
 		for _, words := range magpiePassingWords {
 			if words.pattern.MatchString(rawMessage) {
 				status, worded = words.status, words.status

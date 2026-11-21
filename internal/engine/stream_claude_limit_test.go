@@ -27,8 +27,9 @@ func claudeBridgeErrorEvent(message, code string) string {
 }
 
 // A rate limit of the Claude Code bridge without a status or suffix is a
-// rate limit: Claude Code's error kind "rate_limit" as the code, or its
-// "usage limit reached|<unix>" as the message. Magpie's own hold stays a
+// rate limit: Claude Code's error kind "rate_limit" as the code, its
+// "usage limit reached|<unix>" as the message, or "Claude AI usage limit
+// reached" alone as the message of an api_error. Magpie's own hold stays a
 // hold even with the code.
 func TestClaudeBridgeRateLimitInStream(t *testing.T) {
 	for _, tc := range []struct {
@@ -41,6 +42,12 @@ func TestClaudeBridgeRateLimitInStream(t *testing.T) {
 		{"error kind rate_limit", "API Error: SECRET Request rejected", "rate_limit", 429, ignite.Hard, failure.ReasonRateLimited, false},
 		{"usage limit without suffix", "Claude AI usage limit reached|1790000000", "", 429, ignite.Hard, failure.ReasonRateLimited, false},
 		{"usage limit with kind", "Claude AI usage limit reached|1790000000", "rate_limit", 429, ignite.Hard, failure.ReasonRateLimited, false},
+		// Claude Code's wording without the reset, the whole message of an
+		// api_error without a status or code.
+		{"usage limit without reset", "Claude AI usage limit reached", "", 429, ignite.Hard, failure.ReasonRateLimited, false},
+		{"usage limit without reset, full stop", "Claude AI usage limit reached.", "", 429, ignite.Hard, failure.ReasonRateLimited, false},
+		// Only the whole message counts.
+		{"usage limit within other words", "SECRET Claude AI usage limit reached for SECRET", "", 500, ignite.Transient, "", false},
 		{"other kind", "API Error: SECRET broke", "server_error", 500, ignite.Transient, "", false},
 		{"no kind", "SECRET something broke", "", 500, ignite.Transient, "", false},
 		// A pipe and a time anywhere else is no marker.
