@@ -231,7 +231,103 @@ const (
 	// codeGatewayUnavailable: the gateway cannot be reached, answers 5xx
 	// or does not answer within refreshTimeout.
 	codeGatewayUnavailable = "gateway_unavailable"
+	// codeRefreshStale: the gateway answered, but its card of the account
+	// is no new reading (refreshStale). Magpie's kept reading still
+	// stands.
+	codeRefreshStale = "refresh_stale"
 )
+
+// cardState is what a card of GET /v1/magpie/quotas?kept=1
+// (provider.Quota) or of POST /v1/magpie/quotas/refresh
+// (provider.SubscriptionQuota, as writeCards answers) tells of its
+// reading. Both are made from provider.CachedCards, so their readAt can be
+// compared.
+type cardState struct {
+	Provider string     `json:"provider"`
+	Kind     string     `json:"kind"`
+	User     string     `json:"user"`
+	From     string     `json:"from"`
+	ReadAt   *time.Time `json:"readAt"`
+	// AsOf is when a reading kept in place of one that failed was read.
+	AsOf *time.Time `json:"asOf"`
+	// ReadDeferred is a reading Magpie chose not to make, such as for a
+	// provider read only when the user asks; ReadError is why the last
+	// reading failed while an earlier one is shown; Error is why it
+	// failed when none is.
+	ReadDeferred bool   `json:"readDeferred"`
+	ReadError    string `json:"readError"`
+	Error        string `json:"error"`
+}
+
+// at is when the card's reading was made, nil when not known.
+func (c cardState) at() *time.Time {
+	if c.ReadAt != nil && !c.ReadAt.IsZero() {
+		return c.ReadAt
+	}
+	if c.AsOf != nil && !c.AsOf.IsZero() {
+		return c.AsOf
+	}
+	return nil
+}
+
+// cardOf is the subscription card of a among cards: this Magpie's own,
+// not a remote one, matched by provider and account name as KeptQuotas
+// matches them.
+func cardOf(cards []cardState, a listedAccount) (cardState, bool) {
+	for _, c := range cards {
+		if c.From == "" && (c.Kind == "" || c.Kind == "subscription") && c.Provider == a.Provider && accountKey(c.User) == accountKey(a.User) {
+			return c, true
+		}
+	}
+	return cardState{}, false
+}
+
+// refreshStale is why card, as the refresh answered it, is no new
+// reading since before, the time of the reading the card had right
+// before the refresh (nil for none); "" when it is one. The gateway
+// answers the cards it has even when it read none again: within its 30
+// seconds for a card, when the reading failed, or when Magpie put it off.
+func refreshStale(card cardState, found bool, before *time.Time) string {
+	switch {
+	case !found:
+		return "Magpie 的回复中没有这个账号的额度"
+	case card.ReadDeferred:
+		return "Magpie 按设置暂不读取这个账号的额度"
+	case card.ReadError != "":
+		return "读取失败：" + shortReason(card.ReadError)
+	case card.Error != "":
+		return "读取失败：" + shortReason(card.Error)
+	}
+	after := card.at()
+	switch {
+	case after == nil:
+		return "Magpie 没有给出读取时间"
+	case before != nil && !after.After(*before):
+		return "Magpie 返回的仍是 " + after.UTC().Format("2006-01-02 15:04:05 UTC") + " 的读数"
+	}
+	return ""
+}
+
+// Reasons Magpie gives are kept to reasonLimit characters, with emails
+// shown as maskEmail shows them and long token-like strings left out.
+const reasonLimit = 120
+
+var (
+	reasonEmail  = regexp.MustCompile(`[^\s@"'<>()\[\],;:]+@[^\s@"'<>()\[\],;:]+`)
+	reasonSecret = regexp.MustCompile(`[A-Za-z0-9_\-./+=]{32,}`)
+)
+
+// shortReason is a reason Magpie gave, fit to show: one line, without
+// emails or secrets, at most reasonLimit characters.
+func shortReason(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = reasonEmail.ReplaceAllStringFunc(s, maskEmail)
+	s = reasonSecret.ReplaceAllString(s, "…")
+	if r := []rune(s); len(r) > reasonLimit {
+		s = string(r[:reasonLimit]) + "…"
+	}
+	return s
+}
 
 // ErrRefreshLimited is returned when an account's quota was refreshed too
 // recently; see claudeRefreshGap.
@@ -243,6 +339,10 @@ var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 // gateway refreshes every account of the provider when no name is given.
 // Those failures, and a gateway that cannot be reached, answers 5xx or
 // runs out of refreshTimeout, are a *host.Error with the codes above.
+//
+// The time of the account's kept reading (GET ?kept=1) is read before the
+// refresh. When the card the refresh answers is no newer reading
+// (refreshStale), it returns a *host.Error with codeRefreshStale.
 //
 // It refuses within claudeRefreshGap (Claude) or refreshGap (others) of
 // the last attempt for the same account, whatever its result. The whole
@@ -288,15 +388,32 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 	}
 	h.refreshed[a.Pin] = now()
 	h.mu.Unlock()
+	var kept struct {
+		Data *[]cardState `json:"data"`
+	}
+	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &kept); err != nil {
+		return refreshError(caller, route, err)
+	}
+	if kept.Data == nil {
+		return fmt.Errorf("GET %s: %w: no data list", routeOf(keptPath), host.ErrFormat)
+	}
+	var before *time.Time
+	if card, ok := cardOf(*kept.Data, a); ok {
+		before = card.at()
+	}
 	query := url.Values{"provider": {a.Provider}, "user": {a.User}}
 	var resp struct {
-		Data *[]any `json:"data"`
+		Data *[]cardState `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodPost, refreshPath+"?"+query.Encode(), &resp); err != nil {
 		return refreshError(caller, route, err)
 	}
 	if resp.Data == nil {
 		return fmt.Errorf("%s: %w: no data list", route, host.ErrFormat)
+	}
+	card, found := cardOf(*resp.Data, a)
+	if reason := refreshStale(card, found, before); reason != "" {
+		return &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
 	}
 	return nil
 }
