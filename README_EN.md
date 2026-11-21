@@ -274,7 +274,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `critical_threshold` | `10` | Third alert threshold |
 | `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Notify when the quota recovers; see below |
 | `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Remind before a reset; see below |
-| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image). Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup, and the system's time zone is used |
+| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image). To follow the system's time zone, leave it empty; `Local` counts as an invalid name. Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup and treated as empty |
 | `timezone_offset_hours` | empty | A fixed UTC offset such as `8`; used only when `timezone` is empty |
 | `poll_interval_seconds` | `300` | Active query interval, at least 60 |
 | `request_timeout_seconds` | `20` | Timeout of quota queries, notifications and other HTTP requests, 5 to 120; does not limit ignition |
