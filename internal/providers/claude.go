@@ -12,8 +12,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// Claude endpoint and headers, the same as the CPA Management Center quota
-// page. The User-Agent matches CPA's default Claude Code fingerprint.
+// Claude endpoint and headers. The User-Agent matches Claude Code.
 const (
 	ClaudeUsageURL   = "https://api.anthropic.com/api/oauth/usage"
 	ClaudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
@@ -218,8 +217,7 @@ func parseClaudeHeaders(header http.Header) []quota.RawGroup {
 	if main, ok := parseClaudeMainHeaders(header); ok {
 		groups = append(groups, main)
 	}
-	// Anthropic reports the Fable window as 7d_oi, which CPA also treats as
-	// the Fable-specific 7-day window.
+	// Anthropic reports the Fable-specific 7-day window as 7d_oi.
 	if utilization, ok := floatValue(headerValue(header, "Anthropic-Ratelimit-Unified-7d_oi-Utilization")); ok {
 		groups = append(groups, quota.RawGroup{Key: FableGroupKey, SourceLabel: "Fable", Windows: []quota.Window{{
 			ID:        quota.WindowFable,

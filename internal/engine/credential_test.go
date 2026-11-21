@@ -16,7 +16,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// tosError is the error CPA returned for the ignition of a suspended
+// tosError is the error returned for the ignition of a suspended
 // Antigravity account on 2026-11-16.
 var tosError = &host.Error{Code: "host_call_failed", Status: 403, Message: `{
   "error": {
@@ -120,7 +120,8 @@ func TestSuspendedAccountPausesIgnitionUntilTheCredentialChanges(t *testing.T) {
 		t.Fatalf("notify events %+v", notices)
 	}
 
-	// CPA keeps refreshing the access token, which is no new login.
+	// The owner of the token keeps refreshing the access token, which is no
+	// new login.
 	for day := 1; day <= 2; day++ {
 		c.t = time.Date(2026, 11, 16+day, 7, 0, 0, 0, shanghai)
 		h.files["3"] = `{"access_token":"t3-` + c.t.Format("0102") + `","refresh_token":"r3","tos_appeal_url":"x"}`
@@ -184,7 +185,7 @@ func TestRejectedQueryNotifiesOnceAfterItLasts(t *testing.T) {
 	cfg := e.config()
 	cfg.Providers["codex"] = config.Provider{}
 	e.Configure(cfg, nil)
-	// An expired access token is refreshed by CPA within minutes.
+	// An expired access token is refreshed by its owner within minutes.
 	for i := 0; i < 7; i++ {
 		e.poll(ctx, cfg, c.t, "", true)
 		if len(sender.sent) != 0 && c.t.Before(time.Date(2026, 11, 16, 7, 30, 0, 0, shanghai)) {

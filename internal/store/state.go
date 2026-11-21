@@ -120,8 +120,8 @@ type State struct {
 	Groups     map[string]*GroupState  `json:"groups"`
 	Scheduler  map[string]*TargetState `json:"scheduler"`
 	CodexReset *CodexResetState        `json:"codex_reset_updates,omitempty"`
-	// Language is the notification language, the Management Center language
-	// last reported by the management page.
+	// Language is the notification language, the page language last
+	// reported by the management page.
 	Language string `json:"language,omitempty"`
 	// Plans maps an auth index to the plan last read for the account.
 	Plans map[string]*PlanState `json:"plans,omitempty"`

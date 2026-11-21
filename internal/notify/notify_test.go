@@ -273,7 +273,7 @@ func TestBarkRequestFormat(t *testing.T) {
 		w.Write([]byte(`{"code":200}`))
 	}))
 	defer server.Close()
-	bark := &Bark{URL: server.URL + "/key/", Group: "CPA"}
+	bark := &Bark{URL: server.URL + "/key/", Group: "Magpie"}
 	err := bark.Send(context.Background(), Message{Title: "⚠️ A · 5h 26%", Body: "5h：26% | 05h", JumpURL: "https://x/y"})
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +281,7 @@ func TestBarkRequestFormat(t *testing.T) {
 	if !strings.HasPrefix(gotPath, "/key/%E2%9A%A0%EF%B8%8F%20A%20%C2%B7%205h%2026%25/") {
 		t.Fatalf("path %q", gotPath)
 	}
-	if !strings.Contains(gotQuery, "group=CPA") || !strings.Contains(gotQuery, "url=https%3A%2F%2Fx%2Fy") {
+	if !strings.Contains(gotQuery, "group=Magpie") || !strings.Contains(gotQuery, "url=https%3A%2F%2Fx%2Fy") {
 		t.Fatalf("query %q", gotQuery)
 	}
 }

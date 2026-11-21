@@ -345,8 +345,8 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 				continue
 			}
 			hasWindows = true
-			// CPA applies aliases, request affinity and per-model credential cooldowns
-			// during live selection. No SDK callback exposes that decision here, so
+			// Magpie applies aliases, routing rules and account rests when it picks
+			// an account for a request. Nothing exposes that decision to a plugin, so
 			// a model query retains every candidate instead of guessing from its name.
 			key := a.Provider + "|" + g.SourceLabel
 			group := byGroup[key]
@@ -399,7 +399,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 			total.Remaining /= total.weight
 		}
 	}
-	return map[string]any{"as_of": describeTime(s.Now, s.Now), "model": args["model"], "certain": args["model"] == "", "routing_note": "Model requests list conservative candidate pools: CPA aliases, affinity, exclusions and live credential selection cannot be resolved through the plugin SDK.", "forecast_note": "Rates are percentage points/hour. Forecasts assume unchanged consumption; null means unknown or stale. Seven-day rate is this cycle's average; five-hour rate is a recent piecewise linear fit.", "groups": groups, "accounts_without_windows": withoutWindows}, nil
+	return map[string]any{"as_of": describeTime(s.Now, s.Now), "model": args["model"], "certain": args["model"] == "", "routing_note": "Model requests list conservative candidate pools: Magpie's aliases, routing rules and live account selection are not visible to this plugin.", "forecast_note": "Rates are percentage points/hour. Forecasts assume unchanged consumption; null means unknown or stale. Seven-day rate is this cycle's average; five-hour rate is a recent piecewise linear fit.", "groups": groups, "accounts_without_windows": withoutWindows}, nil
 }
 
 func forecastWindow(w WindowStatus, target TargetView, points [][3]float64, now time.Time, poll time.Duration) quotaWindowDTO {

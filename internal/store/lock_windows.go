@@ -10,8 +10,8 @@ import (
 const errorSharingViolation syscall.Errno = 32
 
 // Lock is an exclusive lock on a file in the data directory. It keeps a newly
-// loaded plugin version from running next to an older one that CPA has not
-// stopped yet. The file is opened without sharing, so other opens fail until
+// started process from running next to an older one that has not stopped
+// yet, such as the program of a plugin host that Magpie is replacing. The file is opened without sharing, so other opens fail until
 // the holder closes it or its process exits.
 type Lock struct {
 	handle syscall.Handle

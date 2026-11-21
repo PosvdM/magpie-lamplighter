@@ -12,11 +12,11 @@ const text = (description) => ({ type: "string", description })
 
 export const TOOLS = {
   list_quotas: {
-    description: "Read current quota windows grouped by provider and quota pool, weighted remaining totals and earliest account exhaustion. Per-account fields include remaining percent, reset/start state, percentage points consumed per hour, estimated exhaustion and pre-reset risk, seven-day even-pace budget, freshness/source/error/credential state (credential_invalid, account_suspended), next ignition, plan and weight. Time objects contain ISO 8601 with timezone and relative time. Null means unknown. Forecasts are estimates. Model filtering returns conservative candidate pools with certain=false because CPA aliases, affinity and live credential selection are unavailable to this plugin. Accounts use the first note line with embedded emails masked, else *** plus the email user name's last two characters (or all characters if shorter; e.g. ***rk), else account-number. Duplicate labels receive unique #n suffixes; full emails are never returned." + NOT_READY,
+    description: "Read current quota windows grouped by provider and quota pool, weighted remaining totals and earliest account exhaustion. Per-account fields include remaining percent, reset/start state, percentage points consumed per hour, estimated exhaustion and pre-reset risk, seven-day even-pace budget, freshness/source/error/credential state (credential_invalid, account_suspended), next ignition, plan and weight. Time objects contain ISO 8601 with timezone and relative time. Null means unknown. Forecasts are estimates. Model filtering returns conservative candidate pools with certain=false because Magpie's aliases, routing rules and live account selection are not visible to this plugin. Accounts use the first note line with embedded emails masked, else *** plus the email user name's last two characters (or all characters if shorter; e.g. ***rk), else account-number. Duplicate labels receive unique #n suffixes; full emails are never returned." + NOT_READY,
     properties: {
       provider: text("Provider ID, e.g. codex or claude; omitted means all."),
       account: text(ACCOUNT),
-      model: text("CPA model ID or alias. Returns conservative candidates, never a definitive routing claim."),
+      model: text("Magpie model ID or alias. Returns conservative candidates, never a definitive routing claim."),
     },
   },
   get_quota_history: {

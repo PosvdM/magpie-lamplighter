@@ -19,10 +19,11 @@ const (
 	sourceQuery  = "query"
 )
 
-// A quota query answers HTTP 401 when CPA has not refreshed an expired
-// access token yet, which its next refresh fixes. CPA refreshes credentials
-// every 15 minutes, so a rejection that lasts queryProblemAge and
-// queryProblemCount queries in a row is no expired token. A suspended
+// A quota query can answer HTTP 401 for a token that has just expired and
+// that Magpie or the agent CLI owning it has not renewed yet; Lamplighter
+// never renews such a token itself, and the owner renews it at its own
+// pace. A rejection that lasts queryProblemAge and queryProblemCount
+// queries in a row is therefore taken as an invalid credential. A suspended
 // account is reported with the first query.
 const (
 	queryProblemAge   = 30 * time.Minute

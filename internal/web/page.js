@@ -280,7 +280,7 @@
       quota_reset: "额度重置",
       loading: "加载中…", no_history: "这个范围内还没有额度数据。",
       history_failed: "读取历史失败：{0}",
-      tz_config: "配置中指定", tz_cpa: "跟随服务器",
+      tz_config: "配置中指定", tz_server: "跟随服务器",
       tz_note: "通知和页面中的时间使用 {0}，{1}。",
       save_failed: "保存失败：{0}",
       load_failed: "加载失败：{0}",
@@ -450,7 +450,7 @@
       quota_reset: "quota reset",
       loading: "Loading…", no_history: "No quota data in this range yet.",
       history_failed: "Could not read the history: {0}",
-      tz_config: "set in the config", tz_cpa: "following the server",
+      tz_config: "set in the config", tz_server: "following the server",
       tz_note: "Notifications and this page show times in {0}, {1}.",
       save_failed: "Could not save: {0}",
       load_failed: "Could not load: {0}",
@@ -3464,7 +3464,7 @@
     var name = status && status.timezone && status.timezone !== "Local" ? status.timezone : "";
     var sign = offset >= 0 ? "+" : "-";
     var utc = "UTC" + sign + Math.abs(offset);
-    var source = rawConfig.timezone || rawConfig.timezone_offset_hours !== undefined ? translate("tz_config") : translate("tz_cpa");
+    var source = rawConfig.timezone || rawConfig.timezone_offset_hours !== undefined ? translate("tz_config") : translate("tz_server");
     return translate("tz_note", name ? name + " (" + utc + ")" : utc, source);
   }
 

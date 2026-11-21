@@ -5,15 +5,15 @@ import (
 	"strings"
 )
 
-// Notification languages. The management page reports the language of the
-// Management Center, and notifications use the last one reported; Chinese
-// is used until a page has reported one.
+// Notification languages. The management page reports the language it
+// shows, and notifications use the last one reported; Chinese is used until
+// a page has reported one.
 const (
 	LangZH = "zh"
 	LangEN = "en"
 )
 
-// NormalizeLang maps a Management Center language such as "zh-CN" or "en"
+// NormalizeLang maps a page language such as "zh-CN" or "en"
 // to a notification language. Chinese variants map to Chinese and every
 // other language to English, the languages the texts exist in.
 func NormalizeLang(value string) string {

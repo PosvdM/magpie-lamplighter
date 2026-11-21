@@ -902,7 +902,7 @@ func (e *Engine) language() string {
 	return notify.NormalizeLang(e.lang)
 }
 
-// SetLanguage records the Management Center language reported by the page;
+// SetLanguage records the language the management page reports;
 // notifications use it from then on.
 func (e *Engine) SetLanguage(lang string) error { return e.send("language", lang) }
 

@@ -23,6 +23,7 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 | `internal/release` | 读取 GitHub 上的最新 Release，比较版本号 |
 | `internal/store` | `state.json`、额度历史和实例锁 |
 | `internal/web` | 管理页面，HTML、CSS、JS 分文件编辑，运行时合成一个文档 |
+| `npm/` | Magpie 插件外壳（npm 包 `magpie-lamplighter`）：Bun 入口启动程序并提供 tools，页面启动文件，见“插件外壳” |
 
 ## 进程和数据目录
 
@@ -224,7 +225,7 @@ iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 
 
 `saveHost` 将普通设置的保存结果定位到 `.settings-section > .card-title`，高级设置定位到各自 `fieldset > legend`，每处只包含一个 `.save-state`。标题中的文字用子元素承载，切换语言时保留状态节点，`saveText` 按当前语言显示本地状态文案，上游错误原文保持不变。每个标题通过 `saveEntries` 按项保存状态、控件和独立所有权；没有失败时按保存发起顺序显示最近一次进度，较早保存的迟到确认不能覆盖较新的进度。失败独立保留到该项重新写入成功，其他项成功和输入事件不能清除；多项失败时显示最近的失败原因与其余数量。失败控件带 `aria-invalid="true"`，边框使用 `--error-color`；单选框和勾选框使用同色外框。标题及 legend 保持固定行高，失败摘要、原因、计数通过 `data-save-part` 分开渲染。桌面端摘要及原因单行省略，失败数量单独保留；宽度不超过 640 px 时隐藏字段摘要与原因，只显示“保存失败”和失败数量，正常进度仍可单行显示。标题文字可以省略，为失败标识及数量保留空间。记住筛选条件的开关照常写入配置，在“额度图表”legend 显示保存结果，具体筛选值保存在浏览器中。测试推送的结果仍由按钮旁的 `#test-results` 显示；复制操作通过 toast 提示结果。
 
-“设置”视图的“账号”区通过手柄支持一维拖动排序，以凭证文件名列表整体保存 `account_order`；页面在后端排序基础上按最新保存的列表重排，使卡片和图表立即响应顺序变化。拖动使用 Pointer Events，手柄设置 `touch-action: none`；固定定位的不可交互副本跟随指针，副本使用卡片的圆角、边框和背景并保留浮动阴影，原行隐藏内容并显示同样圆角的虚线边框作为占位。命中判断使用各行不含变换的布局中线，其他行以 180 毫秒的 FLIP 动画让位。松手时副本滑至占位行后保存，保存状态显示在“账号”标题旁；按 Esc 或收到 `pointercancel` 时恢复原顺序，不保存。拖动及落定期间推迟账号重绘，系统要求减少动态效果时跳过动画。
+“设置”视图的“账号”区通过手柄支持一维拖动排序，以账号 pin 列表整体保存 `account_order`；页面在后端排序基础上按最新保存的列表重排，使卡片和图表立即响应顺序变化。拖动使用 Pointer Events，手柄设置 `touch-action: none`；固定定位的不可交互副本跟随指针，副本使用卡片的圆角、边框和背景并保留浮动阴影，原行隐藏内容并显示同样圆角的虚线边框作为占位。命中判断使用各行不含变换的布局中线，其他行以 180 毫秒的 FLIP 动画让位。松手时副本滑至占位行后保存，保存状态显示在“账号”标题旁；按 Esc 或收到 `pointercancel` 时恢复原顺序，不保存。拖动及落定期间推迟账号重绘，系统要求减少动态效果时跳过动画。
 
 “高级”中的“对外访问”设置 `public_listen`、`web_enabled` 和 `admin_key`，状态读取 `status.public`（`listen`、`running`、`error`、`web`、`mcp`，`publicState`）；状态接口没有这个字段时退回读取 `status.mcp` 的 `listen`、`running` 和 `error`。开启 `web_enabled` 时没有管理密钥，页面用 `crypto.getRandomValues` 生成 32 字节随机数，以 `lladm_` 加 base64url 编码与开关一起保存；“生成新密钥”确认后替换它。“MCP”设置 `mcp_enabled` 和 `mcp_key`，监听状态读取 `status.mcp`；开启时没有有效密钥，同样生成 `llmcp_` 开头的密钥一起保存。两种密钥打码显示，可以显示和复制。保存这些字段后，对外监听的错误（`status.public.error`，没有 `status.public` 时为 `status.mcp.error`）显示为保存失败，页顶也显示提示。客户端配置中的地址取浏览器中保存的对外地址，没有时取对外监听地址。
 
@@ -251,7 +252,7 @@ iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 
 
 - **时间轴**：1、3 小时和 1、4 天的横轴右端是现在。从 6 小时、8 天起（5 小时额度的 6、12、24、26 小时，7 天额度的 8、15 天、1 个月和 36 天），横轴总长仍等于所选范围，右端是所选行当前窗口的重置时间。合计行取各账号中最早的下一次重置，即行右侧 ↻ 的时间；已经过去的重置时间（窗口还没有重新开启，或之后没有查询到）不算。例如 6 小时显示当前 5 小时窗口和上个窗口的最后 1 小时。`RANGES` 中的 `24h` 既是 5 小时额度的 24 小时，也是 7 天额度的 1 天，只有前者延伸（`extendsAhead`）。历史接口返回到现在为止的范围，页面不画横轴左端之前的部分。切换所选行时整张图平移；时间流逝时横轴不动，窗口重置后右端移到新窗口的重置时间。所选行没有重置时间、重置时间已过（5 小时窗口还没有被新请求开启），或重置时间离现在超过所选范围时，右端是现在。现在之后的部分画成与缺数据相同的斜纹，不画表示现在的竖线。详情图绘图区的左右两端是实线，与 0% 线相同；刻度离两端不到 4 像素时只标时间，不画刻度虚线，以免与边线并排。概览图和详情图共用这条横轴。
 - **缺数据**：相邻样本间隔超过 3.5 个查询间隔（或接口的分段长度）时视为缺数据，画成斜线纹理，不延续前一个值。启用被动跳过时，阈值至少为 `passive_skip_max_minutes` 加 1.5 个查询间隔：响应头里没有的窗口（如没在使用的 Fable）在跳过期间只能等下一次主动查询，这段间隔不算缺数据。
-- **多账号合计**：同一服务、同一 `source_label` 的多个账号合成一行，取各账号剩余百分比按权重的加权平均值（`pooled`），权重与各账号的额度大小成比例时，这等于总额度的剩余比例。合计行的当前值、曲线和延长线都用加权值；详情图的阴影仍是各账号的最低到最高。权重依次取 `account_weights` 中按凭证文件名（状态接口中账号的 `name`）设置的值、状态接口中账号的 `default_weight`，都没有时为 1（`accountWeight`）；权重全为 1 时就是简单平均。
+- **多账号合计**：同一服务、同一 `source_label` 的多个账号合成一行，取各账号剩余百分比按权重的加权平均值（`pooled`），权重与各账号的额度大小成比例时，这等于总额度的剩余比例。合计行的当前值、曲线和延长线都用加权值；详情图的阴影仍是各账号的最低到最高。权重依次取 `account_weights` 中按账号 pin（状态接口中账号的 `name`，与 `auth_index` 相同）设置的值、状态接口中账号的 `default_weight`，都没有时为 1（`accountWeight`）；权重全为 1 时就是简单平均。
 - **窗口种类与行集合**：标签页和图表行取当前状态中的窗口与所选范围内历史系列的并集，按 `kind` 分到“5 小时额度”和“7 天额度”两个标签页（一个都不知道时两个都显示），默认打开第一个；其他长度的窗口不画进图表。当前窗口没有对应历史系列时，前端补一条空样本行，使用当前剩余和重置时间显示标题，曲线区显示缺数据，不伪造样本。同一额度名下有自己标签的窗口（例如 Claude 的 `7 Day Opus`）单独成行，不与主窗口合并。
 - **已停用窗口**：历史系列在当前状态中没有对应窗口时，且所选范围内仍有样本，单独显示为“已停用”。该行放在同一额度组的当前行后，不计入合计，不参与剩余最低排序；条带和曲线停在最后一个样本，不画匀速参考线和延长线。最后一个样本移出范围时隐藏；历史接口仍返回这些系列，由前端过滤。
 - **排序**：图表默认跟随卡片顺序，同一额度的合计行使用其第一个当前账号的位置；同一账号内按 `group_order` 排列（Claude、GPT、Gemini、Fable、Claude / GPT，来自 `internal/providers/provider.go` 的 `groupOrder`）。也可按当前剩余从低到高排列。状态接口中账号优先按 `account_order` 中的 pin 排列，未列出的按服务注册顺序、账号后缀排列；不存在的条目忽略，重复条目以第一次为准。同一账号的额度组按额度组注册顺序排列，所以账号卡片上 Gemini 在 Claude / GPT 之前、Claude 在 Fable 之前。
@@ -348,7 +349,7 @@ Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组�
 | Claude | `GET https://api.anthropic.com/api/oauth/usage`，`anthropic-beta: oauth-2025-04-20` |
 | Antigravity | `POST .../v1internal:retrieveUserQuotaSummary`，依次尝试三个地址，正文为 `{"project": "<project_id>"}` |
 
-请求头取自 CLIProxyAPI 管理中心的额度页，常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 Codex CLI 一致，Claude 的 User-Agent 与 Claude Code 一致。
+请求头常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 Codex CLI 一致，Claude 的 User-Agent 与 Claude Code 一致。
 
 Antigravity 的 User-Agent 按以下规则确定。Cloud Code 按 User-Agent 判断客户端，对旧格式的客户端（如 `antigravity/cli/1.0.13 (aidev_client; ...)`）不返回 Gemini 额度组。
 
@@ -380,7 +381,7 @@ token 来自 `host.Credential`。Claude 和 Codex 的 token 由 Magpie 或代理
 
 - Codex：取 `wham/usage` 返回的 `plan_type`，每次主动查询都更新，不另发请求。套餐名与 Codex CLI 的状态页一致（`codex-rs/tui/src/subscription.rs`），默认权重为价格除以 Plus 的 20 美元：`prolite`（Pro $100）和 `self_serve_business_prolite`（Business Premium）为 5，`pro`（Pro $200）为 10，`promax`（Pro $500）为 25，`free` 和 `go` 为 0.1，其余为 1；Business（`team`）、Enterprise 和 Edu 席位的额度与 Plus 相同。未知的 `plan_type` 以原值作为套餐名，权重为 1。
 - Claude：额度响应里没有套餐。主动查询成功后请求 `GET https://api.anthropic.com/api/oauth/profile`，请求头与额度查询相同。请求失败时保留上次的结果，只记 debug 日志，不影响额度查询。原始值是 `organization.organization_type` 和 `organization.rate_limit_tier` 以空格连接：`claude_pro` 为 Pro（1）；`claude_max` 的 tier 含 `20x` 为 Max 20x（20），含 `5x` 为 Max 5x（5），都不含时为 Max（5）；`claude_team`、`claude_enterprise` 为 Team、Enterprise（1）。没有 `organization_type` 时按 `account.has_claude_max`、`has_claude_pro` 判断。2026-10-20 在 Pro 账号上实测为 `claude_pro` 和 `default_claude_ai`；Max 和 Team 的取值来自 Claude Code 的已知用法，未经实测。
-- Antigravity：额度响应里没有套餐。主动查询成功后请求 `POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`，请求体 `{"metadata":{"ideType":"ANTIGRAVITY"}}` 和 User-Agent 与 CPA 读取 Antigravity 额度点数时相同。原始值是 `paidTier.id`，没有 `paidTier` 时为 `currentTier.id`。Google AI Pro 账号的 `currentTier.id` 也是 `free-tier`，所以以 `paidTier` 为准。`free-tier` 为 Free，`g1-<名称>-tier` 取中间的名称并大写首字母，例如 `g1-pro-tier` 为 Pro；其余以原值作为套餐名。Google 没有公布各套餐额度的倍数，权重都是 1。2026-10-23 在 Google AI Pro 账号上实测 `paidTier.id` 为 `g1-pro-tier`；没有付费套餐时不带 `paidTier` 是推测，未经实测。
+- Antigravity：额度响应里没有套餐。主动查询成功后请求 `POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`，请求体为 `{"metadata":{"ideType":"ANTIGRAVITY"}}`，User-Agent 与额度查询相同。原始值是 `paidTier.id`，没有 `paidTier` 时为 `currentTier.id`。Google AI Pro 账号的 `currentTier.id` 也是 `free-tier`，所以以 `paidTier` 为准。`free-tier` 为 Free，`g1-<名称>-tier` 取中间的名称并大写首字母，例如 `g1-pro-tier` 为 Pro；其余以原值作为套餐名。Google 没有公布各套餐额度的倍数，权重都是 1。2026-10-23 在 Google AI Pro 账号上实测 `paidTier.id` 为 `g1-pro-tier`；没有付费套餐时不带 `paidTier` 是推测，未经实测。
 - 其他服务没有套餐，默认权重为 1。
 
 Claude 和 Antigravity 的单独请求（`Provider.Profile`）每个账号每 24 小时发一次（`plans` 中的 `checked`）。账号的主动查询结果与上一次相比有额度窗口增减时（比较 `plans` 中的 `windows`），之后 1 小时（`planRecheckPeriod`，记在 `recheck_until`）内每次主动查询都读一次套餐，直到读到套餐变化：Google AI Pro 到期后，Antigravity 的接口不再返回 5 小时窗口，7 天窗口换成免费账号的新额度。读取可能失败，套餐也可能比窗口晚一步变化，所以不只读一次。`windows` 保存在 `state.json` 中，插件停止期间发生的变化在重启后的第一次查询就能发现。重读期间读取失败时，这一轮不处理这个账号的额度提醒（只记录样本），等下一轮读到套餐再比较，因为这时的窗口可能属于一个还没读到的新套餐。从未读到过套餐的账号不暂缓：之后读到套餐也只算第一次读到，不会重新记录基线。重读期间读取失败后，15 分钟（`planRetryPeriod`）后的第一次主动查询会再读一次，1 小时结束后也是如此，不必等到 24 小时后。读取连续失败超过 1 小时后，额度提醒恢复按旧基线比较。套餐比窗口晚一步变化时（窗口变化的那一轮读到的仍是旧套餐），这一轮的额度提醒按旧基线比较，可能发出一条错误的恢复或下降提醒，读到新套餐的那一轮才推送套餐变化。
@@ -559,7 +560,7 @@ Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回�
 账号的凭证问题记在 `state.json` 的 `credentials`（按 `auth_index`，`store.CredentialState`），代码在 `internal/engine/credential.go`：
 
 - **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
-- **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 过期且 CPA 还没刷新时也返回 401，CPA 每 15 分钟刷新一次凭证，持续两个刷新周期以上的 401 不是过期。其他结果清零计数。
+- **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 刚过期、Magpie 或代理 CLI 还没刷新时也可能返回 401，Lamplighter 不自己刷新这些 token，刷新的时间由它们决定，持续这么久的 401 才按凭证失效处理。已知过期的 token（`Expired`）不发给厂商，见“与 Magpie 的接口”的“额度记录”。其他结果清零计数。
 - **通知**：进入问题状态时记录 `credential_invalid` 事件，并发送一次通知：`auth` 为“🔑 … 凭证失效”，`suspended` 为“⛔ … 账号已停用”（有申诉链接时附上，https 链接同时作为 Bark 的跳转链接）。同一账号已处于同一类问题时，点火和查询再发现都只更新指纹，不再记事件或通知；点火发现或以同一原因再次确认过的问题（例如查询发现、换凭证后点火又失败）记为点火确认（`ignited`），只有点火成功才能结束。之后查询发现另一种原因（例如停用后查询又连续 401 满 30 分钟）时，事件和通知按新原因和来源照常发出，点火确认继续保留；只有凭证指纹变化后，新原因的问题才不带点火确认；状态在 `state.json` 中，插件重启后也不重复。发送失败时随之后每轮查询重试，每轮最多发一次：查询发现问题的那一轮已经发过，轮末的 `flushCredentialNotices` 跳过本轮发过或试过的通知（`credNoticeTried`）；1 小时（`credentialNoticeAge`）后放弃；没有推送渠道时不发送，这个问题也就不发恢复通知。
 - **凭证变化**：进入问题状态时记下凭证指纹（`host.Credential.Fingerprint`，由 `internal/magpie` 计算：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。Magpie 和代理 CLI 会改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
 - **恢复**：点火成功（含手动点火）结束任何凭证问题；额度查询成功只结束没有点火确认的问题。2026-11-16 Antigravity 账号因 TOS_VIOLATION 点火被拒后，额度查询仍然成功，查询成功不能说明停用已解除。结束时记录 `credential_restored` 事件；问题通知已送达时发送“✅ … 凭证已恢复”。
@@ -584,7 +585,7 @@ Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回�
 - 第一次看到某个窗口只记录基线，不推送。
 - 推送失败（所有渠道都失败）时不更新已通知等级，下一次检查会重试。
 
-Bark 请求为 `GET {bark_url}/{标题}/{正文}?group&level&icon&url`，标题和正文除 RFC 3986 非保留字符外全部百分号编码，返回 JSON 中 `code` 不为 200 视为失败。`icon` 默认使用仓库中的 `assets/logo.png`；配置中的 `bark_icon` 仍为旧默认值（CPA Management Center 图标）时，载入时替换为该默认值。
+Bark 请求为 `GET {bark_url}/{标题}/{正文}?group&level&icon&url`，标题和正文除 RFC 3986 非保留字符外全部百分号编码，返回 JSON 中 `code` 不为 200 视为失败。`icon` 默认使用仓库中的 `assets/logo.png`（`bark_icon`）。
 
 ### 渠道
 

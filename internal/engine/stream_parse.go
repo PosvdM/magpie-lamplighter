@@ -160,7 +160,7 @@ func streamError(v map[string]any) error {
 	if len(identifiers) > 0 {
 		code = strings.Join(identifiers, "/")
 	}
-	return &host.Error{Method: "host.model.stream_read", Code: code, Status: status, Message: message, AppealURL: appeal}
+	return &host.Error{Method: "model stream", Code: code, Status: status, Message: message, AppealURL: appeal}
 }
 
 // streamCapture parses the gateway's SSE body without retaining raw responses or
