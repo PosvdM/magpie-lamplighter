@@ -482,6 +482,7 @@ The internal listener serves Magpie only, needs no key and accepts only requests
 ## Security and risk
 
 - The plugin reads the tokens Magpie keeps only in memory, to query quotas, and never writes them to logs or disk.
+- Before an error text is written to the log, the state, the events and the history, or shown on the page, in the API, over MCP and in notifications, emails keep only the last two characters of the user name (such as `***rk`), URLs lose their query and user info, and token-like strings become an ellipsis. The rules are in [错误文本的脱敏](./docs/architecture.md#错误文本的脱敏) (Chinese).
 - `bark_url`, `webhook`, `admin_key` and `mcp_key` are stored in plain text in `config.json` (mode 600), readable by anyone who can reach the internal listener or holds the admin key.
 - The internal listener needs no key, so any program on the same machine (in the same container for Docker) can reach it; other web pages in a browser cannot call its API.
 - Each service has its own restrictions on third-party tools using subscription accounts. Using accounts through Magpie, sending scheduled ignition requests and querying quota may all put an account at risk; judge for yourself.

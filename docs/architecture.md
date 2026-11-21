@@ -22,6 +22,7 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 | `internal/notify` | Bark 和 webhook 发送、额度提醒、Did Codex Reset 转发 |
 | `internal/release` | 读取 GitHub 上的最新 Release，比较版本号 |
 | `internal/store` | `state.json`、额度历史和实例锁 |
+| `internal/redact` | 错误文本离开进程或写入磁盘前的脱敏，见“错误文本的脱敏” |
 | `internal/web` | 管理页面，HTML、CSS、JS 分文件编辑，运行时合成一个文档 |
 | `npm/` | Magpie 插件外壳（npm 包 `magpie-lamplighter`）：Bun 入口启动程序并提供 tools，页面启动文件，见“插件外壳” |
 
@@ -65,7 +66,7 @@ npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `n
 | `ConfirmIdentity` | 只读本地文件，核对 agy-cli 账号的登录属于这个账号（规则同“凭证”中的 Antigravity），返回登录的指纹；不读代理设置，也不刷新 token。任何错误都表示没有核对成功。Codex 和 Claude 账号直接返回空指纹。点火在每个 agy-cli 请求发出前调用它，见“凭证问题” |
 | `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。见下文“额度记录” |
 | `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。发送前重新读取账号列表，确认目标仍是启用的订阅账号且有账号名：网关收到没有 `user` 的请求会刷新该服务的所有账号。确认失败或网关不可用时返回 `host.Error`，`Code` 为 `account_not_found`（没有这个 pin、不是订阅账号或没有账号名）、`account_off`（已在 Magpie 中停用）或 `gateway_unavailable`（连不上网关、网关返回 5xx 或超时），`Message` 为中文短句；网关返回的 4xx 和格式错误照原样返回。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次发出刷新的时间计算，过早时返回 `ErrRefreshLimited`；刷新发出之前的确认、读取失败的调用不计入。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒；没有重新读取（30 秒内读过、读取失败或 Magpie 按设置暂不读取）时照样返回缓存的额度卡。所以发送刷新前先用 `kept=1` 记下这个账号的卡的读取时间（`readAt`，没有时取 `asOf`；`kept=1` 与刷新端点返回的卡都来自 Magpie 的 `CachedCards`，时间可以比较），刷新后在返回的卡中按服务和账号名（不区分大小写，不含 `from` 不为空的远程卡）找到这个账号：找不到，卡上有 `readDeferred`、`readError` 或 `error`，没有读取时间，或读取时间没有晚于刷新前时，返回 `Code` 为 `refresh_stale` 的 `host.Error`（`refreshStale`）。`Message` 是中文短句，带 Magpie 给出的原因时只保留一行、最多 120 个字符，邮箱只留用户名末两位（如 `***rk`），32 个字符以上的类 token 字符串替换为省略号（`shortReason`）。刷新前的读取已完成、调用方的 context 却已结束时不发送刷新，也不计入刷新间隔。引擎只在手动刷新凭证已过期的账号时调用，见下文“额度记录” |
-| `RefreshKept` | 即 `RefreshQuota`，另外把刷新返回的这个账号的卡按 `KeptQuotas` 的规则转成 `host.KeptQuota` 一起返回（`keptOf`），引擎因此不必再读一次额度记录。刷新端点的卡来自 Magpie 的 `provider.SubscriptionQuota`，窗口可能只给出 `resetSecs`（距重置的秒数），按收到回答的时间换算成重置时间，与 `kept=1` 的换算相同。返回 `refresh_stale` 时也带上这张卡；卡上没有读取时间，或没有 Lamplighter 认得的窗口（如 Antigravity 的卡）时不返回卡。卡比刷新前的读数新、却无法转换（如参与转换的窗口缺少 `used`）时，再读一次 `kept=1`（`keptAfter`）：其中这个账号的卡同样比刷新前的读数新且能转换时，作为刷新返回的卡；否则返回包装 `host.ErrFormat` 的错误，既不算刷新成功，也不算 `refresh_stale`。比较的基准是刷新前 `kept=1` 中这张卡的读取时间，与引擎已应用的读数无关 |
+| `RefreshKept` | 即 `RefreshQuota`，另外把刷新返回的这个账号的卡按 `KeptQuotas` 的规则转成 `host.KeptQuota` 一起返回（`keptOf`），引擎因此不必再读一次额度记录。刷新端点的卡来自 Magpie 的 `provider.SubscriptionQuota`，窗口可能只给出 `resetSecs`（距重置的秒数），按收到回答的时间换算成重置时间，与 `kept=1` 的换算相同。返回 `refresh_stale` 时也带上能转换的卡。比较的基准是刷新前 `kept=1` 中这张卡的读取时间，与引擎已应用的读数无关。以下情况返回包装 `host.ErrFormat` 的错误，既不算刷新成功，也不算 `refresh_stale`：卡不比刷新前的读数新、也无法转换（如参与转换的窗口缺少 `used`），这时额度记录中是同一张卡；卡比刷新前的读数新，却没有 Lamplighter 认得的窗口（如 Antigravity 的卡，或窗口都还没有开始的 Claude 账号的卡），Magpie 读到了新读数，但其中没有可应用的额度；卡比刷新前的读数新、却无法转换时，再读一次 `kept=1`（`keptAfter`），其中这个账号的卡同样比刷新前的读数新且能转换时作为刷新返回的卡，否则返回这个错误。所以没有错误时总带着一张比刷新前的读数新的卡。转换错误中的窗口名只写 Lamplighter 认得的名称，其他写成 `a window`（`windowName`）：窗口名来自 Magpie 的卡，可以是任何文字 |
 | `Models` | 网关的 `GET /v1/models` |
 | `OpenModelStream` / `ReadModelStream` / `CloseModelStream` | 向网关发送点火请求（`openai-response` 为 `POST /v1/responses`，`claude` 为 `POST /v1/messages`，`openai` 为 `POST /v1/chat/completions`），带 `X-Magpie-Account`。`OpenModelStream` 的 context 只在响应头到达前取消请求；之后请求已到达厂商，只由 `CloseModelStream` 结束，调用方负责关闭每个打开的流。非 2xx 的错误正文在 10 秒内读完（`errorBodyWait`），不受 context 取消影响，状态码照常返回 |
 | `Log` | 标准错误输出，由插件宿主转交 Magpie 的日志 |
@@ -76,7 +77,7 @@ Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，�
 
 `internal/magpie` 直接连接 `MAGPIE_ADDR`（`0.0.0.0:<端口>` 和 `:<端口>` 改为 `127.0.0.1:<端口>`，与插件宿主相同），不经过环境变量中的代理。网关对来自本机回环地址的请求不要求密钥；带有转发头（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`Cf-Connecting-IP` 等）或浏览器特征（`Origin`、`Sec-Fetch-*`、以 `Mozilla/` 开头的 User-Agent）的请求按其他机器的请求处理，需要网关密钥（Magpie 的 `internal/gateway/lan.go`），因此请求中不带这些头。`MAGPIE_ADDR` 设为局域网地址时，请求不算来自本机，网关会拒绝，Lamplighter 不处理这种情况。
 
-所有网关请求共用 `internal/magpie/client.go` 中的 HTTP 客户端（不用代理，连接超时 10 秒，没有总超时）和辅助函数：`gatewayURL` 拼出地址，`newGatewayRequest` 加上 User-Agent `magpie-lamplighter`，`gatewayJSON` 发送请求并解析 JSON 响应。请求没有得到回答（连不上网关、超时或被取消）时得到 `Code` 为 `gateway_unreachable` 的 `host.Error`（用 `errors.As` 取出），读取回答失败时得到普通错误；点火请求在收到响应头之前失败时同样处理。这些错误的文字只有请求方法、不带查询参数的路径和原因（如 `request canceled`、`request timed out`、`connection refused`，`failedRequest`），不带 URL：刷新请求的查询参数 `user` 是账号邮箱，`*url.Error` 的文字却带完整 URL。被 context 结束的请求仍包装 `context.Canceled` 或 `context.DeadlineExceeded`，可以用 `errors.Is` 判断。网关返回非 2xx 时 `gatewayError` 给出 `host.Error`：`Code` 为 `gateway_http_error`，`Method` 为请求方法和路径，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
+所有网关请求共用 `internal/magpie/client.go` 中的 HTTP 客户端（不用代理，连接超时 10 秒，没有总超时）和辅助函数：`gatewayURL` 拼出地址，`newGatewayRequest` 加上 User-Agent `magpie-lamplighter`，`gatewayJSON` 发送请求并解析 JSON 响应。请求没有得到回答（连不上网关、超时或被取消）时得到 `Code` 为 `gateway_unreachable` 的 `host.Error`（用 `errors.As` 取出），读取回答失败时得到普通错误；点火请求在收到响应头之前失败时同样处理。这些错误的文字只有请求方法、不带查询参数的路径和原因（如 `request canceled`、`request timed out`、`connection refused`，`failedRequest`），不带 URL：刷新请求的查询参数 `user` 是账号邮箱，`*url.Error` 的文字却带完整 URL。被 context 结束的请求仍包装 `context.Canceled` 或 `context.DeadlineExceeded`，可以用 `errors.Is` 判断。context 带自定义原因结束时（`context.WithDeadlineCause`，如手动刷新的截止时间），`net/http` 返回的错误只包装这个原因，所以 `failureOf` 按请求的 context 判断是超时还是取消；`RefreshKept` 在发送刷新前发现调用方已结束时，错误的文字是这个原因，同时包装原因和 context 自己的错误（`ended`）。网关返回非 2xx 时 `gatewayError` 给出 `host.Error`：`Code` 为 `gateway_http_error`，`Method` 为请求方法和路径，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
 
 后台循环传入的 context 只在插件停止时取消，网关接受连接后不发响应头或正文发到一半停住时，没有期限的调用会一直挡住后台循环。所以 `Accounts`、`KeptQuotas` 和 `Models` 在入口设置整次调用的期限，覆盖响应头、正文和调用中附带的账号列表查询：`Accounts`（`accountsTimeout`）、`KeptQuotas`（`keptTimeout`）和 `Models`（`listTimeout`）为 20 秒。`RefreshQuota` 分两段计时：刷新前的账号列表和 `kept=1` 读取共 8 秒（`refreshLookTimeout`），刷新请求本身 32 秒（`refreshTimeout`），前面的读取慢不会挤占刷新的时间。32 秒要容纳网关为一张额度卡等待的 30 秒（Claude 的卡运行 Claude Code 的 `/usage`），两段合计 40 秒。两段都随调用方的 context 结束；调用方自己的期限或取消造成的错误照原样返回，不写成 `gateway_unavailable`。手动刷新怎样分配时间见“额度记录”的“过期的凭证”。点火流的时限见“流式执行与取消”。
 
@@ -116,7 +117,7 @@ Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gem
 
 被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
 
-**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再应用刷新返回的这个账号的卡（`refreshKept`，宿主实现 `host.KeptRefresher` 时）；回答中没有这张卡，或刷新失败时，再读一次额度记录，最多等 5 秒（`keptRereadWait`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。`RefreshQuota` 返回 `Code` 为 `refresh_stale` 的 `host.Error`（Magpie 这次没有读到新额度），或返回成功但额度记录中的读数不比刷新前已应用的新时，同样应用已有的读数用于显示，但这次刷新算失败，原因为“Magpie 这次没有读到新额度”，`refresh_stale` 的 `Message` 跟在冒号后（最长 120 个字符，`staleRefresh`）。定时查询只读额度记录，找到旧读数不算错误。`RefreshQuota` 返回 `Code` 为 `account_off`、`account_not_found` 或 `gateway_unavailable` 的 `host.Error` 时，原因写成固定的短句（“账号在 Magpie 中已关闭”“Magpie 中找不到这个账号”“Magpie 网关不可用”，`refreshReasons`），不带 Magpie 的原文。只刷新一个账号时，`engine.manualPoll` 把这个账号的错误交回调用方：`POST /api/refresh` 返回 `ok: false` 和错误文字；MCP 的 `refresh_quotas` 返回 `ok: false` 和 `error`，只在错误是 `refreshFailure`（上述三种原因、没有读到新额度，以及账号已不在凭证列表中）时写明原因：没有读到新额度时 `error` 就是上面的原因，其余在原因前加“Magpie 刷新额度失败：”；其他错误的文字可能带上游响应或账号名，只提示查看 `list_quotas`。账号在刷新时已不在凭证列表中（在 Magpie 中关闭、删除，或服务未开启监控）时返回 `errRefreshAccountGone`。刷新全部账号时只报告凭证列表读取失败，各账号的错误在状态中。经 Magpie 调用的 tool 最多等约 50 秒（插件宿主给 55 秒，内部监听的工具路由给 50 秒），所以手动刷新按整次调用分配时间：从 `manualPoll` 开始计时，读取账号列表也算在内，最长 48 秒（`manualRefreshBudget`）；发来命令的请求有期限时（`command.deadline`，如工具路由的 50 秒），最晚在它之前 1 秒（`replyMargin`）结束（`manualRefreshEnd`）。整轮手动刷新（读取账号列表、主动查询、`RefreshQuota` 和再读额度记录）共用一个在结束时间到期的 context，所以刷新全部账号时，无论有多少账号等待 Magpie，都在结束时间之前结束：到期时还没有查询的账号本轮不再查询，错误为“超过手动刷新的时限，未完成”（`errManualTimeUp`），本轮的凭证通知也留给下一轮发送。所有 `RefreshQuota` 共用从它派生的 context，在结束时间之前 5 秒（`keptRereadWait`）到期，留给之后再读一次额度记录；一次 `RefreshQuota` 最多用 40 秒（见“网关请求”）。刷新因这些期限失败时，原因同样为“超过手动刷新的时限，未完成”；插件停止造成的取消不写这个原因。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
+**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再应用刷新返回的这个账号的卡（`refreshKept`，宿主实现 `host.KeptRefresher` 时）；回答中没有这张卡，或刷新失败时，再读一次额度记录，最多等 5 秒（`keptRereadWait`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。宿主实现 `host.KeptRefresher` 时，只有刷新返回了这张卡才算成功：这张卡比刷新前 Magpie 的读数新，再读的额度记录只比引擎已应用的读数新，可能是刷新前就有的读数；刷新返回成功却没有卡时按包装 `host.ErrFormat` 的错误处理。没有实现时，再读的读数比刷新前已应用的新才算成功。`RefreshQuota` 返回 `Code` 为 `refresh_stale` 的 `host.Error`（Magpie 这次没有读到新额度），或（宿主没有实现 `host.KeptRefresher` 时）返回成功但额度记录中的读数不比刷新前已应用的新时，同样应用已有的读数用于显示，但这次刷新算失败，原因为“Magpie 这次没有读到新额度”，`refresh_stale` 的 `Message` 跟在冒号后（最长 120 个字符，`staleRefresh`）。定时查询只读额度记录，找到旧读数不算错误。`RefreshQuota` 返回 `Code` 为 `account_off`、`account_not_found` 或 `gateway_unavailable` 的 `host.Error` 时，原因写成固定的短句（“账号在 Magpie 中已关闭”“Magpie 中找不到这个账号”“Magpie 网关不可用”，`refreshReasons`），不带 Magpie 的原文。只刷新一个账号时，`engine.manualPoll` 把这个账号的错误交回调用方：`POST /api/refresh` 返回 `ok: false` 和错误文字；MCP 的 `refresh_quotas` 返回 `ok: false` 和 `error`，只在错误是 `refreshFailure`（上述三种原因、没有读到新额度，以及账号已不在凭证列表中）时写明原因：没有读到新额度时 `error` 就是上面的原因，其余在原因前加“Magpie 刷新额度失败：”；其他错误的文字可能带上游响应或账号名，只提示查看 `list_quotas`。账号在刷新时已不在凭证列表中（在 Magpie 中关闭、删除，或服务未开启监控）时返回 `errRefreshAccountGone`。刷新全部账号时只报告凭证列表读取失败，各账号的错误在状态中。经 Magpie 调用的 tool 最多等约 50 秒（插件宿主给 55 秒，内部监听的工具路由给 50 秒），所以手动刷新按整次调用分配时间：从 `manualPoll` 开始计时，读取账号列表也算在内，最长 48 秒（`manualRefreshBudget`）；发来命令的请求有期限时（`command.deadline`，如工具路由的 50 秒），最晚在它之前 1 秒（`replyMargin`）结束（`manualRefreshEnd`）。整轮手动刷新（读取账号列表、主动查询、`RefreshQuota` 和再读额度记录）共用一个在结束时间到期的 context，所以刷新全部账号时，无论有多少账号等待 Magpie，都在结束时间之前结束：到期时还没有查询的账号本轮不再查询，错误为“超过手动刷新的时限，未完成”（`errManualTimeUp`），本轮的凭证通知也留给下一轮发送。所有 `RefreshQuota` 共用从它派生的 context，在结束时间之前 5 秒（`keptRereadWait`）到期，留给之后再读一次额度记录；一次 `RefreshQuota` 最多用 40 秒（见“网关请求”）。刷新因这些期限失败时，原因同样为“超过手动刷新的时限，未完成”；插件停止造成的取消不写这个原因。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
 
 ## HTTP 接口
 
@@ -492,7 +493,7 @@ Claude 账号的请求在 Magpie 中由本机的 Claude Code 转发（Magpie 文
 
 每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：日志输出可能丢弃 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
 
-记录包含 `provider`、`model`、`auth_index`（账号 pin）、随机 `correlation_id`、`stream_id`、`status_code`、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符，不截断 UTF-8 字符。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
+记录包含 `provider`、`model`、`auth_index`（账号 pin）、随机 `correlation_id`、`stream_id`、`status_code`、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符，不截断 UTF-8 字符，写入前经 `redact.Text` 处理（见“错误文本的脱敏”）。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
 
 `usage_source` 固定为 `magpie_gateway`。`usage` 保留网关返回的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 Magpie 的协议转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
 
@@ -591,7 +592,7 @@ Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回�
 
 账号的凭证问题记在 `state.json` 的 `credentials`（按 `auth_index`，`store.CredentialState`），代码在 `internal/engine/credential.go`：
 
-- **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。agy-cli 账号的请求由 agy 用它当前登录的 Google 账号发出，pin 不能说明是哪个账号，所以自动和手动点火都先核对身份（`identityChecked`、`ignitionCredential`），每个候选模型的请求发出前再核对一次（`execute`）：读取模型列表最多要 20 秒，候选模型被拒后紧接着发下一个，期间 agy 可能已改登其他账号。核对（`confirmIdentity`）只用 `host.IdentityChecker`，它只读本地文件；`Credential` 读得到凭证也不能说明网关会用这个账号自己的登录，所以宿主没有实现 `host.IdentityChecker` 时，agy-cli 账号一律不发请求。只要没有核对成功就不发请求（agy 已改登其他账号、无法确认身份、凭证在系统钥匙串中，以及读不到文件、宿主不支持核对等其他错误），错误包装 `host.ErrIdentity`，按 `auth` 处理，指纹记为未知。还没有发出请求时，错误以“没有发送点火请求：”开头；前面的候选模型已经发出、第 n 个候选模型发出前核对失败时，以“第 n 个候选模型未发送：”开头。之后的原因只用固定的类别（`identityReason`）：身份错误（`host.ErrIdentity`）用宿主给出的原因，如 agy 已改登其他账号（邮箱只留用户名末两位）、无法确认 agy 当前登录的账号、凭证在系统钥匙串中，引擎再遮掉其中的邮箱、引号中的值和类 token 字符串（`redactDetail`）；其他错误写成“无法确认账号身份：”加凭证文件格式不对、找不到凭证文件、读取凭证失败或宿主不支持核对 agy 账号的身份，不带宿主错误的原文，因为其中可能有凭证文件的字段值。宿主错误经 `redactDetail` 处理后记一条 debug 日志。核对成功、请求发出后被拒时，agy-cli 账号记下的指纹是最后一个发出的请求之前核对得到的指纹（`sentResponse.fingerprint`）：第一次核对之后 agy 可能已经重新登录，记下第一次的指纹会让下一轮查询把已被拒的登录当成新凭证。核对失败时，自动点火照下文暂停到凭证变化，不计临时失败、不算限流，原因写在 `ignite_paused` 和 `credential_invalid` 事件的 `summary` 及目标的 `last_error` 中；手动点火只记 `ignite_failed`。Codex 和 Claude 的请求用账号自己的凭证，手动点火不读。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
+- **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。agy-cli 账号的请求由 agy 用它当前登录的 Google 账号发出，pin 不能说明是哪个账号，所以自动和手动点火都先核对身份（`identityChecked`、`ignitionCredential`），每个候选模型的请求发出前再核对一次（`execute`）：读取模型列表最多要 20 秒，候选模型被拒后紧接着发下一个，期间 agy 可能已改登其他账号。核对（`confirmIdentity`）只用 `host.IdentityChecker`，它只读本地文件；`Credential` 读得到凭证也不能说明网关会用这个账号自己的登录，所以宿主没有实现 `host.IdentityChecker` 时，agy-cli 账号一律不发请求。只要没有核对成功就不发请求（agy 已改登其他账号、无法确认身份、凭证在系统钥匙串中，以及读不到文件、宿主不支持核对等其他错误），错误包装 `host.ErrIdentity`，按 `auth` 处理，指纹记为未知。还没有发出请求时，错误以“没有发送点火请求：”开头；前面的候选模型已经发出、第 n 个候选模型发出前核对失败时，以“第 n 个候选模型未发送：”开头。之后的原因只用固定的类别（`identityReason`）：身份错误（`host.ErrIdentity`）用宿主给出的原因，如 agy 已改登其他账号（邮箱只留用户名末两位）、无法确认 agy 当前登录的账号、凭证在系统钥匙串中，引擎再遮掉其中的邮箱、引号中的值和类 token 字符串（`redactDetail`）；其他错误写成“无法确认账号身份：”加凭证文件格式不对、找不到凭证文件、读取凭证失败或宿主不支持核对 agy 账号的身份，不带宿主错误的原文，因为其中可能有凭证文件的字段值。宿主错误经 `redactDetail` 处理后记一条 debug 日志，日志在出口再脱敏一次（见“错误文本的脱敏”）。核对成功、请求发出后被拒时，agy-cli 账号记下的指纹是最后一个发出的请求之前核对得到的指纹（`sentResponse.fingerprint`）：第一次核对之后 agy 可能已经重新登录，记下第一次的指纹会让下一轮查询把已被拒的登录当成新凭证。核对失败时，自动点火照下文暂停到凭证变化，不计临时失败、不算限流，原因写在 `ignite_paused` 和 `credential_invalid` 事件的 `summary` 及目标的 `last_error` 中；手动点火只记 `ignite_failed`。Codex 和 Claude 的请求用账号自己的凭证，手动点火不读。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
 - **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 刚过期、Magpie 或代理 CLI 还没刷新时也可能返回 401，Lamplighter 不自己刷新这些 token，刷新的时间由它们决定，持续这么久的 401 才按凭证失效处理。已知过期的 token（`Expired`）不发给厂商，见“与 Magpie 的接口”的“额度记录”。其他结果清零计数。
 - **通知**：进入问题状态时记录 `credential_invalid` 事件，并发送一次通知：`auth` 为“🔑 … 凭证失效”，`suspended` 为“⛔ … 账号已停用”（有申诉链接时附上，https 链接同时作为 Bark 的跳转链接）。同一账号已处于同一类问题时，点火和查询再发现都只更新指纹，不再记事件或通知；点火发现或以同一原因再次确认过的问题（例如查询发现、换凭证后点火又失败）记为点火确认（`ignited`），只有点火成功才能结束。之后查询发现另一种原因（例如停用后查询又连续 401 满 30 分钟）时，事件和通知按新原因和来源照常发出，点火确认继续保留；只有凭证指纹变化后，新原因的问题才不带点火确认；状态在 `state.json` 中，插件重启后也不重复。发送失败时随之后每轮查询重试，每轮最多发一次：查询发现问题的那一轮已经发过，轮末的 `flushCredentialNotices` 跳过本轮发过或试过的通知（`credNoticeTried`）；1 小时（`credentialNoticeAge`）后放弃；没有推送渠道时不发送，这个问题也就不发恢复通知。
 - **凭证变化**：进入问题状态时记下凭证指纹（`host.Credential.Fingerprint`，由 `internal/magpie` 计算：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。Magpie 和代理 CLI 会改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
@@ -637,6 +638,34 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 排期时间取 `scheduleWindow`，没有时取 `effectiveAt`，按插件时区显示：起止相同时显示时刻，`scheduleConstraint = deadline` 时显示“终点 前”，其余（日期级排期）显示“起点～终点”。日期级窗口覆盖来源时区的一整天，起点通常早于公布时间，只显示起点会被误读为已经过去的时刻。
 
+## 错误文本的脱敏
+
+错误文字可能带上账号邮箱（如网关刷新请求的 `user` 参数、Magpie 给出的原因）、凭证字段或 URL 参数，来源包括上游和网关的错误正文、凭证文件的读取错误和 Magpie 的额度卡。这些文字在离开进程或写入磁盘的出口统一经 `internal/redact` 的 `redact.Text` 处理，不按来源逐条处理。
+
+规则（`redact.Text`）：
+
+- 带协议的网址（`scheme://…`）保留协议、主机和路径，去掉用户信息、查询参数和片段。
+- 邮箱（`@` 之后的域名带点）只留用户名的最后两个字符，如 `***rk`，引号去掉，不显示域名和用户名长度（`redact.Email`，MCP 的账号标识和 `shortReason` 用同一写法）。`claude-sonnet-4@20250514` 这类 `@` 后没有点的模型名不算邮箱。
+- `Bearer`、`Basic` 之后的凭证，`eyJ` 开头的 JWT，名为 `access_token`、`refresh_token`、`id_token`、`client_secret`、`api_key`（`api-key`、`apikey`）、`private_key`、`password`、`secret`、`token` 的字段的值，以及 32 个字符以上的连续 base64url 或十六进制字符，换成 `…`。
+- 其余文字不变，包括换行和 JSON 的引号，所以脱敏后的 JSON 错误正文仍能解析；处理过的文字再处理一次结果不变。
+
+出口：
+
+| 出口 | 位置 |
+| --- | --- |
+| 日志 | `magpie.Host.Log`（debug 日志也一样）；引擎的 `logf`；点火调用日志的 `reply`；`main.go` 的 `setupLog` 让标准库 `log` 的输出经过 `redact.Writer`，`net/http` 的错误日志也在其中 |
+| 事件和历史 | `engine.addAccountEvent` 在保存、写入历史和记日志之前处理 `message`、`detail` 和 `params` 的每个值。`label` 不处理：页面按它把事件对应到账号 |
+| `state.json` | 点火目标的 `last_error` 和 `circuit_reason`（`ignite.errorText`），凭证问题的 `summary`（`credentialSummary`）和 `appeal_url` |
+| 状态接口 | `engine.Status` 返回前调用 `redactStatus`，处理 `config_error`、`models_error`、`list_error`、`notify_error`、账号的 `error`、点火目标的 `last_error` 和 `circuit_reason`、事件；这些错误在内存中保留原文。`status.public.error` 和 `status.mcp.error` 由 `mcp.Server` 的 `Public`、`State` 处理 |
+| 历史接口和读回的事件 | `HistoryRange` 和启动时的 `loadRecentEvents` 处理读到的事件，覆盖脱敏之前写入的记录 |
+| HTTP 接口的错误 | `server.writeError`；`/api/refresh`、`/api/ignite` 等操作的 `error`（`action`）；`POST /api/tools/{name}` 的 `error`（`writeToolError`）；`/api/test-notify` 每个渠道的 `error` 和 `response` |
+| MCP | `refresh_quotas` 的 `error`；工具执行错误（`isError` 结果的文字）和参数错误 |
+| 推送 | 暂停通知和凭证通知中的一句话摘要，以及凭证通知的申诉链接和 Bark 跳转链接（`notify.CircuitMessage`、`notify.CredentialMessage`）。申诉链接来自上游的错误，按同样的规则处理；`forms.gle` 和 `support.google.com` 的表单地址没有查询参数，不受影响 |
+
+脱敏只处理出口的文字，不包装、不改写错误对象，所以 `errors.Is`、`errors.As`、`failure.Diagnose` 和 `ignite.Classify` 读到的仍是原文。来源处已有的打码保留：`shortReason`、`redactDetail`、webhook 响应中的 `[redacted]`、MCP 的账号标识。上述规则认不出、又可能是任意文字的值不写进错误：agy-cli 账号在 `plugin-auth.json` 中的键（`logins.json` 的 `home`）和条目的 `type`，以及额度卡中 Lamplighter 不认得的窗口名。
+
+新增把错误文字写入日志、磁盘、接口、MCP 或推送的地方时，调用 `redact.Text`，并在该包的 `redact_test.go`（引擎为 `redact_exit_test.go`）中用带邮箱、token 和 URL 参数的错误测试这个出口。
+
 ## 数据
 
 数据目录的位置见“进程和数据目录”。
@@ -657,6 +686,6 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 - 点火只经 Magpie 网关发送，并用 `X-Magpie-Account` 锁定到具体账号；不要直接向服务发送模型请求。
 - 额度请求的出口必须与 Magpie 对同一账号的请求一致；出口无法确定时跳过请求，不能退回直连。
-- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `admin_key`、`mcp_key`。
+- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `admin_key`、`mcp_key`。错误文字在出口统一脱敏，见“错误文本的脱敏”。
 - Magpie 的接口和文件格式以 Magpie 最新源码为准；格式与预期不符时返回 `host.ErrFormat`，不猜测字段。
 - 修改 `state.json` 结构时保持向后兼容：新字段使用缺省值，旧字段缺失时继续运行。
