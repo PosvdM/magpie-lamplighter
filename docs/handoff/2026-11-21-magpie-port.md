@@ -52,7 +52,7 @@
 - 插件声明：按 Magpie 文档 `docs/subsystems/plugin-runtime.md` 和 `plugin-tools.md` 写 `magpie` 字段：
   - 页面 `magpie.page`，`service` 指向内部监听的端口选项。页面文件只负责跳到 `magpie.service`，没有时跳到 `http://127.0.0.1:<端口>/`（参照 `@magpie-community/page-chat`），管理页面本身由 Go 程序提供。
   - tools 与 `internal/mcp` 中的工具一一对应，调用内部监听的 `POST /api/tools/{name}`，Magpie 的 tool 超时为 55 秒。
-- Bun 入口按平台启动随包发布的 Go 程序（linux amd64/arm64、darwin amd64/arm64、windows amd64），传 `-listen 127.0.0.1:<端口>`，`MAGPIE_ADDR` 原样传给子进程；宿主退出时子进程随之退出。
+- Bun 入口按平台启动随包发布的 Go 程序（linux、darwin、windows 各 amd64 和 arm64，静态编译，共约 20～25MB）。Magpie 用 `bun add --ignore-scripts` 安装插件，不能靠 postinstall 下载程序。启动时传 `-listen 127.0.0.1:<端口>`，`MAGPIE_ADDR` 原样传给子进程；宿主退出时子进程随之退出。
 - 发布：推送 `v*` 标签后先测试，再构建各平台程序、打 npm 包，用 Trusted Publishing 发布，并创建 GitHub Release。版本号经 `-ldflags "-X main.version=..."` 写入程序。
 - 更新开发文档的“构建”“发布”两节。
 
@@ -66,8 +66,9 @@
 ### E：前端
 
 - 文件：`internal/web/*`。
-- 嵌在 Magpie 中时：页面经 Magpie 的页面服务反向代理打开，在沙箱 iframe 中运行（Magpie 文档 `plugin-runtime.md` 的页面一节，源码 `internal/gui/pagebridge.js`、`pageservice.go`）。查明主题和语言能否从 Magpie 获得；能获得时跟随，不能时用浏览器的设置。删除读取 CPA 管理中心父页面的代码（`parentRoot`、`watchParent` 等）。
+- 嵌在 Magpie 中时：页面经 Magpie 的页面服务反向代理打开，在沙箱 iframe（`sandbox allow-scripts`）中运行，没有 `localStorage`，也不能复制文字；用到 `localStorage` 的地方都要容忍读写失败（Magpie 文档 `plugin-runtime.md` 的页面一节，源码 `internal/gui/pagebridge.js`、`pageservice.go`）。查明主题和语言能否从 Magpie 获得；能获得时跟随，不能时用浏览器的设置。删除读取 CPA 管理中心父页面的代码（`parentRoot`、`watchParent` 等）。
 - 独立访问时：遇到 401 输入管理密钥，密钥保存在 `localStorage`（已实现，确认在两种方式下都正常）。打码开关按浏览器保存（已实现）。
+- Magpie 每次 Restart（安装、更新或设置插件，更新 Bun）都会结束插件宿主及其子进程，宿主下一次被调用时才重新启动。页面打开时 Magpie 会先启动宿主，最多等 7 秒；服务未就绪时显示 502 页并每 2 秒重试。
 - 设置页增加对外监听的设置：`public_listen`（已有输入框）、`web_enabled`、`admin_key`（可生成，与 `mcp_key` 的做法一致）。
 - `status.magpie_warmup` 非空时显示提示，说明哪些账号开启了 Magpie 的预热，需要关闭以免重复点火。
 - `internal/web/page.css` 中 Kimi 和 Grok 的颜色变量可以保留。
