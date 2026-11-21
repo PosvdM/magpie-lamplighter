@@ -85,6 +85,17 @@ func groupIgnitable(cfg config.Config, provider, sourceLabel string) bool {
 	return false
 }
 
+// ignitionTarget reports whether group is an ignition target under cfg: it
+// has a 5-hour window and groupIgnitable accepts it. ignition.enabled is
+// checked by the callers: a manual ignition ignores it.
+func ignitionTarget(cfg config.Config, group *GroupView) bool {
+	if !groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+		return false
+	}
+	_, ok := group.fiveHour()
+	return ok
+}
+
 // collectTargets returns the groups that have a 5-hour window and ignition
 // enabled.
 func (e *Engine) collectTargets(cfg config.Config) []target {
@@ -93,13 +104,10 @@ func (e *Engine) collectTargets(cfg config.Config) []target {
 	var out []target
 	for _, group := range e.groups {
 		cred := e.creds[group.AuthIndex]
-		if cred == nil || !groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+		if cred == nil || !ignitionTarget(cfg, group) {
 			continue
 		}
-		w, ok := group.fiveHour()
-		if !ok {
-			continue
-		}
+		w, _ := group.fiveHour()
 		snapshot := *group
 		snapshot.Windows = append([]WindowView(nil), group.Windows...)
 		out = append(out, target{group: snapshot, cred: cred, reset: w.Reset, source: string(w.Source)})
@@ -213,10 +221,34 @@ func (e *Engine) performDue(ctx context.Context, cfg config.Config) bool {
 		if due.After(now.Add(250 * time.Millisecond)) {
 			continue
 		}
+		if !e.mayIgnite(t) {
+			continue
+		}
 		e.igniteTarget(ctx, cfg, t, false)
 		attempted = true
 	}
 	return attempted
+}
+
+// errIgnitionWithdrawn ends an automatic ignition whose target stopped
+// qualifying before its next request; see mayIgnite.
+var errIgnitionWithdrawn = errors.New("点火条件已不满足，未发送的请求已放弃")
+
+// mayIgnite reports whether an automatic ignition of t may send its next
+// request. The settings are read again for every request: a round runs for
+// minutes with candidate models and confirmations, and the user can turn
+// ignition off meanwhile. The target must still qualify: ignition.enabled,
+// ignition of its provider and quota group (groupIgnitable), a 5-hour
+// window, and the daily ignition hours.
+func (e *Engine) mayIgnite(t target) bool {
+	cfg := e.config()
+	if !cfg.Ignition.Enabled || !e.schedule(cfg).InWindow(e.now()) {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	group := e.groups[t.group.Key]
+	return e.creds[t.cred.AuthIndex] != nil && group != nil && ignitionTarget(cfg, group)
 }
 
 // configuredModel returns the model override for the target, if any.
@@ -316,12 +348,19 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	if !manual {
 		fingerprint = e.credentialFingerprint(ctx, t.cred)
 	}
+	base := e.ignitionBase(t.group.Key, start)
 
-	model, resp, err := e.execute(ctx, cfg, t)
+	model, resp, err := e.execute(ctx, cfg, t, manual)
 	if err == nil {
-		err = e.confirm(ctx, cfg, t, start, resp, manual)
+		err = e.confirm(ctx, cfg, t, base, resp, manual)
 	}
 	now := e.now()
+	if errors.Is(err, errIgnitionWithdrawn) {
+		// Not a failure: the target no longer qualifies for automatic
+		// ignition, and the next round reads the settings again.
+		e.logf("info", "%s：%v", t.group.Label, err)
+		return err
+	}
 	if err != nil {
 		d := failure.Diagnose(err)
 		if manual {
@@ -425,7 +464,11 @@ func (e *Engine) group(key string) (GroupView, bool) {
 // execute sends the ignition request with the newest candidate model. It
 // tries the next candidate when Magpie refuses a model for the pinned
 // account, and once per ignition when the provider refuses a model.
-func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, host.ModelResponse, error) {
+//
+// Before each request of an automatic ignition, mayIgnite checks that the
+// target still qualifies; otherwise the requests not sent yet are dropped
+// with errIgnitionWithdrawn.
+func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manual bool) (string, host.ModelResponse, error) {
 	var empty host.ModelResponse
 	spec := providers.Lookup(t.group.Provider)
 	override := configuredModel(cfg, t.group.Provider, t.group.SourceLabel)
@@ -465,6 +508,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 	for i, model := range candidates {
 		if ctx.Err() != nil || e.stopping() {
 			return model, empty, context.Canceled
+		}
+		if !manual && !e.mayIgnite(t) {
+			return model, empty, errIgnitionWithdrawn
 		}
 		protocol, body, err := providers.Request(spec, model)
 		if err != nil {
@@ -597,26 +643,57 @@ func truncateText(text string, n int) string {
 	return string(runes[:n])
 }
 
+// ignitionBase is what confirmation compares with: the start of the
+// ignition, and the reset of the 5-hour window it is meant to replace.
+type ignitionBase struct {
+	start time.Time
+	// oldReset is the reset of a window that had ended or not started at
+	// start (a past reset or a rolling placeholder), zero otherwise. A
+	// reading with this reset still describes that window.
+	oldReset time.Time
+}
+
+// ignitionBase records the 5-hour window of key before an ignition at
+// start.
+func (e *Engine) ignitionBase(key string, start time.Time) ignitionBase {
+	base := ignitionBase{start: start}
+	group, ok := e.group(key)
+	if !ok {
+		return base
+	}
+	if w, ok := group.fiveHour(); ok && (e.state.Target(key).RollingReset || !w.Reset.After(start)) {
+		base.oldReset = w.Reset
+	}
+	return base
+}
+
 // confirmed reports whether the target's 5-hour window has a fixed future
-// reset observed after start.
-func (e *Engine) confirmed(key string, start, now time.Time) bool {
+// reset read after the ignition started. The time of the reading counts,
+// not when it was applied: Magpie's kept quota can hold a reading taken
+// before the ignition and handed over after it.
+func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 	group, ok := e.group(key)
 	if !ok {
 		return false
 	}
 	w, ok := group.fiveHour()
-	if !ok || w.ObservedAt.Before(start) || w.Reset.IsZero() || !w.Reset.After(now) {
+	if !ok || w.ReadAt.Before(base.start) || w.Reset.IsZero() || !w.Reset.After(now) {
+		return false
+	}
+	if !base.oldReset.IsZero() && w.Reset.Equal(base.oldReset) {
 		return false
 	}
 	return !e.state.Target(key).RollingReset
 }
 
 // confirm checks that the ignition started a window. Claude responses carry
-// the new reset in their headers; Codex reports it through the usage record
-// of the same request. When neither arrives, and for providers without quota
-// in their headers, the credential is queried actively. The queries of a
-// manual ignition leave the credential state alone, like its failure.
-func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start time.Time, resp host.ModelResponse, manual bool) error {
+// the new reset in their headers, which Magpie's gateway writes back. The
+// gateway does not pass on Codex's x-codex-* headers, and Antigravity has no
+// quota in its headers: for them, and when the headers carry no new window,
+// the credential is queried actively. The queries of a manual ignition
+// leave the credential state alone, like its failure.
+func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, base ignitionBase, resp host.ModelResponse, manual bool) error {
+	start := base.start
 	var groups []quota.RawGroup
 	if spec := providers.Lookup(t.group.Provider); spec != nil && spec.Headers != nil {
 		groups = spec.Headers(resp.Header, e.now())
@@ -627,20 +704,20 @@ func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start
 		e.notePassiveFable(t.cred, groups)
 		e.applyGroups(ctx, cfg, t.cred, groups, quota.SourcePassive, now, start, true)
 	}
-	if e.confirmed(t.group.Key, start, e.now()) {
+	if e.confirmed(t.group.Key, base, e.now()) {
 		return nil
 	}
 	for _, delay := range confirmDelays {
 		if !e.waitWithUsage(ctx, delay) {
 			return context.Canceled
 		}
-		if e.confirmed(t.group.Key, start, e.now()) {
+		if e.confirmed(t.group.Key, base, e.now()) {
 			return nil
 		}
 		if err := e.queryCred(ctx, cfg, t.cred, !manual); err != nil {
 			e.logf("warn", "点火确认时刷新额度失败：%s：%v", t.group.Label, err)
 		}
-		if e.confirmed(t.group.Key, start, e.now()) {
+		if e.confirmed(t.group.Key, base, e.now()) {
 			return nil
 		}
 	}

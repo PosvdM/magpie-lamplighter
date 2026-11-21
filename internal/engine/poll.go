@@ -87,6 +87,10 @@ type usageEvent struct {
 	authIndex string
 	groups    []quota.RawGroup
 	at        time.Time
+	// kept marks a reading from Magpie's kept quota. Magpie can take it
+	// with an active query of its own, so unlike response headers it does
+	// not show that a request started the 5-hour window.
+	kept bool
 }
 
 type sampleMark struct {
@@ -134,7 +138,7 @@ func (e *Engine) pollKept(ctx context.Context) {
 			continue
 		}
 		e.keptAt[k.Pin] = k.ReadAt
-		e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt})
+		e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
 	}
 }
 
@@ -171,7 +175,7 @@ func (e *Engine) applyUsage(ctx context.Context, ev usageEvent) {
 	}
 	e.passiveAt[ev.authIndex] = now
 	e.notePassiveFable(cred, groups)
-	e.applyGroups(ctx, cfg, cred, groups, quota.SourcePassive, now, readAt, true)
+	e.applyGroupsFrom(ctx, cfg, cred, groups, quota.SourcePassive, !ev.kept, now, readAt, true)
 }
 
 // notePassiveFable logs the first passive Fable window seen for a credential
@@ -233,6 +237,12 @@ func (e *Engine) loadCreds(ctx context.Context, cfg config.Config) ([]*Cred, err
 	counts := map[string]int{}
 	for _, account := range accounts {
 		hostProvider := strings.ToLower(strings.TrimSpace(account.Provider))
+		if !hostProviders[hostProvider] {
+			if hostProvider != "" && account.On {
+				e.logf("debug", "忽略 Magpie 服务 %s 的账号：不支持读取它的凭证", hostProvider)
+			}
+			continue
+		}
 		p := providers.Lookup(hostProvider)
 		if p == nil || !account.On || strings.TrimSpace(account.Pin) == "" {
 			continue
@@ -290,6 +300,12 @@ func (e *Engine) loadCreds(ctx context.Context, cfg config.Config) ([]*Cred, err
 	return creds, nil
 }
 
+// hostProviders are the Magpie providers whose accounts are monitored: the
+// ones whose credentials package magpie reads. Magpie's own "antigravity"
+// accounts map to the Antigravity provider too, but only the agy-cli
+// credentials can be read, so they are left out.
+var hostProviders = map[string]bool{"codex": true, "claude": true, "agy-cli": true}
+
 // accountNote returns the name of account: account_names, else Magpie's
 // label when it is neither empty nor the email.
 func accountNote(cfg config.Config, account host.Account) string {
@@ -345,28 +361,73 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // /api/refresh and the refresh_quotas tool): forced, and an expired
 // credential first has Magpie refresh its quota (refreshKept). Scheduled
 // rounds never do: a Claude refresh runs Claude Code's /usage.
-func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string) {
+//
+// It returns the error of the refresh: for one account, that account's
+// error, or errRefreshAccountGone when the account is not loaded; for all,
+// only a failed account list. A refreshFailure in it gives the reason
+// Magpie could not refresh.
+func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string) error {
 	renew, cancel := context.WithTimeout(ctx, manualRefreshBudget)
 	defer cancel()
-	e.pollWith(ctx, cfg, e.now(), onlyAuth, true, renew)
+	errs, listErr := e.pollWith(ctx, cfg, e.now(), onlyAuth, true, renew)
+	switch {
+	case listErr != nil:
+		return listErr
+	case onlyAuth == "":
+		return nil
+	case errs[onlyAuth] != nil:
+		return errs[onlyAuth]
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.creds[onlyAuth] == nil && ctx.Err() == nil {
+		// Magpie no longer lists the account as on, or its provider is
+		// not monitored.
+		return errRefreshAccountGone
+	}
+	return nil
+}
+
+// refreshFailure is a manual refresh that Magpie could not run, with a
+// reason that the results of POST /api/refresh and refresh_quotas show as
+// it is: a short sentence without account names, emails or Magpie's text.
+type refreshFailure struct {
+	reason string
+	err    error
+}
+
+func (f *refreshFailure) Error() string { return f.reason }
+func (f *refreshFailure) Unwrap() error { return f.err }
+
+var errRefreshAccountGone = &refreshFailure{reason: "没有找到这个账号：它在 Magpie 中已关闭或已删除，或所属服务未开启监控"}
+
+// refreshReasons are the reasons of the host.Error codes RefreshQuota
+// returns when Magpie cannot refresh the account.
+var refreshReasons = map[string]string{
+	"account_off":         "账号在 Magpie 中已关闭",
+	"account_not_found":   "Magpie 中找不到这个账号",
+	"gateway_unavailable": "Magpie 网关不可用",
 }
 
 // pollWith is poll; a non-nil renew lets an expired credential have Magpie
-// refresh its quota, within renew's deadline.
-func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool, renew context.Context) {
+// refresh its quota, within renew's deadline. It returns the error of each
+// account queried, or the error of the account list.
+func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool, renew context.Context) (map[string]error, error) {
 	start := e.now()
 	creds, err := e.loadCreds(ctx, cfg)
 	if err != nil {
+		err = fmt.Errorf("读取凭证列表失败：%w", err)
 		e.mu.Lock()
-		e.pollErrs = map[string]string{"": "读取凭证列表失败：" + err.Error()}
+		e.pollErrs = map[string]string{"": err.Error()}
 		e.mu.Unlock()
-		e.logf("warn", "读取凭证列表失败：%v", err)
-		return
+		e.logf("warn", "%v", err)
+		return nil, err
 	}
 	errs := map[string]string{}
+	failed := map[string]error{}
 	for _, cred := range creds {
 		if ctx.Err() != nil {
-			return
+			return failed, nil
 		}
 		if onlyAuth != "" && cred.AuthIndex != onlyAuth {
 			continue
@@ -377,6 +438,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 		}
 		if err := e.queryCredWith(ctx, cfg, cred, true, renew); err != nil {
 			errs[cred.AuthIndex] = err.Error()
+			failed[cred.AuthIndex] = err
 			e.logf("warn", "额度刷新失败：%s：%v", labelFor(providers.Title(cred.Provider), cred), err)
 		}
 	}
@@ -393,6 +455,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 	e.mu.Unlock()
 	e.dirty = true
 	e.flushCredentialNotices(ctx, start)
+	return failed, nil
 }
 
 // keptFallback applies Magpie's kept quota of cred, for an account whose
@@ -408,7 +471,7 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 		}
 		if k.ReadAt.After(e.keptAt[k.Pin]) {
 			e.keptAt[k.Pin] = k.ReadAt
-			e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt})
+			e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
 		}
 		return nil
 	}
@@ -421,7 +484,11 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 // refresh error is returned with the outcome of that fallback.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
 	refreshErr := e.host.RefreshQuota(renew, cred.AuthIndex)
-	if refreshErr != nil && renew.Err() != nil && ctx.Err() == nil {
+	var hostErr *host.Error
+	switch {
+	case errors.As(refreshErr, &hostErr) && refreshReasons[hostErr.Code] != "":
+		refreshErr = &refreshFailure{reason: refreshReasons[hostErr.Code], err: refreshErr}
+	case refreshErr != nil && renew.Err() != nil && ctx.Err() == nil:
 		refreshErr = fmt.Errorf("超过 %s 未完成：%w", manualRefreshBudget, refreshErr)
 	}
 	err := e.keptFallback(ctx, cfg, cred)
@@ -429,7 +496,7 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 	case refreshErr == nil:
 		return err
 	case err != nil:
-		return fmt.Errorf("Magpie 刷新额度失败：%v；%w", refreshErr, err)
+		return fmt.Errorf("Magpie 刷新额度失败：%w；%w", refreshErr, err)
 	default:
 		return fmt.Errorf("Magpie 刷新额度失败，已显示 Magpie 记下的读数：%w", refreshErr)
 	}
@@ -662,6 +729,15 @@ func (e *Engine) sendPlanNotice(ctx context.Context, cred *Cred, state *store.Pl
 // count as a recovery and repeat the threshold alert just sent. A passive
 // group whose windows are all dropped is not processed further.
 func (e *Engine) applyGroups(ctx context.Context, cfg config.Config, cred *Cred, raw []quota.RawGroup, source quota.Source, now, readAt time.Time, alerts bool) {
+	e.applyGroupsFrom(ctx, cfg, cred, raw, source, source == quota.SourcePassive, now, readAt, alerts)
+}
+
+// applyGroupsFrom is applyGroups. requested tells whether the readings come
+// from the response of a request, which starts the 5-hour window: such a
+// reading is never taken for a rolling placeholder (ignite.Observe). A
+// passive reading from Magpie's kept quota is not requested, and is
+// observed at readAt like an active one.
+func (e *Engine) applyGroupsFrom(ctx context.Context, cfg config.Config, cred *Cred, raw []quota.RawGroup, source quota.Source, requested bool, now, readAt time.Time, alerts bool) {
 	var changed []*GroupView
 	previous := map[string][]WindowView{}
 	e.mu.Lock()
@@ -782,8 +858,12 @@ func (e *Engine) applyGroups(ctx context.Context, cfg config.Config, cred *Cred,
 		}
 		if w, ok := group.fiveHour(); ok {
 			target := e.state.Target(group.Key)
-			startKnown := source == quota.SourcePassive || target.ResetObservation != nil || w.Reset.Sub(now) < quota.FiveHours-2*time.Minute
-			ignite.Observe(target, w.Reset, now, source == quota.SourcePassive)
+			seen := now
+			if source == quota.SourcePassive && !requested {
+				seen = readAt
+			}
+			startKnown := requested || target.ResetObservation != nil || w.Reset.Sub(seen) < quota.FiveHours-2*time.Minute
+			ignite.Observe(target, w.Reset, seen, requested)
 			e.mu.Lock()
 			if live := e.groups[group.Key]; live != nil {
 				live.rolling = target.RollingReset

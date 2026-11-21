@@ -662,7 +662,7 @@ func TestIgnitionCutoffConfirmsQuotaWindow(t *testing.T) {
 		t.Fatalf("err=%v calls=%d closes=%d", err, h.calls, h.closes)
 	}
 	ts := e.state.Target(chosen.group.Key)
-	if ts.LastSuccessEpoch == 0 || ts.ConsecutiveFailures != 0 || ts.CircuitOpenUntilEpoch != 0 || !e.confirmed(chosen.group.Key, c.t, c.t) {
+	if ts.LastSuccessEpoch == 0 || ts.ConsecutiveFailures != 0 || ts.CircuitOpenUntilEpoch != 0 || !e.confirmed(chosen.group.Key, ignitionBase{start: c.t}, c.t) {
 		t.Fatalf("quota window not confirmed: %+v", ts)
 	}
 	if ev := e.events[len(e.events)-1]; ev.Kind != "ignite_manual" || ev.Params["model"] == "" {
