@@ -31,7 +31,7 @@ const maxGatewayBody = 16 << 20
 
 // gatewayClient talks to the gateway directly, never through the
 // environment's proxy.
-var gatewayClient = &http.Client{Transport: &http.Transport{Proxy: nil, MaxIdleConns: 4, IdleConnTimeout: time.Minute}}
+var gatewayClient = &http.Client{Transport: gatewayTransport}
 
 // now is the clock of this package; tests replace it.
 var now = time.Now

@@ -388,13 +388,13 @@ Antigravity 的响应头里没有额度。
 
 ### 请求
 
-点火通过 `host.Host.OpenModelStream` 经 Magpie 网关发送，`Account` 为账号的 pin（网关请求头 `X-Magpie-Account`），`Protocol` 为下表的入口协议。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。各服务的请求如下：
+点火通过 `host.Host.OpenModelStream` 经 Magpie 网关发送，`Account` 为账号的 pin，`Protocol` 为下表的入口协议，`Model` 为网关的模型 ID（`<服务>/<模型>`，见“模型选择”）。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。各服务的请求如下：
 
-| 服务 | 入口协议 | 请求要点 |
-| --- | --- | --- |
-| Codex | `openai-response` | `reasoning.effort: none`，`tools: []`，`stream: true` |
-| Claude | `claude` | `stream: true` |
-| Antigravity | `openai` | `temperature: 0`，`reasoning_effort: none`，`stream: true` |
+| 服务 | 入口协议 | 网关路径 | 请求要点 |
+| --- | --- | --- | --- |
+| Codex | `openai-response` | `POST /v1/responses` | `reasoning.effort: none`，`tools: []`，`stream: true` |
+| Claude | `claude` | `POST /v1/messages` | `stream: true` |
+| Antigravity | `openai` | `POST /v1/chat/completions` | `temperature: 0`，`reasoning_effort: none`，`stream: true` |
 
 所有点火请求都省略输出 token 上限字段。唯一的提示词由 `providers.TriggerPrompt` 给出：
 
@@ -402,80 +402,115 @@ Antigravity 的响应头里没有额度。
 Reply with only OK. Do not think, do not use tools, do not do anything else.
 ```
 
+`internal/magpie` 的网关请求（`gateway.go`）：
+
+- **鉴权**：网关对来自回环地址、且不带转发头的请求不要求密钥（Magpie 源码 `internal/gateway/lan.go` 的 `local`、`proxied`）。请求因此不带 `Authorization`，也不带 `Origin`、`Sec-Fetch-*` 和 `Mozilla/` 开头的 User-Agent（这些会被当作浏览器请求）。HTTP 客户端不使用代理：本机代理会加上 `X-Forwarded-For` 等转发头，网关会把请求当作来自其他机器并要求网关密钥。`MAGPIE_ADDR` 是局域网地址时网关同样按外部请求处理，暂不支持。
+- **锁定账号**：请求头 `X-Magpie-Account: <pin>`。pin 含非 ASCII 字符时按百分号编码发送，Magpie 会解码。锁定后网关只尝试这个账号，不换账号重试；账号不能接受时由网关直接回答，见“失败分类和保护”。
+- **错误状态码**：网关返回非 2xx 时，`OpenModelStream` 返回该状态码和响应头，以及 `host.Error`：`Code` 为 `gateway_http_error`，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
+- **模型列表**：`Models` 读 `GET /v1/models` 的 `data[].id`，最多读 16 MiB，20 秒超时。没有服务前缀的 ID（用户在 Magpie 中开启了只列出模型名）按 `owned_by` 补上前缀；`data` 缺失或某项没有 `id` 时返回包装 `host.ErrFormat` 的错误。
+
+Claude 账号的请求在 Magpie 中由本机的 Claude Code 转发（Magpie 文档 `docs/subsystems/claude-subscription-bridge.md`，源码 `serveClaudeSubscription`）。`X-Magpie-Account` 在选择候选账号时生效（`pinTo` 在转发之前执行），Claude Code 随后在该账号保存的配置目录中运行，所以锁定对这条路径同样有效。Claude Code 向 Anthropic 发送真实的模型请求，按 Anthropic 的规则这会开始 5 小时窗口；请求带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。网关把 Claude Code 报告的额度写回响应头 `anthropic-ratelimit-unified-{5h,7d,7d_oi}-{utilization,reset}`（`limitHeaders`），在请求到达时和回复开始时各写一次；网关在等待 Claude Code 启动期间可能提前发出响应头，这时响应头里还没有新窗口，由“确认”中的主动查询确认。以上来自 Magpie 源码和文档，尚未用真实账号验证。
+
 ### 流式执行与取消
 
-`engine.executeStream` 同步打开模型流，取得 `stream_id` 后逐块读取；响应头保留给 `confirm`。`stream_parse.go` 按协议固定格式假设：
+`engine.executeStream` 同步打开模型流，取得流 ID 后逐块读取；响应头保留给 `confirm`。网关对三种协议都返回标准 SSE 字节流，`ReadModelStream` 每次返回收到的字节（最多 32 KiB），可能在任意位置切开：
 
-- `openai`（Antigravity）：每个 chunk 是原始 JSON 对象，直接解析；HTTP handler 才会添加 `data:` 和 `[DONE]`。
-- `claude`：只按标准 SSE 字节流解析，保留跨 chunk 的行内容，以空行派发事件；不丢弃未完成的 `event:` 或注释行，也不提前派发无换行的 `data:`。
-- `openai-response`（Codex）：尚未见到换行、且行缓冲为空时，不含 `\n` 的 chunk 是 CPA Scanner 去掉行尾换行后的完整单行。`event:` 和注释作为独立行忽略；`data:` 组成完整 JSON 或 `[DONE]` 时立即派发，因为 CPA 会丢弃空行。含 `\n` 的 chunk 按标准 SSE 字节流处理，并为该流永久锁定字节流模式；后续无换行的 chunk 只作为碎片保留。
+- `openai`（Antigravity）：Chat 的每个 chunk 是一条 `data:` 行，以 `data: [DONE]` 结束。没有 `[DONE]` 时，收到 `finish_reason` 之后的 EOF 视为正常结束，以便读到单独发送的 usage chunk。
+- `claude`：Anthropic 的事件（`event:` 和 `data:` 行），以 `message_stop` 结束。
+- `openai-response`（Codex）：Responses 的事件，以 `response.completed` 结束。
 
-**Codex 格式限制**：如果 CPA 的 Codex 路径以后改为发送尚未包含换行的字节流碎片，首批碎片会被误判为 Scanner 完整单行；需要随 CPA 的格式变化调整解析器。
+`stream_parse.go` 对三种协议使用同一个 SSE 解析器：保留跨块的行内容，以空行派发事件，忽略 `event:` 和注释行（网关等待上游时会发送 `: keepalive` 注释，Responses 还会重复发送 `response.in_progress`），不提前派发没有换行的 `data:` 行。允许跨块的行、事件、CRLF 和 UTF-8 字符，单行及单事件缓冲各最多 1 MiB。首次非空文本、可见 reasoning 或工具参数增量触发 `onOutput`，心跳、角色、生命周期和加密 reasoning 不触发。
 
-标准 SSE 允许跨 chunk 的行、事件、CRLF 和 UTF-8 字符，单行及单事件缓冲各最多 1 MiB，单个 Chat JSON chunk 同样限为 1 MiB。首次非空文本、可见 reasoning 或工具参数增量触发 `onOutput`，心跳、角色、生命周期和加密 reasoning 不触发。
+独立 watchdog 从首次输出的单调时钟时间起计时 2 秒（`ignitionOutputWindow`），到期调用 `CloseModelStream`，取消到网关的 HTTP 请求，阻塞中的 `ReadModelStream` 随之返回错误。读路径和 watchdog 通过互斥锁争取单一终止所有权，只有仍活动的流能被 watchdog 截断；已确定的完成或错误不会被迟到的截止、取消或 watchdog panic 覆盖。截止分支发现取消或停止已就绪时按取消处理。`sync.Once` 保证只关闭一次，调用返回前等待 watchdog 退出；关闭错误或 panic 记为 `close_error`，同时保留已确定的执行错误。主动 2 秒断流记为 `output_timeout`，不触发候选模型 fallback，随后仍走额度窗口确认。Claude 和 Responses 在终止事件之前的 EOF 作为异常处理（`unexpected_eof`）。
 
-独立 watchdog 从首次输出的单调时钟时间起计时 2 秒（`ignitionOutputWindow`），到期调用 `host.model.stream_close`。这个回调取消 CPA 的上游 HTTP context，因此下一次 `stream_read` 阻塞时仍可关闭。自然终止、读取或解析错误、调用 context 取消及插件停止时同样释放流。读路径和 watchdog 通过互斥锁争取单一终止所有权，只有仍活动的流能被 watchdog 截断；已确定的完成或错误不会被迟到的 deadline、取消或 watchdog panic 覆盖。deadline 分支发现取消或停止已就绪时按取消处理。`sync.Once` 保证只关闭一次，调用返回前等待 watchdog 退出；关闭错误或 panic 记为 `close_error`，同时保留已确定的执行错误。主动 2 秒断流记为 `output_timeout`，不触发候选模型 fallback，随后仍走额度窗口确认。Claude/Responses 终止事件前的 EOF 作为异常处理；Chat 收到 `finish_reason` 后继续读取可能独立返回的 usage，随后 EOF 才视为正常终止。
+每次点火从发出请求到读完正文最长 2 分钟（`ignitionStreamTimeout`）：网关等待较慢的启动（如 Claude Code）时持续发送 keepalive，流可能长时间没有输出，不加限制会挡住后台循环。超时、调用 context 取消和插件停止都会取消请求，也包括还在等待响应头的请求；超时记为 `timeout`，返回 `errIgnitionTimeout`，按临时错误重试。
 
-流打开后的宿主 `chunk.Error`、协议 `error` 和 `response.failed` 统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。只保留白名单内的 HTTP 状态码和协议 `code`/`type`；宿主字符串只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，不从自由文本 message 中猜测分类。已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404；显式状态码优先。流内明确的认证失败（`authentication_error` 或状态码 401）会丢弃 `auth_unavailable` 标识，避免被既有分类器误认为 CPA 本地冷却；未带认证失败信息的本地冷却及非流式路径沿用原有分类。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法时，只在 `Message` 后附上这条固定说法；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。宿主字符串为 `HTTP NNN: {...}` 时，同时解析后面的 JSON。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
-
-**启动限制及 TODO**：CPA SDK v8.0.4（检查至 v8.0.60 仍相同）没有公开的模型启动取消接口。`internal/pluginhost/host_model_stream_callbacks.go` 使用 `context.WithoutCancel`，`sdk/api/handlers/model_execution.go` 同步等待首个 raw chunk 后才返回流，`internal/pluginhost/model_stream_bridge.go` 随后登记 `stream_id`。raw chunk 可能只是生命周期事件，不等于首次输出。插件在 ID 返回前无法调用 close，沿用 CPA 自身的等待行为，停止也可能等到这一步结束；ID 返回后若已停止，立即关闭。`request_timeout_seconds` 的默认 20 秒只用于其他 HTTP 请求，不保护模型启动或首输出等待。后续需在 CPA 提供公开的启动操作取消句柄后，再实现启动等待超时和停止期间取消；不通过单独 goroutine 超时返回留下仍在运行的上游请求，也不为此升级到仍无该接口的 SDK。
+流内错误统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。网关在发出 200 和响应头之后才遇到错误时，只能把它写成流中的错误事件（Magpie `streamError`）：Chat 为 `{"error":{"message","type","code"}}`，Claude 为 `error` 事件，Responses 为 `response.failed`（代码默认为 `server_error`，过载为 `server_is_overloaded`）。解析时只保留白名单内的 HTTP 状态码和协议 `code`/`type`，不从自由文本 message 中猜测分类，唯一的例外是网关附加的固定后缀：状态码为 408、429 或 5xx 时，网关在 message 末尾加上 `(429: you can retry your request)`（`saysPassing`），解析器只读取锚定在末尾的这个后缀。已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404、`server_is_overloaded` 对应 529；显式状态码优先。宿主字符串错误（`StreamChunk.Error`）只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，`HTTP NNN: {...}` 时同时解析后面的 JSON。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法时，只在 `Message` 后附上这条固定说法；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
 
 ### 调用日志
 
 每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：日志输出可能丢弃 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
 
-记录包含 `provider`、`model`、`auth_index`、随机 `correlation_id`、`stream_id`、HTTP 状态、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符；截断不截断 UTF-8 字符。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
+记录包含 `provider`、`model`、`auth_index`（账号 pin）、随机 `correlation_id`、`stream_id`、`status_code`、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符，不截断 UTF-8 字符。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
 
 `usage_source` 固定为 `magpie_gateway`。`usage` 保留网关返回的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 Magpie 的协议转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
 
-`usage_completeness` 为 `missing`（没有计数）、`partial` 或 `complete`。只有 Claude/`claude` 和 Codex/`openai-response` 原生点火路由正常终止，且收到最终输入和输出计数时标为 `complete`；它表示宿主协议的最终计数齐全，不保证每个上游细分项均存在。其余有计数的调用均为 `partial`，包括主动断流及 Antigravity/Chat 的自然结束。CPA 的 Antigravity→OpenAI translator 会为缺失计数补零，不同转换路径对推理 token 的合并和细分也可能不同；字段齐全或收到 `finish_reason` 不足以验证上游统计完整性，插件不把补出的零解释为确定的零用量。结束原因区分正常完成、主动断流、取消、启动/HTTP/读取/解析错误、异常 EOF 和关闭失败。
+`usage_completeness` 为 `missing`（没有计数）、`partial` 或 `complete`。只有 Claude/`claude` 和 Codex/`openai-response` 原生协议的点火正常终止，且收到最终输入和输出计数时标为 `complete`；它表示网关协议的最终计数齐全，不保证每个上游细分项均存在。其余有计数的调用均为 `partial`，包括主动断流及 Antigravity/Chat 的自然结束：网关在协议转换中可能为缺失的计数补零，不同转换路径对推理 token 的合并和细分也可能不同，字段齐全或收到 `finish_reason` 不足以验证上游统计完整性，插件不把补出的零解释为确定的零用量。
+
+`end_reason` 为 `completed`（正常完成）、`output_timeout`（主动断流）、`canceled`、`timeout`（超过 `ignitionStreamTimeout`）、`start_error`（请求没有发出或没有响应）、`http_error`（网关返回错误状态码）、`read_error`、`stream_error`（流内错误或无法解析）、`unexpected_eof`、`close_error` 或 `watchdog_error`。
 
 ### 模型选择
 
-模型列表来自网关的 `GET /v1/models`（`host.Host.Models`，`models.Lister` 缓存 10 分钟）。这个列表是所有账号模型的合集，按模型 ID 去重，`owned_by` 在两个服务提供同一 ID 时可能指向另一个服务，所以候选只按名称挑选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型）：
+模型列表来自网关的 `GET /v1/models`（`host.Host.Models`，`models.Lister` 缓存 10 分钟），是所有服务所有账号模型的合集。Magpie 以 `<服务>/<模型>` 命名模型，服务部分是 Magpie 的服务 ID，例如 `codex/gpt-5.5`、`claude/claude-haiku-4-5`、`agy-cli/gemini-3-flash`。锁定账号的请求只能使用该账号所属服务的模型，因此点火时只取账号的 Magpie 服务（`Cred.HostProvider`）前缀下的模型（`credModels`），去掉前缀后按名称挑选候选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型），再按完整 ID 发送。没有服务前缀的 ID 原样使用。
 
 - Codex：名称含 `luna` 的模型由新到旧，然后其他 `gpt-` 模型；排除图片模型和 `gpt-oss`。
 - Claude：`claude-` 开头的非 thinking Haiku 由新到旧，然后 Sonnet。
 - Antigravity Gemini 组：Flash 由新到旧，然后其他非 Pro 模型，Pro 最后；排除图片模型。
 - Antigravity Claude / GPT 组：Haiku、Sonnet、Opus（均为非 thinking）、GPT-OSS、其他非 thinking 模型。
 
-“由新到旧”比较模型名中的数字段，新版本无需改代码。每次点火都从最新的候选开始。新模型发布后，旧模型通常还会在列表里保留很久，所以候选顺序不参考上次成功的模型。配置了 `model` 或 `models` 时只用指定模型，且它必须在列表中。
+“由新到旧”比较模型名中的数字段，新版本无需改代码。每次点火都从最新的候选开始。新模型发布后，旧模型通常还会在列表里保留很久，所以候选顺序不参考上次成功的模型。配置了 `model` 或 `models` 时只用指定模型，且它必须在该服务的列表中；指定模型可以写模型名，也可以写带服务前缀的完整 ID。模型列表暂时读不到时，使用指定模型（模型名补上账号的服务前缀）或上次成功的模型。`last_model`、事件和日志中的模型都是完整 ID。
 
-候选模型被锁定的凭证拒绝时，CPA 在本地返回 `auth_not_found`（凭证不支持该模型）或 `unknown provider for model`（没有凭证支持），不会请求上游；插件换下一个候选，最多 6 个。全部被拒绝时按高风险错误处理。模型列表暂时读不到时，使用指定模型或上次成功的模型。
+候选模型不在锁定账号的套餐中时，Magpie 在本地回答 400 `X-Magpie-Account: <账号>'s plan doesn't list <模型>`；没有任何账号提供它时回答 404 `X-Magpie-Account: no account "<pin>" serves this model`。两者都不请求上游，插件换下一个候选，最多 6 个。全部被拒绝时按高风险错误处理（`ErrNoModel`）。
 
-CPA 的模型列表来自它内置并定期更新的模型表，同一服务的凭证都列出相同的模型，所以列表里的新模型不一定能被每个账号调用。上游以 HTTP 400 或 404 拒绝某个候选时（`ignite.ModelRejected`；`failure.Diagnose` 判为账号停用的错误除外，停用的账号拒绝所有模型），插件在这次点火中换下一个候选，每次点火只换一次；再次被拒说明问题在请求或账号，按高风险错误处理，错误文字带上第一个被拒的模型和状态码；其余候选都被 CPA 本地拒绝时，带上被拒的完整错误。401、403 和 429 与模型无关，不换模型。
+Magpie 为同一服务的所有账号列出相同的模型，所以列表里的新模型不一定能被每个账号调用。上游以 HTTP 400 或 404 拒绝某个候选时（`ignite.ModelRejected`；`failure.Diagnose` 判为账号停用的错误除外，停用的账号拒绝所有模型），插件在这次点火中换下一个候选，每次点火只换一次；再次被拒说明问题在请求或账号，按高风险错误处理，错误文字带上第一个被拒的模型和状态码；其余候选都被 Magpie 本地拒绝时，带上被拒的完整错误。401、403 和 429 与模型无关，不换模型。
 
 换到的候选成功时，被拒的模型确实与这个额度组的账号有关：`engine.noteRefused` 在内存中记下额度组和模型，并记录 `model_refused` 事件；之后 24 小时（`refusedFor`）内，这个额度组的自动选择跳过该模型（`engine.skipRefused`），到期后再试一次。反复请求账号没有权限的模型可能增加账号风险，而新模型可能分批开放，所以按天重试。记录不写入 `state.json`，插件重启后清空。指定模型不受影响。
 
-模型列表在两种情况下读取：程序启动后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；启动后的读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选，放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
+模型列表在两种情况下读取：程序启动后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；启动后的读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选（取该服务及其别名对应的 Magpie 服务前缀下的模型），以完整 ID 放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
 
 ### 确认
 
 点火请求返回 2xx，且流正常结束或被 2 秒计时主动关闭后，插件确认 5 小时窗口在请求之后观测到了固定的未来重置时间。收到正文或 usage 本身不能确认成功：
 
-1. Claude 的响应头里直接带新的重置时间，立即确认。
-2. Codex 的额度信息通过同一请求的用量记录到达；等待期间继续处理被动数据。
-3. 按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次。Antigravity 的响应头里没有额度，只靠这一步确认。
+1. 响应头里带额度时立即确认：Claude 的 `anthropic-ratelimit-unified-5h-*` 由网关写回（见“请求”）；Codex 的 `x-codex-*` 是否经网关转发到客户端尚未验证。
+2. 否则按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次；等待期间继续处理排队的被动数据。Antigravity 的响应头里没有额度，只靠这一步确认。
 
 全部检查都没有确认时，返回 `ErrNotConfirmed`。
+
+### Magpie 的预热
+
+Magpie 自带的预热（内置插件“Warm-up and check-in”的设置，由 Magpie 的 `provider.KeepCodexWindowsWarm`、`KeepClaudeWindowsWarm` 执行）也会在窗口重置后或在设定的时间点发送请求开始窗口，与 Lamplighter 的点火同时开启会重复点火。Magpie 的预热只支持 Codex 和 Claude。
+
+`magpie.Host.MagpieWarmup`（`internal/magpie/warmup.go`）读取 Magpie 配置目录的 `settings.json`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `codexWarmup`、`claudeWarmup` | `""` 或 `off` 关闭，`week` 只在 7 天窗口重置时预热，`all` 同时预热 5 小时窗口 |
+| `codexWarmAts`、`claudeWarmAts` | 每天开启 5 小时窗口的时间点列表（如 `06:00`）；列表不存在时读旧版 Magpie 写的单个时间 `codexWarmAt`、`claudeWarmAt`，空列表表示关闭 |
+| `codexWarmAtOf` | ChatGPT 账号自己的时间点，以小写的用户名（邮箱）为键，`off` 表示不预热，代替 `codexWarmAts` |
+
+预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 和邮箱匹配。
+
+状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 监控的账号中开启了这类预热的 pin，按字符串排序，没有时为空数组（不为 `null`）。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
 
 ### 失败分类和保护
 
 手动点火失败只记录一次 `ignite_failed` 事件并向调用方返回错误，不安排重试、不累计失败次数、不打开熔断或发送暂停通知；已有自动点火的重试、熔断、失败和凭证问题状态保持不变。手动点火确认阶段的额度查询（`queryCred` 不带 `track`）同样不改凭证状态：查询失败不建立凭证问题、不暂停自动点火、不通知，查询成功也不结束凭证问题，留给之后的轮询。事件的 `params` 为 `manual: "1"`、`error`、`summary`，没有 `retry_seconds`，页面据此不显示重试提示。手动成功仍通过 `ignite.RecordSuccess` 记录并清空失败状态，并结束账号的凭证问题。
 
+Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回答，不请求厂商（Magpie 源码 `internal/gateway/fallback.go` 的 `pinTo`）。这些回答的 message 都以 `X-Magpie-Account: ` 开头：
+
+| 状态码 | message | 含义 |
+| --- | --- | --- |
+| 429 | `<账号> rests until <RFC 3339 时间> (<原因>); no other account is tried in its place` | 账号在 Magpie 中休息：Magpie 在限流、额度用完或被拒之后让账号休息到厂商的重置时间 |
+| 429 | 含 `usage cap reached` 或 `spend cap reached` | 用户在 Magpie 中给账号设置的上限 |
+| 400 | `<账号>'s plan doesn't list <模型>` | 账号的套餐不含该模型 |
+| 404 | `no account "<pin>" serves this model; …` | 没有这个账号，或它不提供该模型 |
+
+前两种由 `ignite.PinHeld` 识别，后两种使模型不可用。
+
 以下调度和保护规则用于自动点火。`ignite.Classify`：
 
 | 类别 | 条件 | 处理 |
 | --- | --- | --- |
-| 换模型 | `auth_not_found`、`unknown provider for model` | 换下一个候选 |
+| 换模型 | Magpie 本地回答的 400 `plan doesn't list`、404 `serves this model` | 换下一个候选 |
 | 上游拒绝模型 | 高风险错误中的 HTTP 400/404（`ignite.ModelRejected`） | 每次点火换一次候选，之后按高风险处理 |
 | 凭证失效、账号停用 | `failure.Diagnose` 给出 `auth` 或 `suspended`，见下文“凭证问题” | 暂停到凭证变化或手动点火成功 |
 | 高风险 | `ErrNotConfirmed`、`ErrNoModel`，HTTP 400/401/403/404/409/422/429，`not found`、`unsupported` 等 | 立即暂停到第二天 `start_hour`；429 发送限流通知 |
-| 临时 | CPA 本地冷却（`are cooling down`）、`auth_unavailable`，其他错误 | 按 `failure_retry_seconds × multiplier^(n-1)` 重试，第 `max_transient_failures` 次暂停到第二天 |
+| 临时 | Magpie 本地回答的 429（账号休息或达到上限）、点火超时，其他错误 | 按 `failure_retry_seconds × multiplier^(n-1)` 重试，第 `max_transient_failures` 次暂停到第二天 |
 
-CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.CooldownWait`），不计入失败次数，在冷却结束后再等 `grace_seconds` 重试。CPA 在 429 之后把凭证冷却到上游重置时间再加十几秒，额度在重置前用完时，重置后 3 秒的点火会撞上这段冷却。连续第二次冷却按普通临时错误计数，避免冷却不断续期时无限重试。
+账号在 Magpie 中休息、且距休息结束不超过 10 分钟时（`ignite.CooldownWait`，取 message 中最晚的 `rests until` 时间），不计入失败次数，在休息结束后再等 `grace_seconds` 重试；事件带 `cooldown: "1"`。Magpie 在 429 之后让账号休息到厂商的重置时间，额度在重置前用完时，重置后 3 秒的点火会撞上这段休息。连续第二次休息按普通临时错误计数，避免休息不断续期时无限重试。
 
-暂停时推送一次通知（`circuit_notified_until_epoch` 防止重复），成功或看到固定的未来重置时间后清空失败状态。通知和事件详情只写 `failure.Diagnose` 提炼的一句话（`summary`）：上游的完整错误是多行 JSON，只保留在事件的 `error` 和状态的 `last_error` 中。HTTP 429（不含 CPA 本地冷却）暂停时发送限流通知代替暂停通知，并记录 `reason` 为 `rate_limited` 的 `credential_invalid` 事件。
+暂停时推送一次通知（`circuit_notified_until_epoch` 防止重复），成功或看到固定的未来重置时间后清空失败状态。通知和事件详情只写 `failure.Diagnose` 提炼的一句话（`summary`）：上游的完整错误是多行 JSON，只保留在事件的 `error` 和状态的 `last_error` 中。HTTP 429（不含 Magpie 本地回答的 429）暂停时发送限流通知代替暂停通知，并记录 `reason` 为 `rate_limited` 的 `credential_invalid` 事件。
 
 ### 凭证问题
 
@@ -485,7 +520,7 @@ CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.Coold
 | --- | --- |
 | `suspended` 账号停用 | 错误代码为 `TOS_VIOLATION`、`account_deactivated` 等停用代码；或状态码为 400/401/403，且 message 说账号或组织被停用（“violation of Terms of Service”“account has been disabled”等，见 `suspendedPhrases`）。单纯的 403 不算：缺少权限（`PERMISSION_DENIED`）和项目未启用 API（`SERVICE_DISABLED`）也返回 403 |
 | `auth` 凭证失效 | 状态码 401、`quota.ErrUnauthorized`，或 `invalid_grant`、`authentication_error` 等代码 |
-| `rate_limited` 限流 | 状态码 429 或 `RESOURCE_EXHAUSTED`；CPA 本地冷却（`model_cooldown`、`are cooling down`、`auth_unavailable`）除外，它们由 `ignite.CooldownWait` 和 `ignite.Classify` 处理 |
+| `rate_limited` 限流 | 状态码 429 或 `RESOURCE_EXHAUSTED`；Magpie 对锁定账号的本地回答（message 含 `X-Magpie-Account:`）除外，它们不是厂商的响应，由 `ignite.CooldownWait` 和 `ignite.Classify` 处理 |
 
 账号的凭证问题记在 `state.json` 的 `credentials`（按 `auth_index`，`store.CredentialState`），代码在 `internal/engine/credential.go`：
 

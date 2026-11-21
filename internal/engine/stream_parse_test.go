@@ -107,23 +107,20 @@ func TestStreamCaptureMetadataFramingBoundaries(t *testing.T) {
 	}
 }
 
+// Every protocol is standard SSE: an event is dispatched at its blank line,
+// never at the end of an undelimited data line.
 func TestStreamCaptureProtocolLineBoundaries(t *testing.T) {
-	for _, protocol := range []string{"claude", "openai-response"} {
+	for _, protocol := range []string{"claude", "openai-response", "openai"} {
 		var s streamCapture
 		data := []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":1}}}`)
-		if err := s.feedChunk(protocol, data); err != nil {
+		if err := s.feedChunk(protocol, data); err != nil || s.terminal {
+			t.Fatalf("protocol=%s dispatched before newline: err=%v", protocol, err)
+		}
+		if err := s.feedChunk(protocol, []byte("\n")); err != nil || s.terminal {
+			t.Fatalf("protocol=%s dispatched before blank line: err=%v", protocol, err)
+		}
+		if err := s.feedChunk(protocol, []byte("\n")); err != nil {
 			t.Fatal(err)
-		}
-		if s.terminal != (protocol == "openai-response") {
-			t.Fatalf("protocol=%s terminal=%v before newline", protocol, s.terminal)
-		}
-		if protocol == "claude" {
-			if err := s.feedChunk(protocol, []byte("\n")); err != nil || s.terminal {
-				t.Fatalf("Claude dispatched before blank line: err=%v terminal=%v", err, s.terminal)
-			}
-			if err := s.feedChunk(protocol, []byte("\n")); err != nil {
-				t.Fatal(err)
-			}
 		}
 		if !s.terminal || !s.usageFinal || s.usage["output_tokens"] != float64(1) {
 			t.Fatalf("protocol=%s lost completed usage: %+v", protocol, s.usage)
@@ -188,27 +185,27 @@ func TestStreamCaptureUsageAndUnicodeBounds(t *testing.T) {
 	}
 }
 
-func TestStreamCaptureHostChatAndUsageCompleteness(t *testing.T) {
+func TestStreamCaptureChatAndUsageCompleteness(t *testing.T) {
 	var s streamCapture
 	for _, chunk := range []string{
 		`{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}`,
 		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 		`{"choices":[],"usage":{"prompt_tokens":4}}`,
 	} {
-		if err := s.feedChunk("openai", []byte(chunk)); err != nil {
+		if err := s.feedChunk("openai", []byte("data: "+chunk+"\n\n")); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if s.terminal || s.completeUsage("antigravity", "openai") || s.reply.String() != "OK" || !s.output {
 		t.Fatalf("terminal=%v usageFinal=%v reply=%q", s.terminal, s.usageFinal, s.reply.String())
 	}
-	if err := s.feedChunk("openai", []byte(`{"choices":[],"usage":{"completion_tokens":1}}`)); err != nil {
+	if err := s.feedChunk("openai", []byte("data: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.finish(); err != nil || !s.terminal || s.completeUsage("antigravity", "openai") {
 		t.Fatalf("terminal=%v usageFinal=%v err=%v", s.terminal, s.usageFinal, err)
 	}
-	for _, chunk := range []string{"SECRET invalid JSON", strings.Repeat("x", streamFrameLimit+1)} {
+	for _, chunk := range []string{"data: SECRET invalid JSON\n\n", strings.Repeat("x", streamFrameLimit+1)} {
 		if err := s.feedChunk("openai", []byte(chunk)); err == nil || strings.Contains(err.Error(), "SECRET") {
 			t.Fatalf("err=%v", err)
 		}
@@ -216,7 +213,7 @@ func TestStreamCaptureHostChatAndUsageCompleteness(t *testing.T) {
 }
 
 func TestStreamCaptureTranslatedUsageRemainsPartial(t *testing.T) {
-	// Host payload fixtures retain translator defaults. Missing upstream metadata
+	// Gateway payload fixtures retain translator defaults. Missing upstream metadata
 	// cannot be reconstructed from these fields, even on a natural Chat EOF.
 	for _, tc := range []struct {
 		name, usage string
@@ -230,7 +227,7 @@ func TestStreamCaptureTranslatedUsageRemainsPartial(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var s streamCapture
 			payload := `{"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}],"usage":` + tc.usage + `}`
-			if err := s.feedChunk("openai", []byte(payload)); err != nil {
+			if err := s.feedChunk("openai", []byte("data: "+payload+"\n\n")); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.finish(); err != nil || !s.terminal || s.usageFinal || s.completeUsage("antigravity", "openai") {
@@ -295,9 +292,11 @@ func TestStreamErrorMetadataAllowlist(t *testing.T) {
 		{"explicit status", `{"status_code":403,"error":{"code":"invalid_request_error","message":"SECRET"}}`, "invalid_request_error", 403, ignite.Hard, false},
 		{"Claude error", `{"type":"error","error":{"type":"authentication_error","message":"SECRET"}}`, "authentication_error", 401, ignite.Hard, false},
 		{"Responses failure", `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"SECRET"}}}`, "rate_limit_exceeded", 429, ignite.Hard, false},
-		{"normalized authentication", `{"error":{"code":"auth_unavailable","type":"authentication_error","message":"SECRET"}}`, "authentication_error", 401, ignite.Hard, false},
-		{"explicit authentication status", `{"status":401,"error":{"code":"auth_unavailable","message":"SECRET"}}`, "provider_stream_error", 401, ignite.Hard, false},
-		{"local cooldown", `{"error":{"code":"auth_unavailable","message":"SECRET"}}`, "auth_unavailable", 0, ignite.Transient, false},
+		{"explicit authentication status", `{"status":401,"error":{"message":"SECRET"}}`, "provider_stream_error", 401, ignite.Hard, false},
+		{"Magpie retry suffix", `{"type":"error","error":{"type":"api_error","message":"SECRET (429: you can retry your request)"}}`, "api_error", 429, ignite.Hard, false},
+		{"Magpie retry suffix 5xx", `{"error":{"type":"api_error","message":"SECRET (503: you can retry your request)"}}`, "api_error", 503, ignite.Transient, false},
+		{"suffix not at the end", `{"error":{"message":"(429: you can retry your request) SECRET"}}`, "provider_stream_error", 0, ignite.Transient, false},
+		{"Responses overloaded", `{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"SECRET"}}}`, "server_is_overloaded", 529, ignite.Transient, false},
 		{"Codex quota exhausted", `{"error":{"type":"usage_limit_reached","message":"SECRET"}}`, "usage_limit_reached", 429, ignite.Hard, false},
 		{"server error", `{"error":{"type":"server_error","message":"SECRET"}}`, "server_error", 500, ignite.Transient, false},
 		{"unknown metadata", `{"status":499,"error":{"code":"SECRET","type":"SECRET","message":"HTTP 401 model_not_found SECRET"}}`, "provider_stream_error", 0, ignite.Transient, false},

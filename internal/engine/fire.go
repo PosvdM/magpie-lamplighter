@@ -230,6 +230,76 @@ func configuredModel(cfg config.Config, provider, groupLabel string) string {
 	return p.Model
 }
 
+// gatewayModels holds the models of one Magpie provider from the gateway's
+// list. Magpie names a model "<provider>/<model>", such as
+// "claude/claude-haiku-4-5" or "agy-cli/gemini-3-flash"; the candidate rules
+// of internal/providers read the model name alone. bare lists the names, and
+// ids maps each back to the id the request names. An id without a
+// provider is kept as it is.
+type gatewayModels struct {
+	bare []string
+	ids  map[string]string
+}
+
+// modelsFor returns the models in available whose provider part is accepted
+// by owns.
+func modelsFor(available []string, owns func(provider string) bool) gatewayModels {
+	m := gatewayModels{ids: map[string]string{}}
+	for _, id := range available {
+		name := id
+		if provider, rest, ok := strings.Cut(id, "/"); ok {
+			if !owns(provider) {
+				continue
+			}
+			name = rest
+		}
+		if _, seen := m.ids[name]; !seen && name != "" {
+			m.ids[name] = id
+			m.bare = append(m.bare, name)
+		}
+	}
+	return m
+}
+
+// credModels returns the models of the Magpie provider of cred. A request
+// pinned to an account can only use its own provider's models.
+func credModels(available []string, cred *Cred) gatewayModels {
+	return modelsFor(available, func(provider string) bool {
+		if cred.HostProvider != "" {
+			return strings.EqualFold(provider, cred.HostProvider)
+		}
+		p := providers.Lookup(provider)
+		return p != nil && p.ID == cred.Provider
+	})
+}
+
+// id returns the gateway id of a model name.
+func (m gatewayModels) id(name string) string {
+	if id, ok := m.ids[name]; ok {
+		return id
+	}
+	return name
+}
+
+// overrideName returns a configured model as a name of cred's provider: a
+// value written as "<provider>/<model>" loses its provider part when it is
+// cred's provider.
+func overrideName(override string, cred *Cred) string {
+	if provider, rest, ok := strings.Cut(override, "/"); ok && cred.HostProvider != "" && strings.EqualFold(provider, cred.HostProvider) {
+		return rest
+	}
+	return override
+}
+
+// overrideID returns the id a configured model is sent as when the model
+// list cannot be read.
+func overrideID(override string, cred *Cred) string {
+	if strings.Contains(override, "/") || cred.HostProvider == "" {
+		return override
+	}
+	return cred.HostProvider + "/" + override
+}
+
 // igniteTarget sends the ignition request, confirms it and records the
 // outcome. It returns the error shown for a manual ignition.
 func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, manual bool) error {
@@ -307,7 +377,7 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		} else {
 			retry := retryText(outcome.RetryIn)
 			if outcome.Cooldown {
-				retry = "CPA 冷却结束，" + retry
+				retry = "Magpie 账号休息结束，" + retry
 			}
 			params := map[string]string{"retry_seconds": strconv.Itoa(int(outcome.RetryIn.Round(time.Second).Seconds())), "error": err.Error(), "summary": d.Summary}
 			if outcome.Cooldown {
@@ -353,8 +423,8 @@ func (e *Engine) group(key string) (GroupView, bool) {
 }
 
 // execute sends the ignition request with the newest candidate model. It
-// tries the next candidate when CPA rejects a model for the pinned
-// credential, and once per ignition when the provider refuses a model.
+// tries the next candidate when Magpie refuses a model for the pinned
+// account, and once per ignition when the provider refuses a model.
 func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, host.ModelResponse, error) {
 	var empty host.ModelResponse
 	spec := providers.Lookup(t.group.Provider)
@@ -366,16 +436,21 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 	var candidates []string
 	switch {
 	case err != nil && override != "":
-		candidates = []string{override}
+		candidates = []string{overrideID(override, t.cred)}
 	case err != nil && ts.LastModel != "":
 		// Keep igniting with the last working model while the list is unavailable.
 		candidates = []string{ts.LastModel}
 	case err != nil:
 		return "", empty, err
 	default:
-		candidates, err = providers.Candidates(spec, t.group.SourceLabel, override, available)
+		// Candidates are picked by model name and sent by gateway id.
+		own := credModels(available, t.cred)
+		names, err := providers.Candidates(spec, t.group.SourceLabel, overrideName(override, t.cred), own.bare)
 		if err != nil {
 			return "", empty, fmt.Errorf("%w: %v", ignite.ErrNoModel, err)
+		}
+		for _, name := range names {
+			candidates = append(candidates, own.id(name))
 		}
 	}
 	if override == "" {
@@ -411,7 +486,7 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 			lastErr = err
 			continue
 		}
-		// CPA lists a new model for every credential of the provider, and one
+		// Magpie lists a new model for every account of the provider, and one
 		// account may not be able to use it yet. A second refusal points at
 		// the request or the account, so it ends the ignition.
 		if refused == "" && i < len(candidates)-1 && ignite.ModelRejected(err) {
@@ -506,8 +581,9 @@ func (e *Engine) noteModels(available []string, err error) {
 		if p.Ignition == nil {
 			continue
 		}
-		if candidates, err := providers.Candidates(p, p.Ignition.HintGroup, "", available); err == nil {
-			next[p.ID] = candidates[0]
+		own := modelsFor(available, func(provider string) bool { return providers.Lookup(provider) == p })
+		if candidates, err := providers.Candidates(p, p.Ignition.HintGroup, "", own.bare); err == nil {
+			next[p.ID] = own.id(candidates[0])
 		}
 	}
 	e.nextModels = next

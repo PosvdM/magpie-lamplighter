@@ -366,7 +366,7 @@ func TestIgnitionIsConfirmedFromResponseHeaders(t *testing.T) {
 
 func TestIgnitionTriesNextModelWhenCredentialRejectsOne(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
-	h := claudeIgnitionHost(c, &host.Error{Code: "host_call_failed", Message: "auth_not_found: no auth available", Status: 503})
+	h := claudeIgnitionHost(c, &host.Error{Code: "gateway_http_error", Message: `{"type":"error","error":{"type":"invalid_request_error","message":"X-Magpie-Account: a@example.com's plan doesn't list claude-haiku-4-5-20251001"}}`, Status: 400})
 	e, _ := newTestEngine(t, h, c)
 	ctx := context.Background()
 	cfg := e.config()

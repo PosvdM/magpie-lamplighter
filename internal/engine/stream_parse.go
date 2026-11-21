@@ -27,9 +27,15 @@ var streamErrorCodes = map[string]int{
 	"not_found_error": 404, "not_found": 404, "model_not_found": 404,
 	"invalid_request_error": 400, "invalid_request": 400, "invalid_model": 400,
 	"unsupported_model": 400, "model_not_supported": 400,
-	"overloaded_error": 529, "server_error": 500, "api_error": 500, "internal_server_error": 500,
-	"auth_not_found": 0, "auth_unavailable": 0,
+	"overloaded_error": 529, "server_is_overloaded": 529,
+	"server_error": 500, "api_error": 500, "internal_server_error": 500,
 }
+
+// magpieRetryStatus matches the fixed suffix Magpie's gateway appends to the
+// message of a stream error whose status it can no longer send, when the
+// status is 408, 429 or 5xx (internal/gateway saysPassing): "(429: you can
+// retry your request)". Only this anchored marker is read from a message.
+var magpieRetryStatus = regexp.MustCompile(`\(([0-9]{3}): you can retry your request\)\s*$`)
 
 // streamAppealURL allowlists the appeal forms of suspended accounts kept from
 // a stream error, such as Google's https://forms.gle/... link.
@@ -95,6 +101,11 @@ func streamError(v map[string]any) error {
 			}
 		}
 	}
+	if status == 0 {
+		if match := magpieRetryStatus.FindStringSubmatch(str(detail["message"])); match != nil {
+			status = allowedStreamStatus(match[1])
+		}
+	}
 	explicit := status
 	for _, key := range []string{"code", "type"} {
 		if status == 0 {
@@ -141,11 +152,6 @@ func streamError(v map[string]any) error {
 	}
 	for _, key := range []string{"code", "type"} {
 		value := str(detail[key])
-		// CPA also uses auth_unavailable for normalized upstream authentication
-		// failures. Do not let its local-cooldown marker override that failure.
-		if value == "auth_unavailable" && (status == 401 || str(detail["type"]) == "authentication_error") {
-			continue
-		}
 		if _, ok := streamErrorCodes[value]; ok {
 			identifiers = append(identifiers, value)
 		}
@@ -157,11 +163,10 @@ func streamError(v map[string]any) error {
 	return &host.Error{Method: "host.model.stream_read", Code: code, Status: status, Message: message, AppealURL: appeal}
 }
 
-// streamCapture parses CPA's translated chunks without retaining raw responses or
+// streamCapture parses the gateway's SSE body without retaining raw responses or
 // opaque reasoning. Only visible text is included in the bounded log reply.
 type streamCapture struct {
 	pending      []byte
-	byteStream   bool
 	eventData    []byte
 	reply        strings.Builder
 	replyChars   int
@@ -197,43 +202,11 @@ func (s *streamCapture) markOutput(v string) {
 	}
 }
 
-// feedChunk follows the model callback wire format. OpenAI chat chunks are
-// JSON objects; the public HTTP handler adds SSE framing and [DONE] later.
-// Claude always carries SSE bytes. Responses carries complete scanner lines
-// until a chunk with a newline identifies standard SSE bytes.
-func (s *streamCapture) feedChunk(protocol string, payload []byte) error {
-	if protocol == "openai-response" {
-		if bytes.IndexByte(payload, '\n') >= 0 {
-			s.byteStream = true
-		}
-		if !s.byteStream && len(s.pending) == 0 {
-			return s.scannerLine(payload)
-		}
-	}
-	if protocol != "openai" {
-		return s.feed(payload)
-	}
-	if len(payload) > streamFrameLimit {
-		return errors.New("ignition stream frame too large")
-	}
-	return s.event(bytes.TrimSpace(payload))
-}
-
-// scannerLine receives one whole line with its newline removed by CPA.
-// Complete data events dispatch immediately because empty lines are omitted.
-func (s *streamCapture) scannerLine(payload []byte) error {
-	if len(payload) > streamFrameLimit {
-		return errors.New("ignition stream frame too large")
-	}
-	if err := s.line(bytes.TrimSuffix(payload, []byte{'\r'})); err != nil {
-		return err
-	}
-	data := bytes.TrimSpace(s.eventData)
-	if json.Valid(data) || bytes.Equal(data, []byte("[DONE]")) {
-		s.eventData = nil
-		return s.event(data)
-	}
-	return nil
+// feedChunk takes the next bytes of the body. The gateway answers all three
+// protocols with standard SSE, split at any byte: Chat chunks as data lines
+// ending in data: [DONE], Claude and Responses as their events.
+func (s *streamCapture) feedChunk(_ string, payload []byte) error {
+	return s.feed(payload)
 }
 
 func (s *streamCapture) feed(payload []byte) error {
@@ -292,8 +265,9 @@ func (s *streamCapture) finish() error {
 	if err := s.line(nil); err != nil {
 		return err
 	}
-	// The host chat stream ends at EOF rather than an HTTP-layer [DONE].
-	// Wait for EOF so a separate final usage chunk is not discarded.
+	// A Chat stream that ends without [DONE] still ends at EOF after its
+	// finish_reason. Wait for EOF so a separate final usage chunk is not
+	// discarded.
 	if s.chatFinished {
 		s.terminal = true
 	}
@@ -363,8 +337,8 @@ func (s *streamCapture) event(data []byte) error {
 			}
 			s.text(str(object(d["function_call"])["arguments"]))
 		}
-		// CPA can synthesize missing Chat counters as zero or translate token
-		// categories. Field presence cannot establish upstream completeness.
+		// The gateway can synthesize missing Chat counters as zero or translate
+		// token categories. Field presence cannot establish upstream completeness.
 		s.recordUsage(v["usage"], false)
 	}
 	return nil
@@ -384,7 +358,7 @@ func (s *streamCapture) completeUsage(provider, protocol string) bool {
 	return native && s.usageFinal && input && output
 }
 
-// recordUsage keeps allowlisted counters supplied by the CPA host, which may
+// recordUsage keeps allowlisted counters supplied by the gateway, which may
 // include translated or synthesized values. The plugin does not infer totals
 // or turn absent values into zero.
 func (s *streamCapture) recordUsage(v any, final bool) {
