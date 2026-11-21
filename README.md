@@ -222,7 +222,7 @@ Claude 和 Codex 的额度精确到 1%，Antigravity 的额度带小数。窗口
 - 时间按“设置”视图中设置的时区计算，不受 Magpie 所在服务器时区的影响。没有设置时区时使用程序所在系统的时区，Magpie 的 Docker 镜像为 UTC。
 - 每天 `07:00` 第一次点火，之后在每次重置后 3 秒点火，最晚到 `22:30`。晚于这个时间的重置顺延到第二天 07:00。
 - 请求经 Magpie 网关发送，用请求头锁定到这个账号，网关不会改用其他账号。Claude 的请求在 Magpie 中由 Claude Code 转发，带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。
-- 请求只要求模型回复 `OK`，不带工具。收到首次输出后 2 秒关闭请求；每次点火从发出请求到结束最长 2 分钟。
+- 请求只要求模型回复 `OK`，不带工具。收到首次输出后 2 秒关闭请求；每个候选模型的请求从发出到结束最长 2 分钟。换用下一个候选模型和之后的确认另计时间，所以一次点火可能更久。
 - 点火模型自动选择：ChatGPT 用最新的 Luna，Claude 用最新的 Haiku，Antigravity 的 Gemini 组用最新的 Flash。Magpie 列出新模型后，下一次点火就会使用它；账号不能使用这个模型时，这次点火改用下一个候选模型，被上游拒绝的模型 24 小时内不再尝试。也可以在配置中指定。
 - 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 和 Antigravity 的点火靠之后几次主动查询确认：分多次确认，间隔合计约 75 秒，另计每次查询的耗时。
 
@@ -472,8 +472,8 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 ## 已知限制
 
 - Lamplighter 随 Magpie 的插件宿主运行。Magpie 只在启动时和有插件调用时启动插件宿主；安装、更新插件或修改插件选项后，以及插件宿主因内存占用过高被替换后，Lamplighter 随旧宿主停止，要等到下一次插件调用才重新启动，期间不查询、不点火、不通知。打开 Lamplighter 的页面、调用它的工具，或经 agy-cli 等插件服务发送请求都会启动插件宿主，所以安装插件或修改选项后请打开一次页面。常驻后台需要 Magpie 支持，已向上游提出（[yetone/magpie#7114](https://github.com/yetone/magpie/issues/7114)）。
-- macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中，Lamplighter 不读取，会显示错误。在 Magpie 中再添加一次该账号即可。
-- Linux 上，agy 自己登录的第一个 Antigravity 账号读 agy 的默认凭证文件，其中存放的是 agy 当前登录的账号。agy 改登其他 Google 账号，或文件、Magpie 没有记下账号邮箱时，Lamplighter 不使用这个文件，该账号显示错误。在 agy 中改回原账号登录，或在 Magpie 中再添加一次该账号即可。
+- macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中。Lamplighter 不读取钥匙串，无法确认 agy 当前登录的是哪个账号，所以这个账号既不查询也不点火，状态中显示原因。在 Magpie 中用“添加另一个 Google 账号”重新添加该账号后即可查询和点火。
+- Linux 上，agy 自己登录的第一个 Antigravity 账号读 agy 的默认凭证文件，其中存放的是 agy 当前登录的账号。agy 改登其他 Google 账号，或文件、Magpie 没有记下账号邮箱时，身份对不上，这个账号既不查询也不点火，状态中显示原因。agy 改登了其他账号时，在 agy 中改回原账号登录即可。Magpie 没有记下邮箱时，在 agy 中重新登录不能补上（邮箱只在 Magpie 中登录时记下），要在 Magpie 中用“添加另一个 Google 账号”重新添加该账号；文件没有记下账号时同样这样处理。
 - Antigravity 账号的凭证中 `auth_method` 不为空、也不是 `consumer`（个人 Google 账号）时，查询额度会显示错误。
 - Magpie 的 `MAGPIE_ADDR` 设为局域网地址时，网关要求网关密钥，Lamplighter 无法访问网关。
 
