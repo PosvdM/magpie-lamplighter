@@ -4,14 +4,11 @@
 
 [English](./README_EN.md)
 
-> [!NOTE]
-> 本仓库是 Lamplighter 的 Magpie 版（npm 包 `magpie-lamplighter`），v0.1.0 正在开发，尚未发布。下文仍是 CLIProxyAPI 版 [cpa-plugin-lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter) 的说明，发布前改写。当前的实现见 [架构](./docs/architecture.md) 和 [开发](./docs/development.md)。
-
 > 当他点燃路灯时，就像他又创造了一颗星星，或者一朵花——《小王子》
 >
 > 点灯人的星球每分钟转一圈，他就每分钟点一次灯、熄一次灯，从不误点。Lamplighter 做的也是按时点灯：每个 5 小时额度窗口一重置，就点亮下一个窗口。
 
-Lamplighter（点灯人）是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）的原生插件。它监控 ChatGPT（Codex）、Claude、Antigravity、Kimi 和 Grok 账号的额度，通过 [Bark](https://github.com/Finb/Bark) 或通用 webhook 推送提醒，并在 5 小时额度窗口重置后发送一个极小的请求，让下一个窗口立即开始计时。
+Lamplighter（点灯人）是 [Magpie](https://github.com/yetone/magpie) 的插件，npm 包名为 `magpie-lamplighter`。它监控 Magpie 中 ChatGPT（Codex）、Claude 和 Antigravity 订阅账号的额度，通过 [Bark](https://github.com/Finb/Bark) 或通用 webhook 推送提醒，并在 5 小时额度窗口重置后经 Magpie 发送一个极小的请求，让下一个窗口立即开始计时。编码 Agent 可以通过 MCP 查询额度。
 
 ![管理页面：各账号额度和自动点火计划](./docs/images/overview.png)
 
@@ -21,22 +18,25 @@ Lamplighter（点灯人）是 [CLIProxyAPI](https://github.com/router-for-me/CLI
 
 ## 功能
 
-- **额度监控**：定时主动查询额度，同时读取 CPA 处理真实请求时上游返回的额度信息。
+- **额度监控**：定时直接向厂商查询各账号的额度，同时读取 Magpie 转发请求时记下的额度。
+- **图表**：每个账号一张额度卡；额度变化图表显示各窗口的历史曲线、匀速参考线、按当前速度的延长线和点火结果，多账号的服务显示按权重计算的合计。
 - **通知**：通过 Bark 或 webhook（飞书、ntfy、钉钉、Telegram 等）推送。剩余额度降到 50%、20%、10% 和耗尽时提醒，账号套餐变化（例如会员到期）时提醒；可选的恢复通知和重置前提醒；可选转发 [Did Codex Reset](https://didcodexreset.com/zh.html) 的重置信号。
-- **自动点火**：每天 07:00 起，在每次 5 小时窗口重置后 3 秒发送最小请求，最晚到 22:30。请求经过 CPA 自己的模型执行器，并锁定到指定账号。
-- **管理页面**：在 CPA 管理中心查看各账号额度、点火计划、事件和额度变化图表，并修改设置。
+- **自动点火**（默认关闭）：每天 07:00 起，在每次 5 小时窗口重置后 3 秒发送最小请求，最晚到 22:30。请求经 Magpie 网关发送，并锁定到指定账号。
+- **MCP**：编码 Agent 可以查询当前额度、历史和事件，并刷新额度。
 
-| 服务 | 监控范围 | 默认点火 |
-| --- | --- | --- |
-| ChatGPT / Codex | 5 小时、7 天 | 开启 |
-| Claude | 5 小时、7 天，以及 Fable 等单独计算的额度 | 开启，只点 5 小时窗口 |
-| Antigravity | Gemini、Claude / GPT 等额度组 | 关闭；开启后默认只点 Gemini |
-| Kimi | 5 小时、7 天等窗口 | 不支持：窗口按固定时间切换 |
-| Grok | 7 天 | 不支持：新周期在上一周期结束时自动开始 |
+| 服务 | Magpie 中的来源 | 监控范围 | 自动点火 |
+| --- | --- | --- | --- |
+| ChatGPT / Codex | Magpie 的 Codex 账号 | 5 小时、7 天 | 支持 |
+| Claude | Magpie 的 Claude 账号 | 5 小时、7 天，以及 Fable 等单独计算的额度 | 支持，只点 5 小时窗口 |
+| Antigravity | agy-cli 插件（`@magpie-community/opencode-agy-cli-auth`）的账号 | Gemini、Claude / GPT 等额度组 | 默认不点；开启后默认只点 Gemini |
 
-Kimi 的额度查询按 CPA 管理中心的实现编写，解析用一位用户提供的真实返回测试过，还没有在真实账号上运行过。按 API 用量计费的 Grok 账号没有额度可查，会显示错误。没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。
+没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。Magpie 中的 API key 没有额度窗口，不显示。
 
-通知和页面中，ChatGPT 账号的额度组名为 `GPT`，与 Claude 的首字母不同，便于区分。同一服务有多个账号时，通知和页面用邮箱用户名的最后两个字符区分，例如 `GPT#rk`。给账号起名后改用名称，例如 `GPT#主力号`：在 Lamplighter 的“设置”视图中，进入“账号”区填写“名称”，或在 CPA 管理中心编辑凭证的“备注（note）”。名称是备注的第一行，超过 20 个字时截断；只有一个账号的服务也显示名称；名称与同一服务另一个账号的名称或邮箱后缀相同时，名称后再加邮箱后缀。备注有多行时，在 Lamplighter 页面清空名称会删除整条备注。在 CPA 管理中心改的备注在下一轮查询或手动刷新后生效。已记录的事件保留原来的标签。
+### 账号名称
+
+通知和页面中，ChatGPT 账号的额度组名为 `GPT`，与 Claude 的首字母不同，便于区分。同一服务有多个账号时，通知和页面用邮箱用户名的最后两个字符区分，例如 `GPT#rk`。账号有名称时改用名称，例如 `GPT#主力号`：在 Lamplighter 的“设置”视图中，进入“账号”区填写“名称”；没有填写时使用 Magpie 中账号的名称（与邮箱相同时不算）。名称保存在 Lamplighter 的设置中，不修改 Magpie 中的账号名称。名称取第一行，超过 20 个字时截断；只有一个账号的服务也显示名称；名称与同一服务另一个账号的名称或邮箱后缀相同时，名称后再加邮箱后缀。已记录的事件保留原来的标签。
+
+### 多账号权重
 
 同一服务有多个账号时，图表中的合计按权重平均各账号的剩余额度，权重表示账号的额度是该服务最便宜付费套餐的几倍。默认权重按识别到的套餐确定，账号卡片底部显示套餐名；ChatGPT 的套餐取自额度查询的结果；Claude 和 Antigravity 的套餐每个账号每天读取一次账号资料，账号返回的额度窗口有增减时立即重读，例如 Google AI Pro 到期后 Gemini 的 5 小时窗口消失时。读取失败时沿用上次读到的套餐，从未读到时权重为 1。在“设置”视图的“账号”区填写“权重”可以手动设置，可带小数，留空则恢复输入框中提示的套餐默认值；手动设置的权重保存在 `account_weights` 中，优先于默认值。权重不是 1 时，账号标题后显示倍数，例如 `×5`。
 
@@ -52,83 +52,201 @@ Kimi 的额度查询按 CPA 管理中心的实现编写，解析用一位用户�
 | Claude | Max 20x | 20 |
 | Antigravity | Free、Pro、Ultra | 1 |
 
-其他服务和未识别的套餐默认权重为 1。
+未识别的套餐默认权重为 1。
 
 账号的套餐变化时（例如 Google AI Pro 到期或续订），插件推送一条 🎫 通知，例如 `🎫 Antigravity · 套餐 Pro → Free`。之后这个账号的额度提醒按新套餐的额度重新开始：新套餐的额度只记录，不当作额度恢复或下降来提醒。第一次读到套餐时只记录，不推送。Claude 的套餐每天读取一次，套餐变化后、读到新套餐之前，额度提醒仍按旧套餐的额度比较。套餐比额度窗口晚变化，或读取套餐连续失败超过 1 小时时，同样会按旧套餐的额度比较，可能发出一条错误的恢复或下降提醒。
 
 ## 要求
 
-- CPA v8.0.4 或更新版本，并开启插件（`plugins.enabled: true`）。插件提供 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 版本；macOS 版本还没有在实际运行的 CPA 上验证。
-- 一个专门给 Lamplighter 用的 CPA API key。插件用它读取模型列表来选择点火模型。
+- Magpie v0.1.4634 或更新版本。更早的版本可能没有 Lamplighter 读取账号列表所用的接口，例如 v0.1.4479 读不到账号。
+- 桌面版、`magpie web` 和 Docker 部署都可以使用。插件带有 Linux、macOS 和 Windows 的 amd64、arm64 程序，安装时不需要另外下载。
+- 需要监控 Antigravity 时，在 Magpie 中安装 agy-cli 插件并添加账号。
 - 需要通知时，一台装有 Bark 的 iPhone，或者一个能接收 webhook 的服务。
 
 ## 安装
 
-1. 在 [Releases](https://github.com/PosvdM/cpa-plugin-lamplighter/releases) 下载与 CPA 所在系统对应的 zip：Linux 上 `uname -m` 显示 `x86_64` 时选 `linux_amd64`，显示 `aarch64` 时选 `linux_arm64`；Apple 芯片的 Mac 选 `darwin_arm64`，Intel 芯片的 Mac 选 `darwin_amd64`；Windows 选 `windows_amd64`。
-2. 解压出动态库（Linux 为 `lamplighter-v<版本>.so`，macOS 为 `.dylib`，Windows 为 `.dll`），放进 CPA 插件目录下的 `<系统>/<架构>/` 子目录，例如 `plugins/linux/arm64/` 或 `plugins/windows/amd64/`。Docker 部署时，插件目录是挂载到容器 `/CLIProxyAPI/plugins` 的宿主机目录。
-3. 在 CPA 的 `config.yaml` 中新增一个 API key，并启用插件：
+在 Magpie 的“插件”页面打开“发现”，在“已有想装的？”输入框中填写 `magpie-lamplighter`，点击“安装”。也可以使用命令行：
 
-   ```yaml
-   access:
-     api-keys:
-       - "已有的 key"
-       - "给 Lamplighter 新建的 key"
-   plugins:
-     enabled: true
-     configs:
-       lamplighter:
-         enabled: true
-         models_api_key: "给 Lamplighter 新建的 key"
-         bark_url: "https://api.day.app/你的device_key"
-   ```
+```sh
+magpie plugin add magpie-lamplighter
+```
 
-4. 重启 CPA（Docker 部署时运行 `docker compose restart`）。插件在 CPA 启动约 20 秒后开始第一次查询。
-5. 打开管理中心侧边栏的 **Lamplighter** 页面。如果登录管理中心时勾选了“记住密码”，页面会直接使用该密钥，否则会请你输入。
+Docker 部署时在容器中运行这条命令，例如容器名为 `magpie` 时：
 
-插件每 6 小时检查一次新版本，打开管理页面时也检查一次。有新版本时，管理页面标题栏的版本号右边出现绿色的向上箭头，点击打开该版本的 Release 页面。升级时，在 CPA 管理中心的插件商店中更新；手动安装的，把新版本的动态库放进同一目录，删除旧版本文件，再重启 CPA。
+```sh
+docker exec magpie magpie plugin add magpie-lamplighter
+```
 
-插件的状态和额度历史保存在插件目录下的 `data/lamplighter/`。Docker 部署时插件目录已经挂载在宿主机上，重建容器不会丢失这些数据。
+Magpie 读不到社区插件列表时，这条命令会报错，可以改用 `magpie plugin add npm:magpie-lamplighter`，直接按 npm 包名安装。
 
-## 额度怎么获取
+安装后，侧边栏的“插件”分组中出现 **Magpie-Lamplighter** 页面。打开它即可启动插件；插件启动约 5 秒后开始第一次查询。
 
-**主动查询**：默认每 5 分钟一次，固定在每小时的 `00 / 05 / 10 / ... / 55` 分钟。此外，每个额度窗口重置前 30 秒和重置后 30 秒，插件各对这个账号再查询一次：前一次记录这个周期最后的剩余额度，后一次确认新周期并及时发出恢复通知。这段时间里已有新读数时不再查询。请求地址和请求头与 CPA 管理中心额度页发出的请求相同。
+新安装的插件不自动点火。开启前依次完成：
 
-**被动读取**：Claude 和 Codex 的模型请求经过 CPA 时，上游会在响应里返回当前额度，插件直接使用这些数据，不额外发请求。Antigravity、Kimi 和 Grok 没有这类数据，只能主动查询。额度接口没有返回、只出现在响应头里的窗口，在主动查询之后不再显示，例如 ChatGPT Pro 账号的 5 小时窗口。
+1. 在“设置”视图中设置时区。点火时段和页面、通知中的时间都按这个时区计算。
+2. 关闭 Magpie 自带的预热，见[与 Magpie 预热的冲突](#与-magpie-预热的冲突)。
+3. 在“设置”视图的“自动点火”区勾选“启用自动点火”。
 
-如果某个账号在整点前 60 秒内刚有过被动数据，这一轮就跳过对它的主动查询。同一账号最多连续跳过 30 分钟，到时一定主动查询一次，以便更新没有出现在响应头里的额度，例如没在使用的 Claude Fable 额度。图表不把这段计划内的间隔画成缺数据。
+### 插件选项
 
-Claude 和 Codex 的额度无论主动还是被动获取，都精确到 1%；Antigravity 的主动查询结果带小数；Kimi 按已用量和上限换算，可能带小数。
+插件只有一个选项 `port`：内部监听的端口，默认 `8317`。Magpie 的插件页面和 tool 都经这个端口访问 Lamplighter。端口被其他程序占用时（见[端口](#端口)），在 Magpie 的“插件”页面中打开“已安装”，点击 Lamplighter 一行的“选项”，填写：
 
-窗口在套餐升级时消失、降级后重新出现时，首次返回只记录新的提醒基线，不发送恢复通知或重置前提醒。窗口消失不通知；主动查询确认的缺席状态跨插件重启保留，被动响应头不会恢复缺席窗口，只有后续成功的主动查询才能恢复。读取旧版状态文件时，插件尽量恢复上次主动查询确认的窗口集合；无法可靠恢复的已有额度组先等待一次成功的主动查询，期间响应头不新增窗口。没有 5 小时窗口时跳过点火，恢复后自动继续。历史记录保留消失的窗口。
+```json
+{"port": 8320}
+```
 
-**网络出口**：主动查询和 CPA 发送模型请求时使用同一个出口，依次是：账号自己的 `proxy_url`、全局 `proxy-url`、环境变量中的代理、直连。账号配置的 `proxy_url` 无法解析时，插件跳过这次查询，不会改用直连。
+也可以使用命令行：
+
+```sh
+magpie plugin options magpie-lamplighter '{"port": 8320}'
+```
+
+### 更新
+
+插件每 6 小时检查一次新版本，打开管理页面时也检查一次。有新版本时，页面标题栏的版本号右边出现更新图标。在 Magpie 的“插件”页面中更新，或运行 `magpie plugin update`。
+
+### 数据目录
+
+插件的配置（`config.json`）、状态和额度历史保存在以下目录中：
+
+| 环境 | 目录 |
+| --- | --- |
+| Magpie 的 Docker 镜像 | `/config/state/lamplighter`，位于 `/config` 卷中，升级 Magpie 或重建容器后保留 |
+| Linux、macOS | `$XDG_STATE_HOME/lamplighter`，没有设置 `XDG_STATE_HOME` 时为 `~/.local/state/lamplighter` |
+| Windows | `%LOCALAPPDATA%\lamplighter` |
+
+其他取值规则见[进程和数据目录](./docs/architecture.md#进程和数据目录)。
+
+### CPA 版用户
+
+Lamplighter 原先是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）的插件，仓库为 [PosvdM/cpa-plugin-lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter)。改用 Magpie 后安装本插件即可。本插件不读取 CPA 版的配置和历史数据，设置需要重新填写。两者在同一台机器上运行时注意[端口](#端口)。
+
+## 管理页面
+
+页面有两种打开方式：
+
+- **在 Magpie 中**：打开侧边栏“插件”分组中的 **Magpie-Lamplighter**。桌面版和 `magpie web` 都可以使用，不需要密钥。页面的语言和主题跟随 Magpie。
+- **从外部直接访问**：开启对外监听，经反向代理从其他设备访问，见下文“对外访问”。
+
+### 对外访问
+
+对外监听让其他设备通过浏览器或 MCP 访问 Lamplighter，在“设置”视图的“高级”中设置：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `public_listen` | `127.0.0.1:8318` | 对外监听地址 |
+| `web_enabled` | `false` | 在对外监听上提供页面和接口，需要 `admin_key` |
+| `admin_key` | 空 | 管理密钥；开启 `web_enabled` 时没有密钥，页面会生成一个 |
+| `mcp_enabled` | `false` | 在对外监听上提供 `/mcp`，见 [MCP](#mcp) |
+| `mcp_key` | 空 | MCP 专用密钥；开启 `mcp_enabled` 时没有密钥，页面会生成一个 |
+
+页面和 MCP 都关闭时不监听。两把密钥互不通用：管理密钥不能访问 `/mcp`，MCP 密钥不能访问页面和接口。
+
+经对外地址第一次打开页面时，页面提示“需要管理密钥”，输入后保存在当前浏览器中。打码开关等页面选项也按浏览器分别保存。
+
+不建议直接监听公网。保持对外监听在回环地址上，由同机的反向代理终止 TLS，并按需增加防火墙或访问白名单。代理需要保留 `Authorization` 和 `MCP-Protocol-Version` 请求头；`/mcp` 拒绝带非本机 `Origin` 的浏览器请求，普通 MCP Agent 通常不发送这个头。
+
+Docker 部署时，对外监听位于容器内。把 `public_listen` 设为 `0.0.0.0:8318`，创建容器时发布这个端口（例如 `-p 127.0.0.1:8318:8318`），再由宿主机上的反向代理转发。
+
+Nginx 示例（替换域名和证书路径）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name quotas.example.com;
+    ssl_certificate /etc/letsencrypt/live/quotas.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/quotas.example.com/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8318;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
+        proxy_read_timeout 190s;
+    }
+}
+```
+
+Caddy 示例（域名解析到代理，Caddy 自动申请 HTTPS 证书）：
+
+```caddyfile
+quotas.example.com {
+    reverse_proxy 127.0.0.1:8318 {
+        transport http {
+            response_header_timeout 190s
+        }
+    }
+}
+```
+
+鉴权和监听的细节见[对外监听](./docs/architecture.md#对外监听)。
+
+### 页面内容
+
+页面顶部通过“额度 | 设置”切换视图，浏览器记住上次打开的视图。“额度”视图包含：
+
+- 各账号的额度窗口、重置时间（带星期几）、数据来源和套餐，可以单独刷新某个账号；
+- 额度条和图表共用五档颜色：原始剩余值为 100% 时为“满”，0% 时为“空”，中间按前两档提醒阈值分为“高”“中”“低”；99.6% 即使显示为 100% 也不按满额着色；
+- 每个额度组的下次点火时间和当前重置时间（均带星期几）、最近一次结果和失败保护状态，可以立即点火；关闭自动点火时不显示这部分；
+- 额度变化图表：
+  - 先选 5 小时或 7 天额度。5 小时额度可看 1、3、6、12、24、26 小时（默认 6 小时），7 天额度可看 1、4、8、15 天、1 个月（上月这一天起）和 36 天（默认 8 天）。其他长度的窗口只在账号卡片上显示。开启 `remember_chart_filters` 后，页面记住上次的选择。
+  - 1、3 小时和 1、4 天显示到现在为止。更长的范围以所选行当前窗口的重置时间为右端，例如 6 小时显示当前 5 小时窗口和上个窗口的最后 1 小时；现在之后的部分画成斜纹。
+  - 上半部分每个服务一行色带，颜色与额度条相同，按每个周期内的最低读数着色。默认跟随账号卡片顺序，也可按剩余最低排序；同一服务有多个账号时显示按权重计算的合计，点击可展开各账号。账号不再报告的窗口标为“已停用”，保留到最后一个样本移出所选范围。
+  - 下半部分是所选行的曲线，标出重置时刻和点火结果，并画出匀速参考线：以 5 小时或 7 天为周期，从 100% 线性降到预定重置时的 0%。曲线在线上方说明用得比匀速慢。曲线上方显示当前剩余、此刻的匀速参考值和两者的差值。
+  - 右端是重置时间时，从现在画一条延长线：先用完时在时间轴上标出用完的时间，先到重置时在图表右侧标出届时的剩余额度。5 小时额度按当前速度延伸，刚开始大量使用的几分钟内，估计的用完时间偏早；7 天额度按本周期的日均用量延伸，周期刚开始的一两天偏差较大。
+  - 页面每 30 秒读取一次状态，有新数据时更新图表；鼠标停在图表上时，等移开后再更新。
+- 最近的事件，按时间、类型、额度组和详情分列显示。由某个事件触发的推送在该事件行尾标出“已推送”或“推送失败”。5 小时额度的重置默认隐藏，勾选“显示 5 小时重置”后显示。
+
+图表的计算方法见[页面功能](./docs/architecture.md#页面功能)。
+
+页顶、卡片区标题栏和曲线详情标题栏的眼睛按钮共用“打码账号”和“显示账号”开关。打码会模糊账号名称、邮箱和“账号”区的输入框，以及事件和历史图表中保留的旧账号名称；上游错误等可能提到账号的文字整体模糊。打码状态保存在当前浏览器中，各台电脑、各个浏览器分别保存。打码只影响显示，不删除接口或页面中的原始数据。
+
+账号卡片、卡片区标题栏和曲线详情标题栏的相机按钮，分别将单张卡片、全部卡片和详情图复制为 PNG 图片。截图保留当前主题和打码状态，不包含操作按钮。在 Magpie 中，图片交给 Magpie 写入剪贴板；单独在浏览器中打开时，需要浏览器支持图片剪贴板，并在 HTTPS 或 localhost 等安全上下文中获得剪贴板权限。
+
+“设置”视图依次为“账号”“通知渠道”“提醒规则”“自动点火”“服务”和“高级”。开关和勾选框点击后自动保存，文本和数字在离开输入框或按回车时自动保存，保存结果显示在区块标题右侧。保存后显示“已保存，等待生效”，插件确认后显示“已生效”，15 秒内未确认则显示“未确认生效”。保存失败时，标题显示字段名和原因，失败的控件标红，输入草稿保留。“账号”区可以修改名称和权重，并通过拖动手柄调整账号顺序（保存为 `account_order`），拖动时按 Esc 取消。“通知渠道”中的“测试推送”在设置生效后向所有已配置的渠道发送，并逐个显示结果。
+
+## 额度获取
+
+**主动查询**：默认每 5 分钟一次，固定在每小时的 `00 / 05 / 10 / ... / 55` 分钟。此外，每个额度窗口重置前 30 秒和重置后 30 秒，插件各对这个账号再查询一次：前一次记录这个周期最后的剩余额度，后一次确认新周期并及时发出恢复通知。这段时间里已有新读数时不再查询。查询直接发给厂商的额度接口，不经过 Magpie 网关，也不经过 Claude Code。
+
+**Magpie 的额度记录**：Magpie 转发请求时会记下各账号的额度，插件每 60 秒读取一次，不额外向厂商发请求。Codex 和 Claude 有这类数据，Antigravity 只能主动查询。某个账号在整点前 60 秒内刚有过新读数时，这一轮跳过对它的主动查询；同一账号最多连续跳过 30 分钟，到时一定主动查询一次。
+
+**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
+
+**网络出口**：主动查询和 Magpie 对同一账号的请求使用同一个出口：Magpie 中为该账号或该服务设置的代理，其次是 Magpie 的全局代理，再次是 Magpie 使用的系统代理，都没有时直连。代理无法解析时，插件跳过这次查询，不改用直连。见[网络出口](./docs/architecture.md#网络出口)。
+
+Claude 和 Codex 的额度精确到 1%，Antigravity 的额度带小数。窗口在套餐升级时消失、降级后重新出现时，首次读数只记录新的提醒基线，不发送恢复通知或重置前提醒；窗口消失不通知，历史记录保留消失的窗口。
 
 ## 自动点火
 
-5 小时额度窗口从重置后的第一个请求开始计时。重置后没人使用时，窗口不会开始。Lamplighter 在每次重置后立即发一个请求，让窗口连续滚动。Kimi 的窗口按固定时间切换，Grok 没有 5 小时窗口，这两个服务不点火。点火规则如下：
+5 小时额度窗口从重置后的第一个请求开始计时。重置后没人使用时，窗口不会开始。开启自动点火后，Lamplighter 在每次重置后立即发一个请求，让窗口连续滚动。点火规则如下：
 
-- 时间均按插件时区计算，默认跟随 CPA 服务器。
+- 时间按“设置”视图中设置的时区计算，不受 Magpie 所在服务器时区的影响。没有设置时区时使用程序所在系统的时区，Magpie 的 Docker 镜像为 UTC。
 - 每天 `07:00` 第一次点火，之后在每次重置后 3 秒点火，最晚到 `22:30`。晚于这个时间的重置顺延到第二天 07:00。
-- 请求只要求模型回复 `OK`，不带工具，也不设置输出 token 上限。流式接收首次非空输出（正文、可见推理或工具参数）后，独立计时 2 秒并关闭上游流；提前结束时立即收尾。心跳和生命周期事件不启动计时，主动断流不触发换模型。
-- 点火模型自动选择：ChatGPT 用最新的 Luna，Claude 用最新的 Haiku，Antigravity 的 Gemini 组用最新的 Flash。CPA 列出新模型后，下一次点火就会使用它；上游拒绝这个模型时，这次点火改用下一个候选模型；换用成功时在事件中记录，这个额度组 24 小时内不再尝试被拒的模型。也可以在配置中指定。
-- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。
+- 请求经 Magpie 网关发送，用请求头锁定到这个账号，网关不会改用其他账号。Claude 的请求在 Magpie 中由 Claude Code 转发，带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。
+- 请求只要求模型回复 `OK`，不带工具。收到首次输出后 2 秒关闭请求；每次点火从发出请求到结束最长 2 分钟。
+- 点火模型自动选择：ChatGPT 用最新的 Luna，Claude 用最新的 Haiku，Antigravity 的 Gemini 组用最新的 Flash。Magpie 列出新模型后，下一次点火就会使用它；账号不能使用这个模型时，这次点火改用下一个候选模型，被上游拒绝的模型 24 小时内不再尝试。也可以在配置中指定。
+- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 和 Antigravity 的点火靠之后几次主动查询确认，最长约 75 秒。
 
-首输出前沿用 CPA 自身的等待行为；`request_timeout_seconds` 不限制模型启动等待。插件停止时，已取得流标识的请求会关闭；仍在启动的请求须等待 CPA 返回流标识。具体边界见[流式执行与取消](./docs/architecture.md#流式执行与取消)。
+每次点火的模型、回复、usage 和耗时写入 Magpie 的日志，见[调用日志](./docs/architecture.md#调用日志)。
 
-每次模型调用结束后，CPA 服务器日志记录服务、模型、关联标识、收到的正文、宿主提供的 usage 及其完整性、结束原因、首输出等待和总耗时。正文（含可见推理和工具参数）最多保留 4096 个 Unicode 字符，超出时标记截断。usage 保留 CPA 给出的数字，不估算 token；CPA 转换可能补零或合并计数，因此 Antigravity 的 usage 即使自然结束也标为不完整。其他完整性标记只描述宿主协议中的统计，不保证上游所有用量及细分项均已返回。记录不包含凭证、完整请求或加密推理，也不写入页面事件和额度历史。
+### 与 Magpie 预热的冲突
 
-**失败保护**：以下重试和暂停规则用于自动点火。“立即点火”失败时只显示错误并记录事件，不自动重试、不计入失败次数，也不改变已有自动点火计划；成功时照常记录。
+Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重置后或设定的时间点发送请求，开启 Codex 和 Claude 的 5 小时窗口。它与 Lamplighter 的自动点火同时开启会重复点火。Lamplighter 开启点火、Magpie 也为同一账号开启了 5 小时窗口的预热时，页面顶部列出这些账号；请在 Magpie 中关闭它们的预热。只在 7 天窗口重置时预热的设置不冲突。
 
-- 凭证失效（401 等）或账号被停用（例如 Google 返回 `TOS_VIOLATION`）时，这个账号停止自动点火，不再每天重试，推送一次 🔑 或 ⛔ 通知（停用通知附申诉链接）。重新登录或更新凭证后自动恢复；“立即点火”成功也会恢复。额度查询持续认证失败（连续 3 次、30 分钟以上）或发现账号停用时同样提醒；同一个问题点火和查询只提醒一次，插件重启后也不重复。问题解除时推送 ✅ 凭证已恢复。
-- 限流（429）、模型不可用，或请求成功但窗口没有开始，都会让这个额度组停止点火到第二天 07:00，并推送一次通知；限流的通知为 ⏳ 被限流。通知只写上游错误的第一句话，完整错误在页面的事件详情中。
+### 失败保护
+
+以下重试和暂停规则用于自动点火。“立即点火”失败时只显示错误并记录事件，不自动重试、不计入失败次数，也不改变已有自动点火计划；成功时照常记录。
+
+- 凭证失效（401 等）或账号被停用（例如 Google 返回 `TOS_VIOLATION`）时，这个账号停止自动点火，不再每天重试，推送一次 🔑 或 ⛔ 通知（停用通知附申诉链接）。在 Magpie 中重新登录后自动恢复；“立即点火”成功也会恢复。额度查询持续认证失败（连续 3 次、30 分钟以上）或发现账号停用时同样提醒；同一个问题只提醒一次，插件重启后也不重复。问题解除时推送 ✅ 凭证已恢复。
+- 厂商限流（429）、模型不可用，或请求成功但窗口没有开始，都会让这个额度组停止点火到第二天 07:00，并推送一次通知；限流的通知为 ⏳ 被限流。通知只写上游错误的第一句话，完整错误在页面的事件详情中。
 - 网络错误和服务端错误先在 5 分钟、15 分钟后重试；第三次仍失败，同样停到第二天。
-- 额度在重置前用完时，CPA 会把账号冷却到重置后十几秒。点火撞上这段冷却时，等冷却结束后立即重试，不算失败。
+- Magpie 在账号被限流或额度用完后让它休息到厂商的重置时间。点火撞上这段休息、且休息在 10 分钟内结束时，等休息结束后重试，不算失败。
 - 同一账号的 7 天额度（或其他非 5 小时窗口）用完时，这个额度组不再自动点火，等到该窗口重置、查询看到额度恢复后继续；页面状态显示“7 天额度已用完”。“立即点火”不受影响。
-- 额度提前恢复（例如用了重置卡）而 CPA 仍按原重置时间冷却这个账号时，期间所有请求和点火都会被 CPA 拒绝。插件发现后推送一次 ⚠️ 提醒，并在账号卡片上提示，需要在 CPA 管理中心手动清除这个账号的冷却。
+
+分类规则见[失败分类和保护](./docs/architecture.md#失败分类和保护)。
 
 ## 通知示例
 
-通知使用最近一次打开管理页面时管理中心的语言（中文或英文），从没打开过时使用中文。
+通知使用最近一次打开管理页面时页面的语言（中文或英文，跟随 Magpie），从没打开过时使用中文。
 
 ```text
 🟡 Claude · 7d 48% | 03d
@@ -137,18 +255,16 @@ Claude 和 Codex 的额度无论主动还是被动获取，都精确到 1%；Ant
 7d：48% | 03d | 10/07 14:00
 ```
 
-标题前的图标：🟡 剩余降到第一档（默认 50%），🔴 降到第二档（默认 20%）及以下，✅ 额度恢复，⏰ 重置提醒，🎫 套餐变化，🔑 凭证失效，⛔ 账号已停用，⏳ 被限流，✅ 凭证已恢复，⚠️ 点火暂停、CPA 冷却未解除等需要处理的问题。正文每行依次是：窗口、剩余额度、距离重置的时间、重置时间。第一次看到某个额度窗口时只记录当前状态，不推送。
+标题前的图标：🟡 剩余降到第一档（默认 50%），🔴 降到第二档（默认 20%）及以下，✅ 额度恢复，⏰ 重置提醒，🎫 套餐变化，🔑 凭证失效，⛔ 账号已停用，⏳ 被限流，✅ 凭证已恢复，⚠️ 点火暂停等需要处理的问题。正文每行依次是：窗口、剩余额度、距离重置的时间、重置时间。第一次看到某个额度窗口时只记录当前状态，不推送。
 
 ## 配置
 
-所有配置都写在 `config.yaml` 的 `plugins.configs.lamplighter` 下，也可以通过管理页面顶部的“额度 | 设置”切换到“设置”视图修改。开关和勾选框点击后自动保存，文本和数字在离开输入框或按回车时自动保存。保存结果集中显示在区块标题右侧；“高级”按各分组的标题分别显示。三档提醒阈值一起保存，必须满足从高到低的顺序，可以相等。配置修改后插件自动应用，不需要重启。保存成功后显示“已保存，等待生效”，插件确认后显示“已生效”；15 秒内未确认则显示“未确认生效”。状态请求挂起不会延长等待，晚到的确认也不会改变这次等待的结果。
-
-没有失败时，标题显示该区块最近一次保存的进度；保存失败时优先显示字段名和失败原因，并将失败的控件标红，输入草稿保留。其他项保存成功不会覆盖这项失败；该项重新保存成功后才清除。多项失败时显示最近一条，并注明其余失败数量。窄屏只显示“保存失败”和失败数量，隐藏字段名及原因，避免长文字挤占标题。编辑会撤销旧请求对该项提示的更新权，较早的响应和确认不会覆盖后续修改；未解决的失败提示仍然保留。MCP 设置还会显示接口未启动的原因。
+配置保存在[数据目录](#数据目录)的 `config.json` 中，通常在管理页面的“设置”视图中修改，保存后立即生效，不需要重启。插件运行时只在启动时读取这个文件，之后以页面保存的内容覆盖它。如需手动编辑，先在 Magpie 的“插件”页面停用 Lamplighter，编辑后再启用，然后打开一次页面。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `bark_url` | 空 | Bark 推送地址，写到 device key 为止；为空时不通过 Bark 推送 |
-| `bark_group` | `CPA` | Bark 通知分组 |
+| `bark_group` | `Magpie` | Bark 通知分组 |
 | `bark_icon` | Lamplighter 图标 | 通知图标 |
 | `webhook` | 空 | 通用 webhook，见 [Webhook](#webhook) |
 | `notice_threshold` | `50` | 第一档提醒阈值（剩余百分比） |
@@ -156,27 +272,23 @@ Claude 和 Codex 的额度无论主动还是被动获取，都精确到 1%；Ant
 | `critical_threshold` | `10` | 第三档提醒阈值 |
 | `recovery_notify` | 5 小时 `after_exhausted`，7 天 `all` | 额度恢复时通知，见下文 |
 | `reset_reminder` | 5 小时 `off`，7 天 `has_remaining` | 重置前提醒，见下文 |
-| `timezone` | 空 | 显示时间和点火时段使用的时区，如 `Asia/Shanghai`；为空时跟随 CPA 服务器的时区（官方 Docker 镜像由 `TZ` 设置） |
+| `timezone` | 空 | 显示时间和点火时段使用的时区，如 `Asia/Shanghai`；为空时使用程序所在系统的时区（Magpie 的 Docker 镜像为 UTC） |
 | `timezone_offset_hours` | 空 | 固定的 UTC 偏移，例如 `8`；只在 `timezone` 为空时使用 |
 | `poll_interval_seconds` | `300` | 主动查询间隔，最小 60 |
-| `request_timeout_seconds` | `20` | 额度查询、通知等 HTTP 请求的超时；不限制点火模型的启动或首输出等待 |
-| `passive_skip_seconds` | `60` | 整点前多少秒内有被动数据时跳过主动查询；`0` 表示不跳过 |
+| `request_timeout_seconds` | `20` | 额度查询、通知等 HTTP 请求的超时，5～120；不限制点火 |
+| `passive_skip_seconds` | `60` | 整点前多少秒内有 Magpie 的新读数时跳过主动查询；`0` 表示不跳过 |
 | `passive_skip_max_minutes` | `30` | 同一账号最多连续跳过多少分钟 |
-| `models_api_key` | 空 | 读取模型列表用的 CPA API key；未设置时自动点火无法选择模型。不能使用管理密钥；在页面上修改时，管理密钥和 CPA 不接受的 key 不会保存，页面会提示原因 |
-| `cpa_base_url` | `http://127.0.0.1:8317` | 插件访问 CPA 自身的地址；CPA 改了端口或开启 TLS 时需要同步修改 |
 | `history_retention_days` | `40` | 额度历史保留天数 |
-| `remember_chart_filters` | `false` | 管理页面在当前浏览器中记住“额度变化”上次选择的额度窗口、时间范围和排序；关闭时每次打开页面都使用默认选择 |
-| `account_weights` | 空 | 多账号合计中各账号的权重，键为凭证文件名，值为大于 0 的数字；未设置的账号使用套餐的默认权重，见上文 |
-| `account_order` | 空 | 账号顺序，按凭证文件名排列；未列出的账号按默认顺序排在后面，不存在的条目忽略 |
-| `mcp_enabled` | `false` | 启用独立 MCP 服务，见 [MCP](#mcp) |
-| `mcp_listen` | `127.0.0.1:8318` | MCP 监听地址 |
-| `mcp_key` | 空 | MCP 专用 Bearer 密钥；为空时不启动监听 |
-| `config_token` | 空 | 页面每次保存时生成的配置确认令牌，通常无需手动设置；确认机制见[架构文档](./docs/architecture.md#与-cpa-的接口) |
-| `data_dir` | 插件目录下的 `data/lamplighter` | 状态和历史目录 |
+| `remember_chart_filters` | `false` | 在当前浏览器中记住“额度变化”上次选择的额度窗口、时间范围和排序 |
+| `account_names` | 空 | 账号名称，键为账号在 Magpie 中的标识（如 `codex/<id>`） |
+| `account_weights` | 空 | 多账号合计中各账号的权重，键同上，值为大于 0 的数字；未设置的账号使用套餐的默认权重 |
+| `account_order` | 空 | 账号顺序，按账号标识排列；未列出的账号按默认顺序排在后面 |
+| `public_listen`、`web_enabled`、`admin_key`、`mcp_enabled`、`mcp_key` | | 见[对外访问](#对外访问) |
+| `config_token` | 空 | 页面每次保存时生成的确认令牌，不需要手动设置 |
 
-提醒阈值按 `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0` 规整，后两档不能高于前一档；规整后的值生效，并写入日志。
+提醒阈值按 `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0` 规整，后两档不能高于前一档。
 
-`bark_url` 和 `webhook.url` 都为空时通知关闭：不发送任何通知，也不在事件中记录推送失败。之后再填上地址，关闭期间的额度提醒不会补发；Did Codex Reset 的信号还没过期的会照常推送。
+`bark_url` 和 `webhook.url` 都为空时通知关闭：不发送任何通知，也不在事件中记录推送失败。之后再填上地址，关闭期间的额度提醒不会补发。
 
 恢复通知和重置前提醒按窗口分别设置，`five_hour` 对应 5 小时窗口，`seven_day` 对应 7 天窗口：
 
@@ -185,15 +297,13 @@ Claude 和 Codex 的额度无论主动还是被动获取，都精确到 1%；Ant
 | `recovery_notify` | `off`、`all`、`after_exhausted` | `all`：窗口每次重置都通知；`after_exhausted`：窗口用完后，只在下一次重置时通知一次 |
 | `reset_reminder` | `off`、`all`、`has_remaining` | 5 小时窗口在重置前 1 小时提醒，7 天窗口在重置前 1 天提醒；`has_remaining`：只在剩余高于 `critical_threshold` 时提醒 |
 
-恢复通知的第一行是上一周期结束时的剩余额度。这个值来自重置前 30 秒的那次主动查询，最后 30 秒内的用量不计入。找不到重置前 15 分钟内的读数时不显示这一行。上一周期从没用过（重置前仍是 100%）时不通知。既不是 5 小时也不是 7 天的窗口，曾在距离重置超过 1 天时出现过的按 7 天窗口处理，其余按 5 小时窗口处理。
-
-`notify_recovery` 和 `notify_reset_reminders` 为 `true` 时等同于对应配置的两个窗口都设为 `all`，为 `false` 时都设为 `off`，只在没有写 `recovery_notify` 或 `reset_reminder` 时生效；在管理页面修改对应的通知设置后会换成新的写法。
+恢复通知的第一行是上一周期结束时的剩余额度。这个值来自重置前 30 秒的那次主动查询，最后 30 秒内的用量不计入。找不到重置前 15 分钟内的读数时不显示这一行。上一周期从没用过（重置前仍是 100%）时不通知。
 
 点火相关设置在 `ignition` 下：
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `enabled` | `true` | 是否自动点火 |
+| `enabled` | `false` | 是否自动点火 |
 | `start_hour` | `7` | 每天第一次点火的时间（时） |
 | `end_hour` | `22` | 每天停止点火的时间（时） |
 | `end_grace_minutes` | `30` | `end_hour` 之后再顺延的分钟数 |
@@ -203,60 +313,60 @@ Claude 和 Codex 的额度无论主动还是被动获取，都精确到 1%；Ant
 | `max_transient_failures` | `3` | 临时错误达到这个次数后停到第二天 |
 | `post_success_hold_seconds` | `60` | 点火成功后至少等待多久才可能再次点火 |
 
-各服务的设置在 `providers` 下，键名为 `codex`、`claude`、`antigravity`、`kimi`、`xai`（Grok）。CPA 中 Kimi 账号的服务名也可能是 `kimi-ai` 等写法，配置中写哪一种都按 `kimi` 处理。Kimi 和 Grok 不支持点火，`ignite` 对它们不起作用：
+各服务的设置在 `providers` 下，键名为 `codex`、`claude`、`antigravity`：
 
 | 配置项 | 说明 |
 | --- | --- |
-| `monitor` | 是否监控 |
-| `ignite` | 是否自动点火 |
-| `model` | 指定点火模型，留空时自动选择；必须出现在 CPA 的模型列表中 |
+| `monitor` | 是否监控，默认开启 |
+| `ignite` | 是否自动点火；`codex` 和 `claude` 默认开启，`antigravity` 默认关闭 |
+| `model` | 指定点火模型，留空时自动选择；必须出现在 Magpie 中该服务的模型列表中，可以写模型名或带服务前缀的完整 ID，例如 `agy-cli/gemini-3-flash` |
 | `groups` | 仅 Antigravity：允许点火的额度组，默认 `["Gemini"]` |
-| `models` | 仅 Antigravity：按额度组指定模型，例如 `{"Gemini": "gemini-3.5-flash-lite"}` |
+| `models` | 仅 Antigravity：按额度组指定模型，例如 `{"Gemini": "gemini-3-flash"}` |
 
-`codex_reset_updates` 控制 Did Codex Reset 转发：`enabled`（默认 `false`）、`poll_seconds`（默认 `300`，最小 300）、`notify_current_pending`（默认 `true`，第一次开启时推送当前尚未生效的排期）。只转发尚未到期的排期和 48 小时内的完成记录，同一次排期有多条帖子时，只在置信度、时间或范围变化时作为排期更新再推送；排期时间按本地时区显示，只给出日期的排期显示为时间段。Did Codex Reset 是第三方监测站，它的信号不代表 OpenAI 官方确认。
+`codex_reset_updates` 控制 Did Codex Reset 转发：`enabled`（默认 `false`）、`poll_seconds`（默认 `300`，最小 300）、`notify_current_pending`（默认 `true`，第一次开启时推送当前尚未生效的排期）。只转发尚未到期的排期和 48 小时内的完成记录；同一次排期有多条帖子时，只在置信度、时间或范围变化时作为排期更新再推送。Did Codex Reset 是第三方监测站，它的信号不代表 OpenAI 官方确认。
 
-完整示例：
+示例：
 
-```yaml
-plugins:
-  configs:
-    lamplighter:
-      enabled: true
-      bark_url: "https://api.day.app/你的device_key"
-      models_api_key: "给 Lamplighter 新建的 key"
-      ignition:
-        enabled: true
-        start_hour: 7
-        end_hour: 22
-      providers:
-        codex:
-          ignite: true
-        claude:
-          ignite: true
-        antigravity:
-          ignite: true
-          groups: ["Gemini"]
-      codex_reset_updates:
-        enabled: true
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "bark_url": "https://api.day.app/你的device_key",
+  "ignition": {"enabled": true, "start_hour": 7, "end_hour": 22},
+  "providers": {
+    "antigravity": {"ignite": true, "groups": ["Gemini"]}
+  },
+  "codex_reset_updates": {"enabled": true}
+}
 ```
+
+`ignition`、`providers` 等对象按顶层键整体保存，在页面中修改时以已保存的对象为基础。
 
 ## MCP
 
-MCP 让编码 Agent 通过标准 Streamable HTTP 查询额度，不依赖具体客户端。插件独立监听 `127.0.0.1:8318`，路径为 `/mcp`，使用专用 Bearer 密钥；CPA 管理密钥不能用于此接口。支持协议版本 `2025-03-26` 和 `2025-06-18`，只返回 JSON，不提供 SSE。
+MCP 让编码 Agent 查询额度。有两种接法：
 
-在“设置”视图中开启 MCP；没有密钥时，页面在同一次保存中生成密钥。也可以单独生成新密钥，或在 `plugins.configs.lamplighter` 下配置：
+| 接法 | 地址 | 鉴权 | 工具名 |
+| --- | --- | --- | --- |
+| Magpie 的插件 tool | Magpie 网关的 `/mcp/magpie/tools/magpie-lamplighter` | 与 Magpie 网关相同 | 带 `magpie-lamplighter_` 前缀，例如 `magpie-lamplighter_list_quotas` |
+| 对外监听 | 对外监听的 `/mcp`，默认 `http://127.0.0.1:8318/mcp` | `mcp_key` | 不带前缀 |
 
-```yaml
-mcp_enabled: true
-mcp_listen: "127.0.0.1:8318"
-mcp_key: "<MCP 专用密钥>"
+### Magpie 的插件 tool
+
+插件启用后，Magpie 把它的工具作为 MCP 服务提供，不需要在 Lamplighter 中开启任何设置。Magpie 的“插件”页面中，Lamplighter 一行列出这些工具，并可以复制 MCP 地址；Magpie 也会在“资源库”的 MCP 中添加名为 `magpie-lamplighter` 的服务，开启 MCP 路由时直接提供给 Agent。网关默认监听 `127.0.0.1:3425`，此时地址为：
+
+```text
+http://127.0.0.1:3425/mcp/magpie/tools/magpie-lamplighter
 ```
 
-密钥应使用密码学随机数生成器生成，例如 32 字节随机数的 base64url 编码加上 `llmcp_` 前缀。留空时不启动服务，管理状态显示原因。开关、监听地址和密钥修改后自动应用。状态接口的 `config.mcp_key_set` 只表示是否设置密钥；配置是否完成应用由顶层 `config_applied_token` 确认，接口能否使用还需查看运行状态和错误信息。密钥原文保存在 CPA 配置中，拥有管理密钥的人可以读取。Docker 中该地址位于 CPA 容器内；同机 Agent 可以共享网络，其他部署应通过受限容器网络连接反向代理，避免发布未加密的 MCP 端口。
+本机的请求不需要密钥；从其他机器或 Docker 容器外访问时，需要带 Magpie 的网关密钥。Magpie 给每次工具调用最多 55 秒，`refresh_quotas` 经这种接法最多等待约 50 秒。
 
-### 客户端连接
+### 对外监听的 /mcp
 
-同一网络命名空间中的默认地址为 `http://127.0.0.1:8318/mcp`。远程连接请替换为 HTTPS 地址。以下示例中的 `<key>` 是 MCP 专用密钥。
+在“设置”视图的“高级”中勾选“启用 MCP 接口”；没有密钥时，页面在同一次保存中生成密钥，也可以单独生成新密钥。该区还给出 Claude Code、通用 JSON 和 mcp-remote 的客户端配置。远程使用时经 HTTPS 反向代理访问，见[对外访问](#对外访问)。
+
+接口采用 Streamable HTTP，支持协议版本 `2025-03-26` 和 `2025-06-18`，只返回 JSON，不提供 SSE。每个服务实例最多同时执行 4 次工具调用，超出时立即返回 JSON-RPC `-32000` 忙碌错误，可稍后重试。查询工具超时为 10 秒，`refresh_quotas` 为 180 秒。协议细节见 [MCP](./docs/architecture.md#mcp)。
+
+以下示例中的 `<key>` 是 MCP 专用密钥，远程连接时把地址换成 HTTPS 地址。
 
 Claude Code：
 
@@ -283,57 +393,18 @@ codex mcp add lamplighter --url http://127.0.0.1:8318/mcp --bearer-token-env-var
 npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 ```
 
-### HTTPS 反向代理
-
-不建议直接监听公网。远程使用时，保持 MCP 监听回环地址，由同机反向代理终止 TLS，并按需增加防火墙或访问白名单。代理需要保留 `Authorization` 和 `MCP-Protocol-Version` 请求头；带非本机 `Origin` 的浏览器请求会被拒绝，普通 MCP Agent 通常不发送这个头。
-
-Nginx 示例（替换域名和证书路径）：
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name quotas.example.com;
-    ssl_certificate /etc/letsencrypt/live/quotas.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/quotas.example.com/privkey.pem;
-    location = /mcp {
-        proxy_pass http://127.0.0.1:8318/mcp;
-        proxy_set_header Authorization $http_authorization;
-        proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
-        proxy_read_timeout 190s;
-    }
-}
-```
-
-Caddy 示例（域名解析到代理，Caddy 自动申请 HTTPS 证书）：
-
-```caddyfile
-quotas.example.com {
-    reverse_proxy /mcp 127.0.0.1:8318 {
-        transport http {
-            response_header_timeout 190s
-        }
-    }
-}
-```
-
 ### 工具
 
 | 工具 | 用途 |
 | --- | --- |
-| `list_quotas(provider?, account?, model?)` | 当前窗口、各账号套餐和权重、加权剩余、最早耗尽账号、重置和预计耗尽时间、每小时消耗、7 天匀速预算、数据来源与新鲜度、凭据认证错误、账号停用及下次点火时间 |
+| `list_quotas(provider?, account?, model?)` | 当前窗口、各账号套餐和权重、加权剩余、最早耗尽账号、重置和预计耗尽时间、每小时消耗、7 天匀速预算、数据来源与新鲜度、凭证失效、账号停用及下次点火时间 |
 | `get_quota_history(provider?, account?, window?, range?)` | 历史额度，包括已消失的窗口；每个系列最多 200 点，单次最多 2000 点 |
-| `refresh_quotas(account?)` | 主动查询；全局每 60 秒最多一次，超限返回等待秒数，等待结果最多 180 秒 |
+| `refresh_quotas(account?)` | 主动查询；全局每 60 秒最多一次，超限返回等待秒数 |
 | `get_quota_events(since?, limit?)` | 最近的重置、耗尽、点火成功和失败，以及凭证失效、账号停用、限流和凭证恢复；`since` 为带时区的 RFC 3339 时间，`limit` 为 1–100 的整数 |
 
-每个 MCP 服务实例最多同时执行 4 次工具调用，批处理内的调用也占用同一组名额；超出时立即返回 JSON-RPC `-32000` 忙碌错误，可稍后重试。查询工具超时为 10 秒，`refresh_quotas` 为 180 秒。
+工具返回的账号标识优先使用账号名称，其中的邮箱打码；没有名称时使用 `***` 加邮箱用户名的最后两个字符，例如 `***rk`。打码后相同的标识加上 `#1`、`#2` 等后缀。工具不返回完整邮箱，这一规则与页面的打码开关无关。`account` 参数接受返回的完整标识、加后缀前的基础标识、原始账号名称或完整邮箱，均为精确匹配；`refresh_quotas` 要求只匹配一个账号。
 
-MCP 的账号标识优先使用备注第一行，先将其中所有已知账号的完整邮箱打码，再将其余含 `@` 的连续非空白片段整体打码；用户名去掉引号后保留最后两个字符。没有备注名时使用 `***` 加邮箱用户名的最后两个字符，例如 `***rk`；用户名不足两个字符时保留全部，不返回域名或用户名长度。没有备注名和邮箱时使用 `account-序号`。打码后相同的标识均加上 `#1`、`#2` 等后缀，避开其他基础标识及已生成的标识，使每个完整标识只对应一个账号。`retired account` 为退役账号的保留标识，同名现有账号也加后缀。当前额度、最早耗尽账号、历史和事件均使用这些标识，不返回完整邮箱；此规则与页面的打码开关无关。
-
-`account` 接受返回的完整标识、加后缀前的基础标识、原始备注第一行或完整邮箱，均为精确匹配。完整标识优先匹配单个账号；共享基础标识或同名备注会选中多个账号，`refresh_quotas` 因此拒绝执行，需要改用完整标识或唯一邮箱。`account="retired account"` 只匹配退役账号的历史，查询同名现有账号须使用带后缀的完整标识或唯一邮箱。省略 `account` 时选中全部账号。
-
-CPA 启动后，引擎先等待约 20 秒，再执行第一轮全量查询。引擎未运行或首轮尚未完成时，三个读取工具返回 `ready: false`、`state: "starting"`、`certain: false` 和 `retry_after_seconds: 30`，附带说明，不返回数据，也不视为工具错误。凭证列表读取失败时允许读取工具返回结果，避免持续等待启动。插件在配置中停用时返回 `ready: false`、`state: "disabled"` 和 `certain: false`。`refresh_quotas` 只要求引擎运行，不必等待首轮完成；未运行或停用时返回对应状态，且不占用 60 秒的刷新限流。引擎运行期间已接受的刷新失败也计入限流。
-
-时间同时包含带时区的 ISO 时间和相对时间。预测取决于使用速度，不能保证准确；数据过旧或无法判断时相应字段为 `null`。`model` 查询返回候选额度组并标记 `certain: false`：CPA 在实际请求中还会应用模型别名、凭据可用性、冷却和会话路由，插件不能保证最终选中哪个账号。遇到 429 时先主动刷新，再结合实际重置时间和 CPA 冷却时间安排重试，不应只依据预计耗尽时间。事件从最近保留的最多 200 条引擎事件中筛选。
+插件启动后先等约 5 秒，再执行第一轮查询。首轮完成前，读取工具返回 `ready: false`、`state: "starting"` 和 `retry_after_seconds: 30`，不返回数据。时间同时包含带时区的 ISO 时间和相对时间。预测取决于使用速度，不能保证准确。`model` 查询返回候选额度组并标记 `certain: false`：Magpie 在实际请求中按自己的规则选择账号，插件不能保证最终选中哪个账号。字段的含义见[工具数据](./docs/architecture.md#工具数据)。
 
 ## Webhook
 
@@ -345,7 +416,7 @@ CPA 启动后，引擎先等待约 20 秒，再执行第一轮全量查询。引
 | `method` | `POST` | `GET`、`POST` 或 `PUT` |
 | `headers` | 空 | 请求头，例如 `Authorization: Bearer <token>` |
 | `body` | 空 | 请求体；为空时发送内置的 JSON 消息。`GET` 请求不能设置 |
-| `success_json` | 空 | 成功条件：JSON 响应中这些顶层字段必须等于给定的值，例如 `code: 0`；为空时只要求 HTTP 状态码为 2xx |
+| `success_json` | 空 | 成功条件：JSON 响应中这些顶层字段必须等于给定的值，例如 `{"code": 0}`；为空时只要求 HTTP 状态码为 2xx |
 
 地址、请求头和请求体中可以使用占位符：
 
@@ -355,8 +426,8 @@ CPA 启动后，引擎先等待约 20 秒，再执行第一轮全量查询。引
 | `{{body}}` | 通知正文 |
 | `{{text}}` | 标题和正文，中间换行 |
 | `{{url}}` | 跳转链接：Did Codex Reset 通知为历史页面，账号停用通知为 https 申诉链接，其余为空 |
-| `{{priority}}` | 额度降到第三档或耗尽、套餐变化、点火暂停、凭证失效、账号停用、被限流、CPA 冷却未解除时为 `high`，其余为 `normal` |
-| `{{kind}}` | 通知类型：`quota` 额度下降、`recovery` 额度恢复、`reminder` 重置提醒、`plan` 套餐变化、`cooldown` CPA 冷却未解除、`circuit` 点火暂停、`credential` 凭证失效、`suspended` 账号已停用、`rate_limited` 被限流、`credential_ok` 凭证已恢复、`codex_reset` Did Codex Reset、`test` 测试推送 |
+| `{{priority}}` | 额度降到第三档或耗尽、套餐变化、点火暂停、凭证失效、账号停用、被限流时为 `high`，其余为 `normal` |
+| `{{kind}}` | 通知类型：`quota` 额度下降、`recovery` 额度恢复、`reminder` 重置提醒、`plan` 套餐变化、`circuit` 点火暂停、`credential` 凭证失效、`suspended` 账号已停用、`rate_limited` 被限流、`credential_ok` 凭证已恢复、`codex_reset` Did Codex Reset、`test` 测试推送 |
 | `{{label}}` | 额度组，例如 `GPT#rk` 或 `GPT#主力号`；与额度组无关的通知为空 |
 | `{{time}}` | 发送时间，RFC 3339 格式，使用插件时区 |
 
@@ -373,71 +444,49 @@ CPA 启动后，引擎先等待约 20 秒，再执行第一轮全量查询。引
 | 服务 | `url` | `body` | `success_json` |
 | --- | --- | --- | --- |
 | ntfy | `https://ntfy.sh/` | `{"topic":"<topic>","title":"{{title}}","message":"{{body}}"}` | 不需要 |
-| 飞书 | `https://open.feishu.cn/open-apis/bot/v2/hook/<token>` | `{"msg_type":"text","content":{"text":"{{text}}"}}` | `code: 0` |
-| 钉钉 | `https://oapi.dingtalk.com/robot/send?access_token=<token>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `errcode: 0` |
-| 企业微信 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `errcode: 0` |
+| 飞书 | `https://open.feishu.cn/open-apis/bot/v2/hook/<token>` | `{"msg_type":"text","content":{"text":"{{text}}"}}` | `{"code":0}` |
+| 钉钉 | `https://oapi.dingtalk.com/robot/send?access_token=<token>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `{"errcode":0}` |
+| 企业微信 | `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>` | `{"msgtype":"text","text":{"content":"{{text}}"}}` | `{"errcode":0}` |
 | Discord | `https://discord.com/api/webhooks/<id>/<token>` | `{"content":"{{text}}"}` | 不需要 |
 | Slack | `https://hooks.slack.com/services/<path>` | `{"text":"{{text}}"}` | 不需要 |
 | Telegram | `https://api.telegram.org/bot<token>/sendMessage` | `{"chat_id":"<chat_id>","text":"{{text}}"}` | 不需要 |
 
-以飞书为例，在 `config.yaml` 中写成下面这样。请求体含有 `{{`，要用单引号括起来：
+在“设置”视图的“通知渠道”中，把上表的 `url` 填入“Webhook 地址”，`body` 填入“请求体”，`success_json` 填入“成功条件（可选）”。
 
-```yaml
-plugins:
-  configs:
-    lamplighter:
-      webhook:
-        url: "https://open.feishu.cn/open-apis/bot/v2/hook/<token>"
-        body: '{"msg_type":"text","content":{"text":"{{text}}"}}'
-        success_json:
-          code: 0
-```
-
-- 飞书、钉钉和企业微信在发送失败时也返回 HTTP 200，错误码写在响应里，所以要设置 `success_json`，否则失败的推送会被当作成功。
+- 飞书、钉钉和企业微信在发送失败时也返回 HTTP 200，错误码写在响应里，所以要设置成功条件，否则失败的推送会被当作成功。
 - 插件不支持飞书和钉钉机器人的“签名校验”。请在机器人的安全设置中改用“自定义关键词”或 IP 白名单；使用关键词时，把它写进请求体，例如 `"text":"Lamplighter {{text}}"`。
-- 管理页面的“测试推送”逐个显示每个渠道的结果和 webhook 响应的开头。没有设置 `success_json` 时，页面会提示只检查了 HTTP 状态码，需要到客户端确认是否收到。
-- webhook 设置有误（例如占位符拼错）时，webhook 不启用，管理页面顶部显示原因，其他设置照常生效。
+- “测试推送”逐个显示每个渠道的结果和 webhook 响应的开头。没有设置成功条件时，页面提示只检查了 HTTP 状态码，需要到客户端确认是否收到。
+- webhook 设置有误（例如占位符拼错）时，webhook 不启用，页面顶部显示原因，其他设置照常生效。
 
-## 管理页面
+## 端口
 
-页面顶部通过“额度 | 设置”切换视图，浏览器记住上次打开的视图。“额度”视图包含：
+| 监听 | 默认地址 | 修改方法 |
+| --- | --- | --- |
+| 内部监听 | `127.0.0.1:8317` | 插件选项 `port`，见[插件选项](#插件选项) |
+| 对外监听 | `127.0.0.1:8318`，默认不开启 | 配置项 `public_listen` |
 
-- 各账号的额度窗口、重置时间（带星期几）、数据来源和套餐，可以单独刷新某个账号；
-- 额度条和图表共用五档颜色：原始剩余值为 100% 时为“满”，0% 时为“空”，中间按前两档提醒阈值分为“高”“中”“低”；99.6% 即使显示为 100% 也不按满额着色；
-- 每个额度组的下次点火时间和当前重置时间（均带星期几）、最近一次结果和失败保护状态，可以立即点火；关闭自动点火时不显示这部分；
-- 额度变化图表：
-  - 先选 5 小时或 7 天额度。5 小时额度可看 1、3、6、12、24、26 小时（默认 6 小时），7 天额度可看 1、4、8、15 天、1 个月（上月这一天起）和 36 天（默认 8 天）。窗口种类和图表行包含当前窗口及所选范围内的历史窗口；当前存在但范围内没有新样本的窗口仍保留一行，缺少样本的区间显示为缺数据。其他长度的窗口只在账号卡片上显示。开启 `remember_chart_filters` 后，页面记住上次的选择。
-  - 1、3 小时和 1、4 天显示到现在为止。更长的范围以所选行当前窗口的重置时间为右端，例如 6 小时显示当前 5 小时窗口和上个窗口的最后 1 小时；现在之后的部分画成斜纹。所选行没有重置时间，或重置时间已过（5 小时窗口还没有被新请求开启）时，同样显示到现在为止。
-  - 上半部分每个服务一行色带，颜色与额度条相同，按每个周期内的最低读数着色。默认跟随账号卡片顺序，同一服务以其第一个账号的位置排列，同一账号内按额度组顺序排列，也可按剩余最低排序；同一服务有多个账号时显示按权重计算的合计，点击可展开各账号。
-  - 账号不再报告的窗口标为“已停用”，保留到最后一个样本移出所选范围。它单独成行，不参与多账号合计和剩余最低排序；曲线停在最后读数，不显示匀速参考线或延长线。
-  - 下半部分是所选行的曲线，标出重置时刻和点火结果，并按当时记录的预定重置时间画匀速参考线，以固定的 5 小时或 7 天为周期长度，从 100% 线性降到预定重置时的 0%。提前重置时，旧参考线在首次读到新重置时间的位置截断，新参考线按新的预定重置时间计算；重置时间未知时不画；当前窗口的重置时间变为未知时，参考线从当前图表时间边界截断，不沿旧重置时间向未来延伸；该边界的参考值为空，单账号和合计的标题匀速及差值均显示“—”。曲线在线上方说明用得比匀速慢。合计行只在所有账号都有参考值的区间画出按权重平均的参考线。曲线上方显示当前剩余、此刻的匀速参考值和两者的差值，高于匀速为绿色，低于为红色。显示到现在为止时，图表右侧也在曲线和参考线的末端标出这三个值。周期中途预定重置变了时，新参考线用点划线往回延长到本周期的起点（额度回升的时刻）。图表够宽时，标题行竖排在图表左侧的空白处。
-  - 右端是重置时间时，从现在画一条延长线：先用完时在时间轴上标出用完的时间（7 天额度带日期），先到重置时在图表右侧标出届时的剩余额度。
-    - 5 小时额度按当前速度延伸，表示照这个速度用下去的结果。当前速度取本周期最近一段用量稳定的时间，刚开始大量使用的几分钟内，估计的用完时间偏早。
-    - 7 天额度按本周期的日均用量延伸：本周期已用的额度除以周期开始以来的时间，不使用的时间也算在内。周期刚开始的一两天，估计偏差较大。
-  - 页面每 30 秒读取一次状态，有新数据时更新图表；鼠标停在图表上时，等移开后再更新。
-- 最近的事件，按时间、类型、额度组和详情分列显示。由某个事件触发的推送不单独成行，在该事件行尾标出“已推送”或“推送失败”。5 小时额度的重置默认隐藏，勾选“显示 5 小时重置”后显示，选择保存在浏览器中。
+这两个端口与 CPA 和 CPA 版 Lamplighter 的默认端口相同。它们与 Magpie 在同一台机器上运行时，修改 `port` 或 `public_listen`。Magpie 运行在 Docker 中、与它们不在同一个网络命名空间时不冲突。
 
-页顶、卡片区标题栏和曲线详情标题栏的眼睛按钮共用“打码账号”和“显示账号”开关。打码会模糊当前账号标识（含“账号”区的名称、邮箱和输入框），以及事件和历史图表中保留的旧账号名称。范围包含改名或删除后的标签，以及无法关联当前账号的历史内部组标识。孤立历史行的概览、详情、数据表和截图均打码，读屏标签使用账号编号；上游错误和无法可靠拆分的旧事件详情整体模糊。打码状态保存在当前浏览器中，刷新页面后保持；各台电脑、各个浏览器分别保存，互不影响。清空名称等确认对话框仍使用原文。打码只影响显示，不删除接口或页面中的原始数据。
+内部监听只供 Magpie 使用，不需要密钥，只接受 Host 为回环地址的请求。
 
-每张账号卡片的“刷新”和相机按钮位于底部，与左侧的套餐信息同一行，刷新在相机左侧。没有套餐信息时只显示右侧按钮。卡片头部保留服务标签和邮箱。
+## 已知限制
 
-账号卡片、卡片区标题栏和曲线详情标题栏的相机按钮，分别将单张卡片、全部卡片和详情图复制为 PNG 图片到剪贴板。截图保留当前主题和打码状态，不包含操作按钮。此功能需要浏览器支持图片剪贴板，并在 HTTPS 或 localhost 等安全上下文中获得剪贴板权限；不支持时按钮不可用。
-
-“设置”视图依次为“账号”“通知渠道”“提醒规则”“自动点火”“服务”和“高级”。“账号”区按当前顺序逐行显示账号，名称和权重在离开输入框或按回车时保存，与排序共用标题右侧的保存提示；失败处理见[配置](#配置)。通过拖动手柄调整顺序，保存为 `account_order`，额度卡片和图表的默认顺序随之调整；拖动时按 Esc 可取消。
-
-通知设置中的“测试推送”等待保存完成，再通过配置令牌最多等待 15 秒确认插件已应用配置，状态请求挂起不会延长这次等待；确认后向所有已配置的渠道发送并逐个显示结果，超时则提示“配置尚未生效，未发送测试”，不会发送。点火模型留空时，输入框的提示文字显示下一次点火将使用的模型；Antigravity 显示 Gemini 组的模型。不支持点火的服务显示“不支持点火”。模型列表在插件启动、修改 `cpa_base_url` 或 `models_api_key` 和每次点火时读取，所以 CPA 列出的新模型在下一次点火后才显示，点火本身会直接使用新模型。
-
-页面语言跟随 CPA 管理中心：简体或繁体中文显示中文，其他语言显示英文。
+- Lamplighter 随 Magpie 的插件宿主运行。Magpie 只在启动时和有插件调用时启动插件宿主；安装、更新插件或修改插件选项后，以及插件宿主因内存占用过高被替换后，Lamplighter 随旧宿主停止，要等到下一次插件调用才重新启动，期间不查询、不点火、不通知。打开 Lamplighter 的页面、调用它的工具，或经 agy-cli 等插件服务发送请求都会启动插件宿主，所以安装插件或修改选项后请打开一次页面。常驻后台需要 Magpie 支持，已向上游提出（[yetone/magpie#7114](https://github.com/yetone/magpie/issues/7114)）。
+- macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中，Lamplighter 不读取，会显示错误。在 Magpie 中再添加一次该账号即可。
+- Antigravity 账号的凭证中 `auth_method` 不为空、也不是 `consumer`（个人 Google 账号）时，查询额度会显示错误。
+- Magpie 的 `MAGPIE_ADDR` 设为局域网地址时，网关要求网关密钥，Lamplighter 无法访问网关。
+- 内部监听只接受回环地址的访问，把它绑定到其他地址后从其他机器访问会得到 403。从外部访问请使用[对外访问](#对外访问)。
 
 ## 安全与风险
 
-- 插件只在内存中读取凭证文件里的 access token 用于查询额度，不写入日志或磁盘。管理页面的数据接口需要 CPA 管理密钥，MCP 接口使用独立密钥。
-- `bark_url`、`webhook`、`models_api_key` 和 `mcp_key` 以明文保存在 CPA 的 `config.yaml` 中，有管理密钥的人可以看到。
-- 各服务对第三方工具使用订阅账号有不同限制。通过 CPA 使用账号、定时发送点火请求和查询额度，都可能带来账号风险，请自行判断。
+- 插件只在内存中读取 Magpie 保存的 token，用于查询额度，不写入日志或磁盘。
+- `bark_url`、`webhook`、`admin_key` 和 `mcp_key` 以明文保存在 `config.json` 中（文件权限 600），能访问内部监听或持有管理密钥的人都可以读取。
+- 内部监听不需要密钥，同一台机器（Docker 部署时为同一个容器）上的程序都可以访问。
+- 各服务对第三方工具使用订阅账号有不同限制。通过 Magpie 使用账号、定时发送点火请求和查询额度，都可能带来账号风险，请自行判断。
 
 ## 开发
 
-插件结构、数据流和设计约束见 [架构文档](./docs/architecture.md)，构建、测试和发布见 [开发文档](./docs/development.md)。
+插件结构、数据流和设计约束见[架构文档](./docs/architecture.md)，构建、测试和发布见[开发文档](./docs/development.md)。
 
 ## 许可证
 
