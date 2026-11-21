@@ -48,8 +48,11 @@ func (h *Host) listAccounts(ctx context.Context) ([]listedAccount, error) {
 }
 
 // Accounts lists the signed-in subscription accounts. API keys, also on
-// the list, have no quota windows and are left out.
+// the list, have no quota windows and are left out. The call ends within
+// accountsTimeout.
 func (h *Host) Accounts(ctx context.Context) ([]host.Account, error) {
+	ctx, cancel := context.WithTimeout(ctx, accountsTimeout)
+	defer cancel()
 	listed, err := h.listAccounts(ctx)
 	if err != nil {
 		return nil, err
@@ -82,18 +85,4 @@ func emailOf(user string) string {
 		return ""
 	}
 	return user
-}
-
-// accountByPin is the listed account with pin.
-func (h *Host) accountByPin(ctx context.Context, pin string) (listedAccount, error) {
-	listed, err := h.listAccounts(ctx)
-	if err != nil {
-		return listedAccount{}, err
-	}
-	for _, a := range listed {
-		if strings.EqualFold(a.Pin, pin) {
-			return a, nil
-		}
-	}
-	return listedAccount{}, fmt.Errorf("Magpie 没有账号 %s", pin)
 }

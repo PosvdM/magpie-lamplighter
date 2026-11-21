@@ -43,6 +43,21 @@ var gatewayTransport = &http.Transport{
 // through its context, and a model stream lives until it is closed.
 var gatewayClient = &http.Client{Transport: gatewayTransport}
 
+// Deadlines of the whole Accounts, KeptQuotas, RefreshQuota and Models
+// calls: the response headers, the body and the account list a call reads
+// beside its own request. The background loop's context ends only when
+// the plugin stops, so a gateway that takes a connection and then stops
+// answering would hold the loop without them. Tests shorten them.
+var (
+	accountsTimeout = 20 * time.Second
+	keptTimeout     = 20 * time.Second
+	listTimeout     = 20 * time.Second
+	// refreshTimeout covers the gateway's own 30 seconds for a quota
+	// card, which a Claude card spends running Claude Code's /usage, and
+	// stays under the 50 seconds a tool call through Magpie gets.
+	refreshTimeout = 45 * time.Second
+)
+
 // gatewayURL is path on the gateway at h.Addr. An address on every
 // interface (":3425", "0.0.0.0:3425") is reached on loopback, as Magpie's
 // own plugin host does; an address with a scheme is used as it is.

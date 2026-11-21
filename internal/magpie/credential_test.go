@@ -266,6 +266,27 @@ func TestCredentialFormat(t *testing.T) {
 			"plugin-auth.json": `{"agy-cli#k3x9a2":{"type":"api","metadata":{"agyHome":"../../etc"}}}`,
 		}, agyAccount},
 		{"plugin-auth.json not an object", map[string]string{"logins.json": loginsFile("", "{}"), "plugin-auth.json": `[]`}, agyAccount},
+		{"logins.json entry null", map[string]string{"logins.json": `[null]`}, host.Account{Pin: "codex/x1", Provider: "codex"}},
+		{"Codex tokens empty", map[string]string{"logins.json": `[{"id":"x1","agent":"codex","user":"a","auth":{"auth_mode":"chatgpt","tokens":{}}}]`}, host.Account{Pin: "codex/x1", Provider: "codex"}},
+		{"Claude claudeAiOauth empty", map[string]string{"logins.json": `[{"id":"x1","agent":"claude","user":"a","auth":{"claudeAiOauth":{}}}]`}, host.Account{Pin: "claude/x1", Provider: "claude"}},
+		{"Claude Code's file not JSON", map[string]string{
+			"logins.json": loginsFile("", claudeAuth("old-access", "rt-1", testNow.Add(time.Hour))),
+			"claude-accounts/e8f39b3e1382367d/.credentials.json": `{"claudeAiOauth":`,
+		}, host.Account{Pin: "claude/0f0e0d0c0b0a0908", Provider: "claude"}},
+		{"Claude Code's file not an object", map[string]string{
+			"logins.json": loginsFile("", claudeAuth("old-access", "rt-1", testNow.Add(time.Hour))),
+			"claude-accounts/e8f39b3e1382367d/.credentials.json": `[]`,
+		}, host.Account{Pin: "claude/0f0e0d0c0b0a0908", Provider: "claude"}},
+		{"agy-cli login without home", map[string]string{
+			"logins.json":      `[{"agent":"plugin:agy-cli","user":"c@example.com"}]`,
+			"plugin-auth.json": `{}`,
+		}, agyAccount},
+		{"agy-cli entry null", map[string]string{"logins.json": loginsFile("", "{}"), "plugin-auth.json": `{"agy-cli#k3x9a2":null}`}, agyAccount},
+		{"agy-cli entry not api", map[string]string{"logins.json": loginsFile("", "{}"), "plugin-auth.json": `{"agy-cli#k3x9a2":{"type":"oauth","key":"agy"}}`}, agyAccount},
+		{"agyHome that its key does not name", map[string]string{
+			"logins.json":      loginsFile("", "{}"),
+			"plugin-auth.json": `{"agy-cli#k3x9a2":{"type":"api","key":"agy","metadata":{"agyHome":"0123456789abcdef"}}}`,
+		}, agyAccount},
 		{"providers.json broken", map[string]string{
 			"logins.json":    loginsFile(jwt(map[string]any{}), "{}"),
 			"providers.json": `{"providers":{}}`,
@@ -278,15 +299,95 @@ func TestCredentialFormat(t *testing.T) {
 			t.Errorf("%s: err = %v, want ErrFormat", c.name, err)
 		}
 	}
-	h, _ := agyFixture(t, `{"token_type":"Bearer"}`)
-	if _, err := h.Credential(context.Background(), agyAccount); !errors.Is(err, host.ErrFormat) {
-		t.Errorf("token file without token: err = %v, want ErrFormat", err)
+	for name, token := range map[string]string{
+		"token file without token":   `{"token_type":"Bearer"}`,
+		"expiry that does not parse": strings.Replace(agyToken("ya29.live", "1//refresh", testNow.Add(time.Hour)), testNow.Add(time.Hour).Format(time.RFC3339Nano), "tomorrow", 1),
+		"token without expiry":       `{"token":{"access_token":"ya29.live","refresh_token":"1//refresh"},"auth_method":"consumer"}`,
+	} {
+		h, _ := agyFixture(t, token)
+		useGoogle(t, &googleFake{status: 500})
+		if got, err := h.Credential(context.Background(), agyAccount); !errors.Is(err, host.ErrFormat) {
+			t.Errorf("%s: %+v, err = %v, want ErrFormat", name, got, err)
+		}
 	}
 	// An account that is not in logins.json is an error, not a format one.
-	h = &Host{ConfigDir: t.TempDir()}
+	h := &Host{ConfigDir: t.TempDir()}
 	writeFiles(t, h.ConfigDir, map[string]string{"logins.json": `[]`})
 	if _, err := h.Credential(context.Background(), host.Account{Pin: "codex/nope", Provider: "codex"}); err == nil || errors.Is(err, host.ErrFormat) {
 		t.Errorf("unknown account: err = %v", err)
+	}
+}
+
+// The default token file holds whichever account agy itself is signed in
+// to. An entry that is not known to be agy's own must not read it, or the
+// quota and fingerprint of that account would go to this pin.
+func TestAgyDefaultFileOnlyForOwnAccount(t *testing.T) {
+	defer func(was string) { goos = was }(goos)
+	goos = "linux"
+	for name, entry := range map[string]string{
+		"home key without agyHome": `{"type":"api","key":"agy:0123456789abcdef","metadata":{"email":"c@example.com"}}`,
+		"no key":                   `{"type":"api","metadata":{"email":"c@example.com"}}`,
+		"no type":                  `{"key":"agy"}`,
+		"empty object":             `{}`,
+	} {
+		h, home := agyFixture(t, "{}")
+		writeFiles(t, h.ConfigDir, map[string]string{"plugin-auth.json": `{"agy-cli#k3x9a2":` + entry + `}`})
+		writeFiles(t, home, map[string]string{".gemini/antigravity-cli/antigravity-oauth-token": agyToken("ya29.other", "1//other", testNow.Add(time.Hour))})
+		got, err := h.Credential(context.Background(), agyAccount)
+		if !errors.Is(err, host.ErrFormat) || got.AccessToken != "" {
+			t.Errorf("%s: %+v, err = %v, want ErrFormat", name, got, err)
+		}
+	}
+}
+
+// A plugin's account is named by nameID of the provider and the name
+// only, never by the id its logins.json entry has.
+func TestPluginLoginByNameOnly(t *testing.T) {
+	h, _ := agyFixture(t, agyToken("ya29.live", "1//refresh", testNow.Add(time.Hour)))
+	useGoogle(t, &googleFake{status: 500})
+	_, err := h.Credential(context.Background(), host.Account{Pin: "agy-cli/abcdabcdabcdabcd", Provider: "agy-cli"})
+	if err == nil || !strings.Contains(err.Error(), "没有账号") {
+		t.Fatalf("pin of the entry's id: err = %v, want no account", err)
+	}
+}
+
+// Known states without a usable credential are told apart from formats
+// Lamplighter does not know and from optional files that are missing.
+func TestCredentialKnownStates(t *testing.T) {
+	useClock(t)
+	ctx := context.Background()
+	// Magpie writes "null" for a list without accounts.
+	h := &Host{ConfigDir: t.TempDir()}
+	writeFiles(t, h.ConfigDir, map[string]string{"logins.json": "null\n"})
+	if _, err := h.Credential(ctx, host.Account{Pin: "codex/x1", Provider: "codex"}); err == nil || errors.Is(err, host.ErrFormat) {
+		t.Errorf("logins.json null: err = %v, want no account", err)
+	}
+	// A Codex sign-in Magpie imported from a refresh token alone has no
+	// access token: Expired, so the engine reads the kept quota.
+	writeFiles(t, h.ConfigDir, map[string]string{"logins.json": `[{"id":"x1","agent":"codex","user":"a","auth":{"auth_mode":"chatgpt","tokens":{"refresh_token":"rt"}}}]`})
+	if got, err := h.Credential(ctx, host.Account{Pin: "codex/x1", Provider: "codex"}); err != nil || !got.Expired || got.Fingerprint != fingerprint("rt") {
+		t.Errorf("Codex refresh token only: %+v, %v", got, err)
+	}
+	// Claude Code's own file without claudeAiOauth is a signed-out one:
+	// the copy in logins.json is used.
+	account := host.Account{Pin: "claude/0f0e0d0c0b0a0908", Provider: "claude"}
+	writeFiles(t, h.ConfigDir, map[string]string{
+		"logins.json": loginsFile("", claudeAuth("old-access", "rt-1", testNow.Add(time.Hour))),
+		"claude-accounts/e8f39b3e1382367d/.credentials.json": `{"mcpOAuth":{}}`,
+	})
+	if got, err := h.Credential(ctx, account); err != nil || got.AccessToken != "old-access" {
+		t.Errorf("signed-out Claude Code file: %+v, %v", got, err)
+	}
+	// A file there that cannot be read is an error of its own.
+	dir := filepath.Join(h.ConfigDir, "claude-accounts/e8f39b3e1382367d/.credentials.json")
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Credential(ctx, account); err == nil || errors.Is(err, host.ErrFormat) {
+		t.Errorf("unreadable Claude Code file: err = %v", err)
 	}
 }
 
@@ -320,15 +421,18 @@ func TestProxyFor(t *testing.T) {
 			t.Errorf("proxyFor(%s) succeeded", provider)
 		}
 	}
-	// Without a proxy in Magpie's files, the one the plugin host was
-	// started with.
+	// Without a proxy in Magpie's files, the environment's: egress then
+	// takes HTTPS_PROXY with NO_PROXY, which the npm shell maps from the
+	// MAGPIE_ variables. The plugin host's proxy is not an account's own.
 	h = &Host{ConfigDir: t.TempDir()}
 	t.Setenv("MAGPIE_HTTPS_PROXY", "http://127.0.0.1:61234")
-	if got, err := h.proxyFor("codex", "a"); err != nil || got != "http://127.0.0.1:61234" {
-		t.Errorf("host proxy: %q, %v", got, err)
-	}
-	t.Setenv("MAGPIE_HTTPS_PROXY", "")
+	t.Setenv("MAGPIE_ALL_PROXY", "http://127.0.0.1:61235")
+	t.Setenv("MAGPIE_HTTP_PROXY", "http://127.0.0.1:61236")
 	if got, err := h.proxyFor("codex", "a"); err != nil || got != "" {
-		t.Errorf("no proxy: %q, %v", got, err)
+		t.Errorf("host proxy only: %q, %v; want the environment's", got, err)
+	}
+	writeFiles(t, h.ConfigDir, map[string]string{"settings.json": `{"proxy":"direct"}`})
+	if got, err := h.proxyFor("codex", "a"); err != nil || got != "direct" {
+		t.Errorf("global direct: %q, %v", got, err)
 	}
 }

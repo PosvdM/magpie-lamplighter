@@ -51,8 +51,11 @@ type keptWindow struct {
 // KeptQuotas returns Magpie's last readings of the Codex and Claude
 // accounts. Antigravity is left out: Magpie names its windows by pool
 // ("Gemini · 5 hours") without the bucket ids that the Antigravity Fetch
-// uses as window IDs, so its readings would update no window.
+// uses as window IDs, so its readings would update no window. The call,
+// with the account list it reads, ends within keptTimeout.
 func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
+	ctx, cancel := context.WithTimeout(ctx, keptTimeout)
+	defer cancel()
 	var resp struct {
 		Data *[]keptQuota `json:"data"`
 	}
@@ -216,21 +219,59 @@ func keptClaude(ws []keptWindow) ([]quota.RawGroup, error) {
 const (
 	claudeRefreshGap = 10 * time.Minute
 	refreshGap       = time.Minute
-	// refreshTimeout covers the gateway's own 30 seconds.
-	refreshTimeout = 45 * time.Second
+)
+
+// The host.Error codes of RefreshQuota besides those of gatewayJSON.
+const (
+	// codeAccountOff: the account is switched off in Magpie.
+	codeAccountOff = "account_off"
+	// codeAccountNotFound: Magpie has no subscription account with the
+	// pin, or does not name it.
+	codeAccountNotFound = "account_not_found"
+	// codeGatewayUnavailable: the gateway cannot be reached, answers 5xx
+	// or does not answer within refreshTimeout.
+	codeGatewayUnavailable = "gateway_unavailable"
 )
 
 // ErrRefreshLimited is returned when an account's quota was refreshed too
 // recently; see claudeRefreshGap.
 var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 
-// RefreshQuota asks Magpie to read the quota of the account pin again. It
-// refuses within claudeRefreshGap (Claude) or refreshGap (others) of the
-// last attempt for the same account, whatever its result.
-func (h *Host) RefreshQuota(ctx context.Context, pin string) error {
-	a, err := h.accountByPin(ctx, pin)
+// RefreshQuota asks Magpie to read the quota of the account pin again.
+// Right before, it reads the account list again: the account must still
+// be a subscription account that is switched on and has a name, since the
+// gateway refreshes every account of the provider when no name is given.
+// Those failures, and a gateway that cannot be reached, answers 5xx or
+// runs out of refreshTimeout, are a *host.Error with the codes above.
+//
+// It refuses within claudeRefreshGap (Claude) or refreshGap (others) of
+// the last attempt for the same account, whatever its result. The whole
+// call ends within refreshTimeout.
+func (h *Host) RefreshQuota(caller context.Context, pin string) error {
+	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
+	defer cancel()
+	route := http.MethodPost + " " + refreshPath
+	listed, err := h.listAccounts(ctx)
 	if err != nil {
-		return err
+		return refreshError(caller, route, err)
+	}
+	var a listedAccount
+	found := false
+	for _, l := range listed {
+		if strings.EqualFold(l.Pin, strings.TrimSpace(pin)) {
+			a, found = l, true
+			break
+		}
+	}
+	switch {
+	case !found:
+		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 中没有这个账号"}
+	case a.Kind != "account":
+		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "这个账号不是订阅账号"}
+	case strings.TrimSpace(a.User) == "":
+		return &host.Error{Method: route, Code: codeAccountNotFound, Message: "Magpie 没有给出这个账号的名称"}
+	case !*a.On:
+		return &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
 	}
 	gap := refreshGap
 	if a.Provider == "claude" {
@@ -247,20 +288,32 @@ func (h *Host) RefreshQuota(ctx context.Context, pin string) error {
 	}
 	h.refreshed[a.Pin] = now()
 	h.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
-	defer cancel()
-	query := url.Values{"provider": {a.Provider}}
-	if a.User != "" {
-		query.Set("user", a.User)
-	}
+	query := url.Values{"provider": {a.Provider}, "user": {a.User}}
 	var resp struct {
 		Data *[]any `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodPost, refreshPath+"?"+query.Encode(), &resp); err != nil {
-		return err
+		return refreshError(caller, route, err)
 	}
 	if resp.Data == nil {
-		return fmt.Errorf("POST %s: %w: no data list", refreshPath, host.ErrFormat)
+		return fmt.Errorf("%s: %w: no data list", route, host.ErrFormat)
 	}
 	return nil
+}
+
+// refreshError is err of a RefreshQuota request, as codeGatewayUnavailable
+// when the gateway cannot be reached, answers 5xx or runs out of time.
+// Other errors, such as a 4xx answer or one of an unknown format, and any
+// error after the caller cancelled, are returned as they are.
+func refreshError(caller context.Context, route string, err error) error {
+	var hostErr *host.Error
+	switch {
+	case errors.Is(caller.Err(), context.Canceled):
+		return err
+	case errors.As(err, &hostErr) && (hostErr.Code == "gateway_unreachable" || hostErr.Code == "gateway_http_error" && hostErr.Status >= 500):
+		return &host.Error{Method: route, Code: codeGatewayUnavailable, Message: "Magpie 网关暂时不可用", Status: hostErr.Status}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &host.Error{Method: route, Code: codeGatewayUnavailable, Message: "Magpie 网关没有按时响应"}
+	}
+	return err
 }
