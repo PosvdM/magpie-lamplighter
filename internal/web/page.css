@@ -483,6 +483,8 @@ form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-
   background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border);
 }
 .level-name { font-weight: 650; min-width: 2.5em; }
+.timezone-unsaved { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.timezone-unsaved[hidden] { display: none; }
 
 /* MCP */
 .key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 34px; }

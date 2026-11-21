@@ -209,6 +209,10 @@
       passive_skip: "被动数据跳过窗口（秒）", passive_skip_max: "最多连续跳过（分钟）",
       passive_skip_hint: "整点前这段时间内已有被动数据的账号跳过本轮主动查询；设为 0 则每轮都主动查询。",
       ignition_enabled: "启用自动点火",
+      ignition_enable_hint: "开启前先设置时区，并在 Magpie 中关闭预热，以免重复点火。",
+      timezone: "时区", timezone_name: "IANA 时区名称", timezone_save: "保存",
+      timezone_unsaved: "时区尚未保存，确认输入框中的时区后点“保存”。",
+      timezone_hint: "点火时间、通知和页面中的时间按这个时区计算，不依赖服务器的时区（Magpie 的 Docker 镜像为 UTC）。尚未保存时，输入框中预填浏览器的时区。",
       start_hour: "每日开始（时）", end_hour: "每日结束（时）", end_grace: "结束后宽限（分钟）",
       grace: "重置后延迟（秒）", failure_retry: "失败重试间隔（秒）", max_transient: "临时错误上限（次）",
       services: "服务", col_service: "服务", col_ignition_model: "点火模型",
@@ -293,7 +297,6 @@
       view_nav: "页面", advanced: "高级",
       notify_channels: "通知渠道", webhook_advanced: "高级：请求方法、请求头、请求体和成功条件", alert_rules: "提醒规则",
       ignition_off: "自动点火已关闭，这些设置暂不生效。",
-      ignition_models_hint: "选择点火模型需要“高级”中的模型列表 API key。",
       monitor_hint: "勾选要监控额度的服务。",
       save_saved: "已保存", save_saving: "保存中…",
       save_field_failed: "✕ {0}保存失败", save_failure_reason: "：{0}", save_failed_compact: "✕ 保存失败", save_more_failed: "（另有 {0} 项失败）", save_order: "排序",
@@ -325,7 +328,7 @@
     en: {
       app_sub: "", repo_hint: "View on GitHub",
       update_hint: "v{0} is available; update it on the Plugins page of Magpie",
-      key_title: "Management key required",
+      key_title: "Admin key required",
       key_hint: "Access through the public address needs the Lamplighter admin key (admin_key in the settings). The key is kept in this browser.",
       key_placeholder: "Lamplighter admin key",
       key_submit: "OK",
@@ -378,6 +381,10 @@
       passive_skip: "Passive data window (s)", passive_skip_max: "Longest skip (min)",
       passive_skip_hint: "Accounts with passive data within this time before a slot skip that active query; 0 queries every time.",
       ignition_enabled: "Enable ignition",
+      ignition_enable_hint: "Before turning it on, set the time zone and turn off warm-up in Magpie, so that windows are not ignited twice.",
+      timezone: "Time zone", timezone_name: "IANA time zone name", timezone_save: "Save",
+      timezone_unsaved: "The time zone is not saved yet. Check the time zone in the field and click Save.",
+      timezone_hint: "Ignition, notifications and this page use this time zone, whatever the server's time zone is (UTC in Magpie's Docker image). Until one is saved, the field shows this browser's time zone.",
       start_hour: "Daily start (hour)", end_hour: "Daily end (hour)", end_grace: "Grace after end (min)",
       grace: "Delay after reset (s)", failure_retry: "Retry after failure (s)", max_transient: "Transient error limit",
       services: "Services", col_service: "Service", col_ignition_model: "Ignition model",
@@ -399,7 +406,6 @@
       models_error: "Model list unavailable: {0}",
       notify_off: "No Bark push URL or webhook URL is set, so notifications are off.",
       notify_error: "The webhook settings are invalid, so the webhook is off: {0}",
-      no_models_key: "No model list API key is set, so ignition cannot pick a model.",
       remaining_aria: "{0} {1} remaining",
       source_passive: "passive", source_active: "active", updated: "updated {0}",
       no_accounts: "No {0} credentials to monitor.",
@@ -463,7 +469,6 @@
       view_nav: "Page", advanced: "Advanced",
       notify_channels: "Notification channels", webhook_advanced: "Advanced: method, headers, body and success condition", alert_rules: "Alert rules",
       ignition_off: "Ignition is off, so these settings do not apply for now.",
-      ignition_models_hint: "Picking ignition models needs the model list API key under Advanced.",
       monitor_hint: "Check the services whose quota to monitor.",
       save_saved: "Saved", save_saving: "Saving…",
       save_field_failed: "✕ {0} save failed", save_failure_reason: ": {0}", save_failed_compact: "✕ Save failed", save_more_failed: " ({0} more failed)", save_order: "Order",
@@ -1036,7 +1041,6 @@
     var box = $("notices");
     clear(box);
     if (status.config_error) box.appendChild(notice(translate("config_error", status.config_error)));
-    if (status.lock_error) box.appendChild(notice(status.lock_error));
     if (status.list_error) box.appendChild(notice(status.list_error));
     if (status.models_error) box.appendChild(notice(translate("models_error", status.models_error)));
     if (status.notify_error) box.appendChild(notice(translate("notify_error", status.notify_error)));
@@ -3484,7 +3488,43 @@
     if (effective.mcp_enabled === undefined) effective.mcp_enabled = !!rawConfig.mcp_enabled;
     if (effective.web_enabled === undefined) effective.web_enabled = !!rawConfig.web_enabled;
     if (!effective.public_listen) effective.public_listen = rawConfig.public_listen || MCP_LISTEN;
+    // The saved time zone and ignition switch come from GET /api/config,
+    // which the page reads after each save; a key the file lacks takes the
+    // plugin's value from the status, so the page assumes no default.
+    effective.timezone = typeof rawConfig.timezone === "string" ? rawConfig.timezone : "";
+    var ignition = rawConfig.ignition;
+    if (ignition && typeof ignition.enabled === "boolean") {
+      effective.ignition = effective.ignition || {};
+      effective.ignition.enabled = ignition.enabled;
+    }
     return effective;
+  }
+
+  function browserTimezone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (err) { return ""; }
+  }
+
+  // The IANA names the browser knows, for the datalist of the time zone
+  // field; none where the browser cannot list them, leaving the field to
+  // typing. The plugin checks the name when it is saved.
+  function timezoneOptions() {
+    var names = [];
+    try { if (typeof Intl.supportedValuesOf === "function") names = Intl.supportedValuesOf("timeZone").slice(); } catch (err) { names = []; }
+    if (names.length && names.indexOf("UTC") < 0) names.push("UTC");
+    return names;
+  }
+
+  // Without a saved time zone the field shows the browser's, marked as not
+  // saved. Only the user saves it, by editing the field or with the button
+  // in the mark, so the page never writes a time zone on its own. A draft,
+  // a failed value or the field being edited stays as it is.
+  function renderTimezone() {
+    var input = $("settings").elements.timezone;
+    var saved = typeof rawConfig.timezone === "string" && rawConfig.timezone.trim() !== "";
+    if (!saved && !input.value && !input.settingsDirty && !input.hasAttribute("aria-invalid") && document.activeElement !== input) {
+      input.value = browserTimezone();
+    }
+    $("timezone-unsaved").hidden = saved || !input.value.trim();
   }
 
   // Fields with data-format edit an object as text: "headers" as one
@@ -3548,6 +3588,7 @@
       }
     });
     settingsFilled = true;
+    renderTimezone();
     $("timezone-note").textContent = timezoneText();
     renderIgnitionOff();
     renderMcp();
@@ -4294,6 +4335,7 @@
       rawConfig = data || {};
       if (pendingOrder) rawConfig.account_order = pendingOrder.slice();
       renderMcp();
+      if (settingsFilled) renderTimezone();
     });
   }
 
@@ -4391,6 +4433,9 @@
     if (host) editSaveState(host, e.target);
     if (e.target.name === "public_listen") renderMcp();
   });
+  timezoneOptions().forEach(function (name) { $("timezone-options").appendChild(el("option", { value: name })); });
+  // Saves the time zone the field shows, such as the browser's one filled in.
+  $("timezone-save").addEventListener("click", function () { saveField({ target: $("settings").elements.timezone }); });
   $("mask-toggle").addEventListener("click", toggleMask);
   $("mcp-key-new").addEventListener("click", generateMcpKey);
   $("mcp-key-show").addEventListener("click", function () { mcpKeyShown = !mcpKeyShown; renderMcp(); });
