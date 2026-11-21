@@ -41,3 +41,20 @@ func TestPageWith(t *testing.T) {
 		t.Fatal("PageWith changed Page")
 	}
 }
+
+// The logo is part of the page, so the page loads nothing from GitHub or a
+// mirror of it.
+func TestPageInlinesLogo(t *testing.T) {
+	page := string(Page())
+	if !strings.Contains(page, `<img class="logo" src="data:image/png;base64,`) || strings.Contains(page, "/*LOGO*/") {
+		t.Fatal("the logo is not inlined")
+	}
+	for _, host := range []string{"raw.githubusercontent.com", "ghfast.top"} {
+		if strings.Contains(page, host) {
+			t.Fatalf("the page refers to %s", host)
+		}
+	}
+	if !bytes.HasPrefix(logoPNG, []byte("\x89PNG")) || len(logoPNG) > 16<<10 {
+		t.Fatalf("logo.png is not a small PNG: %d bytes", len(logoPNG))
+	}
+}

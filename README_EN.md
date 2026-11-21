@@ -1,14 +1,14 @@
 <p align="center"><img src="./assets/logo.png" alt="" width="128"></p>
 
-# Magpie-Lamplighter
+# Lamplighter
 
 [中文](./README.md)
 
 > When he lights his street lamp, it is as if he brought one more star to life, or one flower. — *The Little Prince*
 >
-> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Magpie-Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
+> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
 
-Magpie-Lamplighter (Lamplighter for short below) is a plugin for [Magpie](https://github.com/yetone/magpie), published on npm as `magpie-lamplighter` and shown in Magpie as **Magpie-Lamplighter**. It monitors the quota of the ChatGPT (Codex), Claude and Antigravity subscription accounts in Magpie, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and after each 5-hour quota window resets it sends one minimal request through Magpie so that the next window starts right away. Coding agents can read the quota over MCP.
+Lamplighter is a plugin for [Magpie](https://github.com/yetone/magpie), published on npm as `magpie-lamplighter` and shown in Magpie as **Lamplighter**. It monitors the quota of the ChatGPT (Codex), Claude and Antigravity subscription accounts in Magpie, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and after each 5-hour quota window resets it sends one minimal request through Magpie so that the next window starts right away. Coding agents can read the quota over MCP.
 
 The technical documents are in Chinese: [architecture](./docs/architecture.md) and [development](./docs/development.md).
 
@@ -36,7 +36,7 @@ Lamplighter monitors only the subscription accounts of the services `codex`, `cl
 
 ### Account names
 
-In notifications and on the page, the quota group of ChatGPT accounts is named `GPT`, so its first letter differs from Claude's. When a service has several accounts, they are told apart by the last two characters of the email user name, as in `GPT#rk`. An account with a name shows the name instead, as in `GPT#main`: in Lamplighter's Settings view, fill in **Name** under **Accounts**; without one, the account's name in Magpie is used (unless it equals the email). The name is kept in Lamplighter's settings and does not change the account's name in Magpie. Only its first line is used, cut at 20 characters; a service with one account shows the name too; when the name equals another account's name or email suffix in the same service, the email suffix is added after it. Events already recorded keep their old labels.
+In notifications and on the page, the quota group of ChatGPT accounts is named `GPT`, so its first letter differs from Claude's. When a service has several accounts, they are told apart by the last two characters of the email user name, as in `GPT#rk`. An account with a name shows the name instead, as in `GPT#main`: in Lamplighter's Settings view, fill in **Name** under **Accounts**; without one, the name the account was given in Magpie is used; the email or "email · workspace" (such as `a@b.com · Team`) that Magpie shows by default is no name. The name is kept in Lamplighter's settings and does not change the account's name in Magpie. Only its first line is used, cut at 20 characters; a service with one account shows the name too; when the name equals another account's name or email suffix in the same service, the email suffix is added after it. Events already recorded keep their old labels.
 
 ### Weights of several accounts
 
@@ -81,7 +81,7 @@ docker exec magpie magpie plugin add magpie-lamplighter
 
 When Magpie cannot read the community plugin list, this command fails; `magpie plugin add npm:magpie-lamplighter` installs the npm package by its name directly.
 
-After installation, a **Magpie-Lamplighter** page appears in the **Plugins** group of the sidebar. Opening it starts the plugin; the first query runs about 5 seconds after the plugin starts.
+After installation, a **Lamplighter** page appears in the **Plugins** group of the sidebar. Opening it starts the plugin; the first query runs about 5 seconds after the plugin starts.
 
 A new installation does not ignite. Before turning ignition on:
 
@@ -105,7 +105,7 @@ magpie plugin options magpie-lamplighter '{"port": 8320}'
 
 ### Updates
 
-The plugin checks for a new version every 6 hours and whenever the management page opens. When one is out, an update icon appears to the right of the version number in the page header. Update it on Magpie's **Plugins** page, or run `magpie plugin update`.
+The plugin checks for a new version every 6 hours and whenever the management page opens. When one is out, an update icon linking to the release notes appears to the right of the version number in the page header. Update it on Magpie's **Plugins** page, or run `magpie plugin update`.
 
 ### Data directory
 
@@ -127,7 +127,7 @@ Lamplighter started as a plugin for [CLIProxyAPI](https://github.com/router-for-
 
 The page opens in two ways:
 
-- **In Magpie**: open **Magpie-Lamplighter** in the **Plugins** group of the sidebar. This works in the desktop app and in `magpie web`, and needs no key. The page follows Magpie's language and theme.
+- **In Magpie**: open **Lamplighter** in the **Plugins** group of the sidebar. This works in the desktop app and in `magpie web`, and needs no key. The page follows Magpie's language, light or dark theme, colors and fonts. Magpie's plugin pages cannot open links to other sites: **Appeal** in the events and the update icon beside the version show the address on click, to copy into a browser; the title does not link to GitHub.
 - **Directly from outside**: turn on the public listener and reach it from other devices through a reverse proxy; see "Public access" below.
 
 ### Public access
@@ -186,6 +186,7 @@ Authentication and listener details are in [对外监听](./docs/architecture.md
 **Quota | Settings** at the top switches views, and the browser remembers the last one. The Quota view contains:
 
 - each account's quota windows, reset times (with the weekday), data source and plan, with a refresh per account;
+- times in the time zone set in the Settings view; without one, times are in the browser's time zone and the top of the Quota view says so: the ignition hours and the times in notifications then follow the server's time zone;
 - five colors shared by the quota bars and the chart: **Full** at a raw 100%, **Empty** at 0%, and **High**, **Medium** and **Low** in between, split by the first two alert thresholds; 99.6% is not colored as full even though it shows as 100%;
 - the next ignition time and current reset time of each quota group (both with the weekday), the latest result and the failure-protection state, with **Ignite now**; this part is hidden while ignition is off;
 - the quota history chart:
@@ -195,11 +196,12 @@ Authentication and listener details are in [对外监听](./docs/architecture.md
   - The lower part is the selected row's curve, marking resets and ignition results, with an even-pace line that falls linearly from 100% to 0% at the scheduled reset over a 5-hour or 7-day cycle. A curve above the line means slower use than even pace. Above the curve are the current remaining, the even-pace value at this moment and the difference.
   - When the right end is the reset time, a projection is drawn from now: if the quota runs out first, the time axis marks when; if the reset comes first, the remaining quota at the reset is labeled on the right. The 5-hour quota is projected at the current rate, so the run-out time is early in the first minutes of heavy use; the 7-day quota is projected at the cycle's daily average, which is less accurate in the first day or two of a cycle.
   - The page reads the status every 30 seconds and updates the chart when new data arrives; while the mouse is over the chart, the update waits until it leaves.
-- recent events, in columns for time, type, quota group and details. A notification triggered by an event is marked at the end of that event's row as **Notified** or **Notification failed**. 5-hour resets are hidden by default; tick **Show 5-hour resets** to see them.
+  - When an account has several quota groups, such as **Gemini** and **Claude / GPT** of Antigravity, the chart, its data table, the ignition table and the events put the service before the group, as in **Antigravity · Claude / GPT**, shortened to **AG · Claude / GPT** where the chart's label column is too narrow. A group named after its service, such as the main **Claude** group of a Claude account, is not prefixed. The account cards, which show the groups under the service badge, do not, and neither do account events such as invalid credentials, whose label already names the account.
+- recent events, in columns for time, type, quota group and details; the quota group column is as wide as its longest name. A notification triggered by an event is marked at the end of that event's row as **Notified** or **Notification failed**. 5-hour resets are hidden by default; tick **Show 5-hour resets** to see them.
 
 How the chart is computed is in [页面功能](./docs/architecture.md#页面功能) (Chinese).
 
-The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts**, and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
+The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
 
 The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
 
@@ -221,7 +223,7 @@ Claude and Codex quotas are whole percentages; Antigravity's have decimals. When
 
 A 5-hour quota window starts counting from the first request after a reset. If nobody uses the account after the reset, the window does not start. With ignition on, Lamplighter sends a request right after each reset so that windows roll on back to back. The rules:
 
-- Times follow the time zone set in the Settings view, not the time zone of the server Magpie runs on. Without one, the time zone of the system the program runs on is used, which is UTC in Magpie's Docker image.
+- Times follow the time zone set in the Settings view, not the time zone of the server Magpie runs on. Without one, the time zone of the system the program runs on is used, which is UTC in Magpie's Docker image; the page then shows times in the browser's time zone, and the top of the Quota view says no time zone is set.
 - The first ignition each day is at `07:00`, then 3 seconds after each reset, until `22:30`. A reset later than that waits until 07:00 the next day.
 - Requests go through the Magpie gateway, pinned to the account by a request header, so the gateway does not switch to another account. Claude requests are forwarded by Claude Code inside Magpie and carry Claude Code's own system prompt, so they use more input tokens than a direct request.
 - The request only asks the model to reply `OK` and carries no tools. The request is closed 2 seconds after the first output; the request of each candidate model takes 2 minutes at most from sending it to the end; when the gateway answers an error status, reading the error body may take up to 10 more seconds. Moving on to the next candidate and the confirmation that follows take extra time, so one ignition can take longer.
@@ -274,7 +276,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `critical_threshold` | `10` | Third alert threshold |
 | `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Notify when the quota recovers; see below |
 | `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Remind before a reset; see below |
-| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image). To follow the system's time zone, leave it empty; `Local` counts as an invalid name. Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup and treated as empty |
+| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means ignition and notifications use the time zone of the system the program runs on (UTC in Magpie's Docker image), and the page shows times in the browser's time zone. To follow the system's time zone, leave it empty; `Local` counts as an invalid name. Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup and treated as empty |
 | `timezone_offset_hours` | empty | A fixed UTC offset such as `8`; used only when `timezone` is empty |
 | `poll_interval_seconds` | `300` | Active query interval, at least 60 |
 | `request_timeout_seconds` | `20` | Timeout of quota queries, notifications and other HTTP requests, 5 to 120; does not limit ignition |

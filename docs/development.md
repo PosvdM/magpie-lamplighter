@@ -62,7 +62,7 @@ npm 上的 Trusted Publisher 设置要写仓库 `PosvdM/magpie-lamplighter` 和�
 - 修改额度请求的地址或请求头时，更新[架构文档](./architecture.md)中的表格。
 - 修改轮询、跳过规则、点火时间或失败保护时，同步更新测试、README 和架构文档。
 - 后台循环中的 goroutine 必须有 `recover`，取消监视器必须在调用结束前退出。HTTP 请求设置超时。
-- 修改页面时保持 HTML、CSS、JS 分文件；文字插入 DOM 时使用 `textContent`。新增或修改页面文字时，同时修改 `page.js` 中 `I18N` 的中文和英文词条；新增或修改推送文字时，同时修改 `internal/notify/text.go` 的两列。增加一种语言时，两处各加一份。图表颜色只表示剩余额度的高低，使用与额度条相同的三档变量。
+- 修改页面时保持 HTML、CSS、JS 分文件；文字插入 DOM 时使用 `textContent`。新增或修改页面文字时，同时修改 `page.js` 中 `I18N` 的中文和英文词条；新增或修改推送文字时，同时修改 `internal/notify/text.go` 的两列。增加一种语言时，两处各加一份。图表颜色只表示剩余额度的高低，使用与额度条相同的五档变量（`--quota-*-color`）。额度五档和服务徽章以外的颜色由 `page.css` 顶部取自 Magpie 主题的基础变量派生，不写死颜色值；用 `color-mix()` 派生的变量同时在 `@supports` 之外写出静态颜色，小字用 `--success-text` 等文字色，见[管理页面](./architecture.md#页面功能)。
 - 用户可见的行为、配置和限制写进 README（中英文同步），实现细节写进 `docs/`。
 
 ## 真实环境验证

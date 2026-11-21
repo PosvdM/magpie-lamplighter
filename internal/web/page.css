@@ -1,127 +1,240 @@
-/* Design tokens come from the CPA Management Center (src/styles/themes.scss):
-   warm-grey paper surfaces, text, border and status colors. data-theme
-   selects the dark theme; page.js sets it from Magpie's theme or the
-   browser's color scheme. */
+/* Colors and fonts follow Magpie's theme. page.js copies the tokens Magpie
+   sends with its theme (bg, card, fg, fg-2, muted, faint, line, accent,
+   accent-soft, accent-fg, green, red, amber, font, code) to --magpie-<token>
+   on the root. The base variables below take them, and fall back to
+   Magpie's default light and dark values where the page runs on its own.
+   The other variables derive from the base ones: first as static colors
+   worked out from Magpie's default theme, for browsers without
+   color-mix(), then, in the @supports block, mixed from the base ones.
+   data-theme selects the dark theme; page.js sets it from Magpie's theme
+   or the browser's color scheme.
+
+   Small text never uses green, red or amber themselves, which are too
+   light on a light card: --success-text, --failure-text and --amber-text
+   mix them toward the text color, to 4.5:1 or more on the card and on
+   their own tints. The semantic colors stay for icons, lines and fills. */
 :root {
   color-scheme: light;
-  --bg-secondary: #faf9f5;
-  --bg-primary: #f0eee8;
-  --bg-tertiary: #e9e6df;
-  --bg-hover: var(--bg-tertiary);
-  --floating-surface: #fffdf9;
-  --floating-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --text-quaternary: #c0bab3;
-  --border-color: #e3e1db;
-  --border-primary: #d5d2cb;
-  --border-hover: #cecac4;
-  --primary-color: #8b8680;
-  --primary-hover: #7f7a74;
-  --primary-contrast: #ffffff;
-  --success-color: #10b981;
-  --quota-medium-color: #e0aa14;
-  /* Full quota is cyan blue, apart from the green of high; empty quota is a
-     darker red than low, striped with --quota-empty-stripe. */
-  --quota-full-color: #0ea5e9;
-  --quota-empty-color: #8e2a1f;
+  --bg: var(--magpie-bg, #f4f4f6);
+  --card: var(--magpie-card, #ffffff);
+  --fg: var(--magpie-fg, #1c1c21);
+  --fg-2: var(--magpie-fg-2, #4b4b53);
+  --muted: var(--magpie-muted, #85858d);
+  --faint: var(--magpie-faint, #b9b9c2);
+  --line: var(--magpie-line, #e3e3e8);
+  --accent: var(--magpie-accent, #4f46e5);
+  --accent-soft: var(--magpie-accent-soft, #eeedfd);
+  --accent-fg: var(--magpie-accent-fg, #ffffff);
+  --green: var(--magpie-green, #189a58);
+  --red: var(--magpie-red, #d64545);
+  --amber: var(--magpie-amber, #b45309);
+  --font: var(--magpie-font, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif);
+  --font-mono: var(--magpie-code, ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace);
+
+  /* Surfaces, text, borders and the accent. */
+  --bg-secondary: var(--bg);
+  --bg-primary: var(--card);
+  --bg-tertiary: #f4f4f4;
+  --bg-hover: #ebebeb;
+  --card-glass: var(--card);
+  --floating-surface: var(--card);
+  --floating-shadow: 0 12px 28px rgba(20, 22, 30, 0.14), 0 0 0 0.5px rgba(20, 22, 30, 0.08);
+  --text-primary: var(--fg);
+  --text-secondary: var(--fg-2);
+  --text-tertiary: var(--muted);
+  --text-quaternary: var(--faint);
+  --border-color: var(--line);
+  --border-primary: var(--border-primary-static);
+  --border-primary-static: #c7c7cc;
+  --border-hover: #b9b9bf;
+  --primary-color: var(--accent);
+  --primary-hover: #4840ca;
+  --primary-contrast: var(--accent-fg);
+  --focus-ring: rgba(79, 70, 229, 0.25);
+  --quota-track: rgba(28, 28, 33, 0.08);
+  --row-hover: rgba(28, 28, 33, 0.03);
+  --fieldset-bg: #fafafb;
+  --shadow: 0 1px 2px rgba(20, 22, 30, 0.06);
+  /* The segmented controls: a track a shade deeper than the card, and the
+     chosen option on a raised thumb in the text color, as in Magpie. */
+  --seg-track: #e3e3e5;
+  --seg-thumb: var(--card);
+  --seg-edge: 0 1px 2px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+
+  /* Success, failure and warning states derive from Magpie's green, red
+     and amber. */
+  --success-color: var(--green);
+  --error-color: var(--red);
+  --success-text: var(--success-text-static);
+  --success-text-static: #1a6a43;
+  --failure-text: var(--failure-text-static);
+  --failure-text-static: #a23a3b;
+  --amber-text: #96480e;
+  --warning-bg: rgba(214, 69, 69, 0.1);
+  --warning-border: rgba(214, 69, 69, 0.32);
+  --warning-text: var(--failure-text);
+  --success-badge-bg: rgba(24, 154, 88, 0.12);
+  --success-badge-text: var(--success-text);
+  --success-badge-border: rgba(24, 154, 88, 0.35);
+  --failure-badge-bg: rgba(214, 69, 69, 0.12);
+  --failure-badge-text: var(--failure-text);
+  --failure-badge-border: rgba(214, 69, 69, 0.35);
+  --amber-bg: rgba(180, 83, 9, 0.11);
+  --amber-border: rgba(180, 83, 9, 0.32);
+  --viz-success: var(--green);
+  --viz-failure: var(--red);
+
+  /* The five quota levels keep colors of their own in both themes: full is
+     blue, apart from the green of high; empty is a darker red than low,
+     striped with --quota-empty-stripe. */
+  --quota-full-color: #3b82f6;
+  --quota-high-color: #22a06b;
+  --quota-medium-color: #e5a01a;
+  --quota-low-color: #e0574c;
+  --quota-empty-color: #a3302a;
   --quota-empty-stripe: rgba(255, 255, 255, 0.22);
-  --error-color: #c65746;
-  --warning-bg: rgba(198, 87, 70, 0.12);
-  --warning-border: rgba(198, 87, 70, 0.35);
-  --warning-text: #c65746;
-  --success-badge-bg: #d1fae5;
-  --success-badge-text: #065f46;
-  --success-badge-border: #6ee7b7;
-  --failure-badge-bg: rgba(198, 87, 70, 0.14);
-  --failure-badge-text: #8a3a30;
-  --failure-badge-border: rgba(198, 87, 70, 0.35);
-  --amber-bg: rgba(217, 119, 6, 0.10);
-  --amber-text: #92400e;
-  --amber-border: rgba(217, 119, 6, 0.30);
-  --viz-success: #10b981;
-  --viz-failure: #c65746;
-  --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.08);
+
+  /* Provider badges: a text color per service on a tint of it
+     (--type-tint of it over the card). */
+  --type-tint: 12%;
+  --type-codex: #5148d8;
+  --type-codex-bg: #eae9fa;
+  --type-claude: #a8481a;
+  --type-claude-bg: #f5e9e4;
+  --type-antigravity: #0a6c74;
+  --type-antigravity-bg: #e2edee;
+  --type-kimi: #1e63d0;
+  --type-kimi-bg: #e4ecf9;
+
+  /* Chart chrome: empty lane, no-data hatching, selected row. The chart
+     reads them, and a <name>-static value is what cssVar in page.js falls
+     back to when it cannot resolve the mixed one. */
+  --chart-lane: var(--chart-lane-static);
+  --chart-lane-static: rgba(28, 28, 33, 0.04);
+  --chart-hatch: var(--chart-hatch-static);
+  --chart-hatch-static: rgba(28, 28, 33, 0.11);
+  --chart-select: var(--chart-select-static);
+  --chart-select-static: rgba(28, 28, 33, 0.05);
+
   --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-bounce: cubic-bezier(0.34, 1.7, 0.5, 1);
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
-
-  /* Provider badges use the Management Center type colors. */
-  --type-codex-bg: #eae7ff;
-  --type-codex-text: #3538d4;
-  --type-claude-bg: #fbece4;
-  --type-claude-text: #c05621;
-  --type-antigravity-bg: #e0f7fa;
-  --type-antigravity-text: #006064;
-  --type-kimi-bg: #dce8ff;
-  --type-kimi-text: #0560cf;
-  --type-xai-bg: #f3f4f6;
-  --type-xai-text: #111827;
-  --type-xai-border: #d1d5db;
-
-  /* Chart chrome: empty lane, no-data hatching, selected row. */
-  --chart-lane: rgba(0, 0, 0, 0.035);
-  --chart-hatch: rgba(0, 0, 0, 0.10);
-  --chart-select: rgba(0, 0, 0, 0.05);
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg-secondary: #151412;
-  --bg-primary: #1d1b18;
-  --bg-tertiary: #262320;
-  --bg-hover: #2e2a26;
-  --floating-surface: #2a2723;
-  --floating-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
-  --text-primary: #f6f4f1;
-  --text-secondary: #c9c3bb;
-  --text-tertiary: #9c958d;
-  --text-quaternary: #6f6962;
-  --border-color: #3a3530;
-  --border-primary: #4a453f;
-  --border-hover: #5a544d;
-  --primary-hover: #9a948e;
-  --quota-medium-color: #ffd862;
-  --quota-full-color: #38bdf8;
-  --quota-empty-color: #9a2e22;
+  --bg: var(--magpie-bg, #1a1a1e);
+  --card: var(--magpie-card, #232327);
+  --fg: var(--magpie-fg, #ededf1);
+  --fg-2: var(--magpie-fg-2, #b9b9c1);
+  --muted: var(--magpie-muted, #9c9ca6);
+  --faint: var(--magpie-faint, #90909a);
+  --line: var(--magpie-line, #333339);
+  --accent: var(--magpie-accent, #a5b4fc);
+  --accent-soft: var(--magpie-accent-soft, #2b2c47);
+  --accent-fg: var(--magpie-accent-fg, #14142a);
+  --green: var(--magpie-green, #6fd99b);
+  --red: var(--magpie-red, #f28b82);
+  --amber: var(--magpie-amber, #f2b544);
+  --bg-tertiary: #2d2d31;
+  --bg-hover: #353539;
+  --floating-surface: #2d2d31;
+  --floating-shadow: 0 14px 32px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  --border-primary-static: #4d4d53;
+  --border-hover: #62626a;
+  --primary-hover: #afbcfa;
+  --focus-ring: rgba(165, 180, 252, 0.25);
+  --quota-track: rgba(237, 237, 241, 0.08);
+  --row-hover: rgba(237, 237, 241, 0.03);
+  --fieldset-bg: #1f1f23;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --seg-track: rgba(237, 237, 241, 0.04);
+  --seg-thumb: rgba(237, 237, 241, 0.15);
+  --seg-edge: inset 0 0.5px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.3);
+  /* Magpie's dark green, red and amber read at 5:1 or more on the dark
+     card and their tints, so small text takes them as they are. */
+  --success-text: var(--green);
+  --success-text-static: #6fd99b;
+  --failure-text: var(--red);
+  --failure-text-static: #f28b82;
+  --amber-text: var(--amber);
+  --warning-bg: rgba(242, 139, 130, 0.14);
+  --warning-border: rgba(242, 139, 130, 0.4);
+  --success-badge-bg: rgba(111, 217, 155, 0.14);
+  --success-badge-border: rgba(111, 217, 155, 0.35);
+  --failure-badge-bg: rgba(242, 139, 130, 0.15);
+  --failure-badge-border: rgba(242, 139, 130, 0.35);
+  --amber-bg: rgba(242, 181, 68, 0.14);
+  --amber-border: rgba(242, 181, 68, 0.32);
+  --quota-full-color: #6aa5f8;
+  --quota-high-color: #4cc488;
+  --quota-medium-color: #f2b544;
+  --quota-low-color: #f07a70;
+  --quota-empty-color: #a8362f;
   --quota-empty-stripe: rgba(0, 0, 0, 0.32);
-  --warning-bg: rgba(198, 87, 70, 0.22);
-  --warning-border: rgba(198, 87, 70, 0.45);
-  --warning-text: #f1b0a6;
-  --success-badge-bg: rgba(6, 78, 59, 0.3);
-  --success-badge-text: #6ee7b7;
-  --success-badge-border: #059669;
-  --failure-badge-bg: rgba(198, 87, 70, 0.24);
-  --failure-badge-text: #f1b0a6;
-  --failure-badge-border: rgba(198, 87, 70, 0.5);
-  --amber-bg: rgba(217, 119, 6, 0.18);
-  --amber-text: #fcd34d;
-  --amber-border: rgba(217, 119, 6, 0.45);
-  --viz-success: #0fae78;
-  --viz-failure: #cf4b3a;
-  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
-  --type-codex-bg: #262395;
-  --type-codex-text: #b5b0ff;
-  --type-claude-bg: #5e2c14;
-  --type-claude-text: #e8a882;
-  --type-antigravity-bg: #004d40;
-  --type-antigravity-text: #80deea;
-  --type-kimi-bg: #003880;
-  --type-kimi-text: #70b5ff;
-  --type-xai-bg: #111827;
-  --type-xai-text: #f9fafb;
-  --type-xai-border: #374151;
-  --chart-lane: rgba(255, 255, 255, 0.035);
-  --chart-hatch: rgba(255, 255, 255, 0.09);
-  --chart-select: rgba(255, 255, 255, 0.045);
+  --type-tint: 20%;
+  --type-codex: #aaa6ff;
+  --type-codex-bg: #3e3d52;
+  --type-claude: #f0a77c;
+  --type-claude-bg: #4c3d38;
+  --type-antigravity: #6fd3db;
+  --type-antigravity-bg: #32464b;
+  --type-kimi: #7fb2ff;
+  --type-kimi-bg: #354052;
+  --chart-lane-static: rgba(237, 237, 241, 0.04);
+  --chart-hatch-static: rgba(237, 237, 241, 0.1);
+  --chart-select-static: rgba(237, 237, 241, 0.05);
+}
+/* Where color-mix() works, the derived colors follow the tokens Magpie
+   sends. Formulas both themes share come first, for both selectors, so
+   they win over the static dark values above; then each theme's own. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root, :root[data-theme="dark"] {
+    --bg-tertiary: color-mix(in srgb, var(--fg) 5%, var(--card));
+    --bg-hover: color-mix(in srgb, var(--fg) 9%, var(--card));
+    --card-glass: color-mix(in srgb, var(--card) 82%, transparent);
+    --border-primary: color-mix(in srgb, var(--fg) 14%, var(--line));
+    --border-hover: color-mix(in srgb, var(--muted) 45%, var(--line));
+    --primary-hover: color-mix(in srgb, var(--accent) 86%, var(--fg));
+    --focus-ring: color-mix(in srgb, var(--accent) 25%, transparent);
+    --quota-track: color-mix(in srgb, var(--fg) 8%, transparent);
+    --row-hover: color-mix(in srgb, var(--fg) 3%, transparent);
+    --fieldset-bg: color-mix(in srgb, var(--bg) 50%, var(--card));
+    --success-badge-border: color-mix(in srgb, var(--green) 35%, transparent);
+    --failure-badge-border: color-mix(in srgb, var(--red) 35%, transparent);
+    --amber-border: color-mix(in srgb, var(--amber) 32%, transparent);
+    --chart-lane: color-mix(in srgb, var(--fg) 4%, transparent);
+    --chart-select: color-mix(in srgb, var(--fg) 5%, transparent);
+  }
+  :root:not([data-theme="dark"]) {
+    --seg-track: color-mix(in srgb, var(--fg) 8%, var(--bg));
+    --success-text: color-mix(in srgb, var(--green) 62%, var(--fg));
+    --failure-text: color-mix(in srgb, var(--red) 72%, var(--fg));
+    --amber-text: color-mix(in srgb, var(--amber) 80%, var(--fg));
+    --warning-bg: color-mix(in srgb, var(--red) 10%, transparent);
+    --warning-border: color-mix(in srgb, var(--red) 32%, transparent);
+    --success-badge-bg: color-mix(in srgb, var(--green) 12%, transparent);
+    --failure-badge-bg: color-mix(in srgb, var(--red) 12%, transparent);
+    --amber-bg: color-mix(in srgb, var(--amber) 11%, transparent);
+    --chart-hatch: color-mix(in srgb, var(--fg) 11%, transparent);
+  }
+  :root[data-theme="dark"] {
+    --floating-surface: color-mix(in srgb, var(--fg) 5%, var(--card));
+    --seg-track: color-mix(in srgb, var(--fg) 4%, transparent);
+    --seg-thumb: color-mix(in srgb, var(--fg) 15%, transparent);
+    --warning-bg: color-mix(in srgb, var(--red) 14%, transparent);
+    --warning-border: color-mix(in srgb, var(--red) 40%, transparent);
+    --success-badge-bg: color-mix(in srgb, var(--green) 14%, transparent);
+    --failure-badge-bg: color-mix(in srgb, var(--red) 15%, transparent);
+    --amber-bg: color-mix(in srgb, var(--amber) 14%, transparent);
+    --chart-hatch: color-mix(in srgb, var(--fg) 10%, transparent);
+  }
 }
 
 * { box-sizing: border-box; }
-html, body { background: var(--bg-secondary); }
+html, body { background-color: var(--bg-secondary); }
 body {
   margin: 0;
   color: var(--text-primary);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, "Helvetica Neue", sans-serif;
+  font: 14px/1.5 var(--font);
   -webkit-font-smoothing: antialiased;
 }
 main { max-width: 1200px; margin: 0 auto; padding: 22px 22px 48px; }
@@ -133,12 +246,12 @@ main { max-width: 1200px; margin: 0 auto; padding: 22px 22px 48px; }
 
 /* Header */
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 18px; }
-header .logo { display: block; margin-right: -6px; }
+header .logo { display: block; flex: none; }
 /* The navy lantern body needs an outline to stand out on the dark background. */
 :root[data-theme="dark"] header .logo { filter: drop-shadow(0 0 0.6px rgba(240, 233, 220, 0.9)) drop-shadow(0 0 0.6px rgba(240, 233, 220, 0.9)); }
-h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-h1 .home { color: inherit; text-decoration: none; }
-h1 .home:hover { opacity: 0.8; }
+h1 { display: flex; align-items: center; font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+h1 .home { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+h1 a.home[href]:hover { opacity: 0.8; }
 h1 .sub { color: var(--text-tertiary); font-weight: 500; font-size: 15px; margin-left: 8px; }
 h1 .sub:empty { display: none; }
 header .meta { color: var(--text-tertiary); font-size: 12.5px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -149,7 +262,7 @@ header .update path { fill: none; stroke: currentColor; stroke-width: 1.8; strok
 
 /* Cards and sections */
 .card {
-  background: var(--bg-primary);
+  background-color: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 12px;
   box-shadow: var(--shadow);
@@ -170,7 +283,7 @@ header .update path { fill: none; stroke: currentColor; stroke-width: 1.8; strok
 .mask-toggle { padding: 6px 8px; color: var(--text-secondary); }
 .mask-toggle.no-snapshot { padding: 4px 6px; }
 .mask-toggle svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.mask-toggle[aria-pressed="true"] { background: var(--bg-tertiary); border-color: var(--border-color); color: var(--text-primary); }
+.mask-toggle[aria-pressed="true"] { background-color: var(--bg-tertiary); border-color: var(--border-color); color: var(--text-primary); }
 .mask-accounts .account-sensitive { filter: blur(5px); }
 
 /* Screenshot buttons, and the off-screen copy measured for a screenshot. */
@@ -181,7 +294,7 @@ header .update path { fill: none; stroke: currentColor; stroke-width: 1.8; strok
 .snapshot-host { position: fixed; left: -100000px; top: 0; pointer-events: none; }
 /* The frame of a screenshot. It applies both off screen, where page.js
    measures it, and in the image, so the two have the same size. */
-.snapshot-frame { padding: 12px; background: var(--bg-secondary); color: var(--text-primary); -webkit-font-smoothing: antialiased; }
+.snapshot-frame { padding: 12px; background-color: var(--bg-secondary); color: var(--text-primary); -webkit-font-smoothing: antialiased; }
 .snapshot-frame, .snapshot-frame *, .snapshot-frame *::before, .snapshot-frame *::after { animation: none !important; transition: none !important; }
 .snapshot-frame .detail-wrap { margin-top: 0; padding-top: 0; border-top: 0; }
 .snapshot-frame .detail-wrap.side .detail-head { top: 0; }
@@ -190,31 +303,31 @@ header .update path { fill: none; stroke: currentColor; stroke-width: 1.8; strok
 .settings-section > .card-title { margin: 0; }
 .settings-section > fieldset { margin: 0; }
 
-/* Buttons, matching .btn in the Management Center */
+/* Buttons */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   border: 1px solid transparent; border-radius: 8px; padding: 7px 12px;
   font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
-  background: var(--bg-secondary); color: var(--text-primary);
+  background-color: var(--bg-secondary); color: var(--text-primary);
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
-.btn-primary { background: var(--primary-color); border-color: var(--primary-color); color: var(--primary-contrast); }
-.btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
-.btn-secondary { background: var(--bg-tertiary); border-color: var(--border-color); }
-.btn-secondary:hover { background: var(--bg-hover); border-color: var(--border-hover); }
+.btn-primary { background-color: var(--primary-color); border-color: var(--primary-color); color: var(--primary-contrast); }
+.btn-primary:hover { background-color: var(--primary-hover); border-color: var(--primary-hover); }
+.btn-secondary { background-color: var(--bg-tertiary); border-color: var(--border-color); }
+.btn-secondary:hover { background-color: var(--bg-hover); border-color: var(--border-hover); }
 .btn-ghost { background: transparent; color: var(--text-secondary); }
-.btn-ghost:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.btn-ghost:hover { background-color: var(--bg-tertiary); color: var(--text-primary); }
 .btn-sm { padding: 4px 10px; font-size: 12.5px; }
 .btn[hidden] { display: none; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn:focus-visible, .seg:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 25%, transparent);
+  outline: none; box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
-/* Inputs, matching .input in the Management Center */
+/* Inputs */
 input, select, textarea {
   font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 8px;
-  border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border-color); background-color: var(--bg-secondary); color: var(--text-primary);
   transition: border-color 150ms ease;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--primary-color); }
@@ -227,27 +340,32 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
   font-size: 12px; font-weight: 600; border: 1px solid transparent; white-space: nowrap;
 }
 .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.badge-success { background: var(--success-badge-bg); color: var(--success-badge-text); border-color: var(--success-badge-border); }
-.badge-failure { background: var(--failure-badge-bg); color: var(--failure-badge-text); border-color: var(--failure-badge-border); }
-.badge-warning { background: var(--amber-bg); color: var(--amber-text); border-color: var(--amber-border); }
-.badge-muted { background: var(--bg-tertiary); color: var(--text-secondary); border-color: var(--border-color); }
+.badge-success { background-color: var(--success-badge-bg); color: var(--success-badge-text); border-color: var(--success-badge-border); }
+.badge-failure { background-color: var(--failure-badge-bg); color: var(--failure-badge-text); border-color: var(--failure-badge-border); }
+.badge-warning { background-color: var(--amber-bg); color: var(--amber-text); border-color: var(--amber-border); }
+.badge-muted { background-color: var(--bg-tertiary); color: var(--text-secondary); border-color: var(--border-color); }
 
 /* Notices */
 .notice {
   display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; margin-bottom: 10px;
-  border-radius: 8px; border: 1px solid var(--warning-border); background: var(--warning-bg);
+  border-radius: 8px; border: 1px solid var(--warning-border); background-color: var(--warning-bg);
   color: var(--text-primary); font-size: 13px;
 }
+.notice[hidden] { display: none; }
+.notice-info { align-items: center; flex-wrap: wrap; border-color: var(--amber-border); background-color: var(--amber-bg); }
+.notice-info .notice-icon { background-color: var(--amber); font-family: Georgia, serif; font-style: italic; margin-top: 0; }
+.notice-info .notice-text { flex: 1; min-width: 0; }
+.notice-info .btn { flex: none; }
 .notice-icon {
   flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center;
-  background: var(--error-color); color: #fff; font-size: 12px; font-weight: 700; margin-top: 1px;
+  background-color: var(--error-color); color: var(--bg-primary); font-size: 12px; font-weight: 700; margin-top: 1px;
 }
 
-/* Quota cards, following the Management Center quota page */
+/* Quota cards */
 .accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
 .card.account {
   margin: 0; padding: 15px 16px; border-radius: 14px; display: flex; flex-direction: column; gap: 12px;
-  background: color-mix(in srgb, var(--bg-primary) 82%, transparent); box-shadow: none;
+  background-color: var(--card-glass); box-shadow: none;
   transition: transform 200ms var(--ease-out-strong), border-color 200ms var(--ease-out-strong), box-shadow 200ms var(--ease-out-strong);
 }
 @media (hover: hover) and (pointer: fine) {
@@ -264,7 +382,7 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
 /* Pointer dragging starts at the handle. */
 .drag-handle {
   flex: none; width: 10px; height: 18px; margin: 0 -3px 0 -4px; cursor: grab; touch-action: none; opacity: 0.45;
-  background: radial-gradient(circle, var(--text-tertiary) 1.2px, transparent 1.6px) 0 0 / 5px 6px;
+  background-image: radial-gradient(circle, var(--text-tertiary) 1.2px, transparent 1.6px); background-position: 0 0; background-size: 5px 6px;
 }
 .drag-handle:hover { opacity: 1; }
 @media (hover: none) { .drag-handle { opacity: 1; } }
@@ -275,13 +393,21 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
 .account-weight { flex: none; font-family: var(--font-mono); font-size: 12px; font-weight: 650; color: var(--text-secondary); }
 .type-badge {
   flex: none; padding: 2px 9px; border-radius: 9999px; font-size: 12px; font-weight: 650;
-  background: var(--bg-tertiary); color: var(--text-secondary);
+  background-color: var(--bg-tertiary); color: var(--text-secondary);
 }
-.type-codex { background: var(--type-codex-bg); color: var(--type-codex-text); }
-.type-claude { background: var(--type-claude-bg); color: var(--type-claude-text); }
-.type-antigravity { background: var(--type-antigravity-bg); color: var(--type-antigravity-text); }
-.type-kimi { background: var(--type-kimi-bg); color: var(--type-kimi-text); }
-.type-xai { background: var(--type-xai-bg); color: var(--type-xai-text); box-shadow: inset 0 0 0 1px var(--type-xai-border); }
+.type-codex { --type: var(--type-codex); }
+.type-claude { --type: var(--type-claude); }
+.type-antigravity { --type: var(--type-antigravity); }
+.type-kimi { --type: var(--type-kimi); }
+.type-codex { --type-bg: var(--type-codex-bg); }
+.type-claude { --type-bg: var(--type-claude-bg); }
+.type-antigravity { --type-bg: var(--type-antigravity-bg); }
+.type-kimi { --type-bg: var(--type-kimi-bg); }
+@supports (color: color-mix(in srgb, red, blue)) {
+  .type-codex, .type-claude, .type-antigravity, .type-kimi { --type-bg: color-mix(in srgb, var(--type) var(--type-tint), var(--card)); }
+}
+.type-codex, .type-claude, .type-antigravity, .type-kimi { background-color: var(--type-bg); color: var(--type); }
+.type-xai { background-color: var(--bg-tertiary); color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--border-color); }
 .quota-group { display: flex; flex-direction: column; gap: 9px; }
 .quota-group + .quota-group { padding-top: 11px; border-top: 1px solid var(--border-color); }
 .group-title { font-size: 12px; font-weight: 600; color: var(--text-tertiary); letter-spacing: 0.02em; }
@@ -297,7 +423,7 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
 .quota-countdown { color: var(--text-secondary); }
 .quota-countdown::before { content: "·"; margin-right: 6px; color: var(--text-quaternary); }
 .quota-countdown.soon { color: var(--warning-text); font-weight: 600; }
-.quota-bar { height: 6px; border-radius: 9999px; background: color-mix(in srgb, var(--text-primary) 8%, transparent); overflow: hidden; }
+.quota-bar { height: 6px; border-radius: 9999px; background-color: var(--quota-track); overflow: hidden; }
 .quota-fill {
   display: block; height: 100%; border-radius: 9999px; transform-origin: left center;
   transition: width 360ms var(--ease-out-strong);
@@ -305,17 +431,17 @@ input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: va
   animation-delay: calc(var(--meter-index, 0) * 40ms);
 }
 @keyframes meter-fill { from { transform: scaleX(0); } }
-.fill-high { background: var(--viz-success); }
-.fill-medium { background: var(--quota-medium-color); }
-.fill-low { background: var(--viz-failure); }
-.fill-full { background: var(--quota-full-color); }
+.fill-high { background-color: var(--quota-high-color); }
+.fill-medium { background-color: var(--quota-medium-color); }
+.fill-low { background-color: var(--quota-low-color); }
+.fill-full { background-color: var(--quota-full-color); }
 .fill-empty, .quota-bar.bar-empty {
-  background: repeating-linear-gradient(135deg, var(--quota-empty-stripe) 0 2px, transparent 2px 5px), var(--quota-empty-color);
+  background-image: repeating-linear-gradient(135deg, var(--quota-empty-stripe) 0 2px, transparent 2px 5px); background-color: var(--quota-empty-color);
 }
-.quota-percent.percent-empty { color: var(--error-color); }
+.quota-percent.percent-empty { color: var(--failure-text); }
 .group-foot { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--text-tertiary); }
-.source { padding: 0 6px; border-radius: 4px; font-size: 11px; background: var(--bg-tertiary); color: var(--text-secondary); }
-.source-passive { background: color-mix(in srgb, var(--viz-success) 14%, transparent); color: var(--success-badge-text); }
+.source { padding: 0 6px; border-radius: 4px; font-size: 11px; background-color: var(--bg-tertiary); color: var(--text-secondary); }
+.source-passive { background-color: var(--success-badge-bg); color: var(--success-badge-text); }
 .error-text { color: var(--warning-text); font-size: 12px; }
 
 /* Tables */
@@ -327,7 +453,7 @@ th {
 }
 td { padding: 10px; border-bottom: 1px solid var(--border-color); vertical-align: middle; }
 tbody tr:last-child td { border-bottom: none; }
-tbody tr:hover td { background: color-mix(in srgb, var(--text-primary) 3%, transparent); }
+tbody tr:hover td { background-color: var(--row-hover); }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 td.actions { text-align: right; }
 .cell-note { margin-top: 4px; font-size: 11.5px; color: var(--text-tertiary); max-width: 280px; }
@@ -355,24 +481,24 @@ td.actions { text-align: right; }
 .detail-wrap.side .detail-tools { margin: 4px 0 0; align-self: flex-start; overflow: visible; }
 .detail-name { font-size: 14px; font-weight: 650; color: var(--text-primary); }
 .detail-stat strong { margin-left: 4px; color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
-.detail-stat strong.ahead { color: var(--viz-success); }
-.detail-stat strong.behind { color: var(--viz-failure); }
+.detail-stat strong.ahead { color: var(--success-text); }
+.detail-stat strong.behind { color: var(--failure-text); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--text-secondary); margin: 10px 0 0; }
 .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .legend .swatch.hatch {
-  background: repeating-linear-gradient(135deg, var(--chart-hatch) 0 2px, transparent 2px 5px);
+  background-image: repeating-linear-gradient(135deg, var(--chart-hatch) 0 2px, transparent 2px 5px);
   border: 1px solid var(--border-color);
 }
 .legend .swatch.pace { width: 14px; height: 0; border-radius: 0; border-top: 1.5px dashed var(--text-tertiary); vertical-align: 3px; }
 /* Dash-dot, like the stroke-dasharray "8 3 1.5 3" of the line. */
 .legend .swatch.pace-extended, .tooltip .row.pace.extended .key {
   width: 16px; height: 1.5px; border-radius: 0; vertical-align: 3px;
-  background: linear-gradient(90deg, var(--text-tertiary) 0 8px, transparent 8px 11px, var(--text-tertiary) 11px 12.5px, transparent 12.5px);
+  background-image: linear-gradient(90deg, var(--text-tertiary) 0 8px, transparent 8px 11px, var(--text-tertiary) 11px 12.5px, transparent 12.5px);
 }
 .legend .swatch.projection { width: 14px; height: 0; border-radius: 0; border-top: 2px dotted var(--text-primary); vertical-align: 3px; }
 .legend .muted { color: var(--text-tertiary); }
 .tooltip {
-  position: absolute; pointer-events: none; background: var(--floating-surface); border: 1px solid var(--border-color);
+  position: absolute; pointer-events: none; background-color: var(--floating-surface); border: 1px solid var(--border-color);
   border-radius: 10px; padding: 8px 10px; font-size: 12px; box-shadow: var(--floating-shadow); min-width: 200px; max-width: 300px; z-index: 5;
 }
 .tooltip .time { color: var(--text-tertiary); margin-bottom: 4px; font-family: var(--font-mono); }
@@ -387,13 +513,20 @@ td.actions { text-align: right; }
 .tooltip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tooltip .value { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
 .tooltip .note { color: var(--text-secondary); border-top: 1px solid var(--border-color); margin-top: 5px; padding-top: 5px; }
-.tooltip .note.failed { color: var(--viz-failure); }
+.tooltip .note.failed { color: var(--failure-text); }
 details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; margin-top: 10px; }
 
-/* Events: fixed columns so time, type, group and detail line up. */
-.events { display: flex; flex-direction: column; }
+/* Events: the rows share the columns of the list (subgrid), so time, type,
+   group and detail line up. The group column is as wide as its longest
+   name up to 220px, and the detail takes the rest. */
+.events {
+  display: grid; grid-template-columns: 92px var(--event-type-width, 86px) fit-content(220px) minmax(0, 1fr); column-gap: 12px;
+}
+.events > .empty { grid-column: 1 / -1; }
 .event-row {
-  display: grid; grid-template-columns: 92px var(--event-type-width, 86px) 132px minmax(0, 1fr); gap: 12px; align-items: center;
+  display: grid; grid-column: 1 / -1; column-gap: 12px; align-items: center;
+  grid-template-columns: 92px var(--event-type-width, 86px) 132px minmax(0, 1fr);
+  grid-template-columns: subgrid;
   padding: 8px 0; border-bottom: 1px solid var(--border-color); font-size: 13px;
 }
 /* English event types such as "Notification failed" need a wider column. */
@@ -407,23 +540,23 @@ html[lang="en"] { --event-type-width: 140px; }
 /* Notifications of an event, after its detail. */
 .event-mark {
   flex: none; padding: 0 6px; border-radius: 4px; font-size: 11px; line-height: 18px;
-  background: var(--bg-tertiary); color: var(--text-tertiary);
+  background-color: var(--bg-tertiary); color: var(--text-tertiary);
 }
-.event-mark.failed { background: color-mix(in srgb, var(--warning-text) 14%, transparent); color: var(--warning-text); }
+.event-mark.failed { background-color: var(--failure-badge-bg); color: var(--failure-text); }
 .event-link { flex: none; font-size: 12px; color: var(--text-secondary); text-decoration: underline; text-underline-offset: 2px; }
 .events-filter { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
 .events-filter input { margin: 0; }
 .events-more { margin-top: 8px; }
 
 /* Chart labels use the body font; numbers stay monospaced. */
-.chart-box .row-name { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-weight: 600; }
+.chart-box .row-name { font-family: var(--font); font-weight: 600; }
 
 /* Settings */
 #account-rows { position: relative; min-width: 760px; }
 .account-setting {
   display: grid; grid-template-columns: 10px 112px minmax(140px, 1fr) minmax(140px, 1fr) 148px;
   align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid transparent; border-bottom-color: var(--border-color);
-  background: var(--bg-primary);
+  background-color: var(--bg-primary);
 }
 .account-setting:last-child { border-bottom-color: transparent; }
 .account-identity { display: flex; flex-direction: column; min-width: 0; }
@@ -438,13 +571,13 @@ html[lang="en"] { --event-type-width: 140px; }
 .account-placeholder > * { visibility: hidden; }
 .account-setting.account-floating {
   position: fixed; z-index: 10; pointer-events: none; box-shadow: var(--floating-shadow);
-  border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-primary);
+  border: 1px solid var(--border-color); border-radius: 12px; background-color: var(--bg-primary);
 }
 #account-rows.sorting { cursor: grabbing; user-select: none; }
 #account-rows.sorting .drag-handle { cursor: grabbing; }
 form fieldset {
   border: 1px solid var(--border-color); border-radius: 10px; padding: 14px 16px 16px; margin: 0 0 14px;
-  background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+  background-color: var(--fieldset-bg);
   display: flex; flex-direction: column; gap: 14px; min-width: 0;
 }
 form legend { color: var(--text-primary); font-size: 13px; font-weight: 650; padding: 0 6px; max-width: 100%; }
@@ -471,7 +604,7 @@ details.advanced > summary { margin-top: 0; }
 .save-state[data-state="saved"]::before, .save-state[data-state="verified"]::before { content: "✓ "; }
 .save-state[data-state="unverified"] { color: var(--amber-text); }
 .save-state[data-state="waiting"] { color: var(--text-secondary); }
-.save-state[data-state="failed"] { color: var(--error-color); }
+.save-state[data-state="failed"] { color: var(--failure-text); }
 form [aria-invalid="true"] { border-color: var(--error-color); }
 form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-invalid="true"] { outline: 1px solid var(--error-color); outline-offset: 2px; }
 .mode-row { display: flex; flex-wrap: wrap; align-items: baseline; }
@@ -480,7 +613,7 @@ form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-
 .ignition-params.off > :not(.off-note) { opacity: 0.5; }
 .off-note {
   margin: 0; padding: 8px 12px; border-radius: 8px; font-size: 12.5px;
-  background: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border);
+  background-color: var(--amber-bg); color: var(--amber-text); border: 1px solid var(--amber-border);
 }
 .level-name { font-weight: 650; min-width: 2.5em; }
 .timezone-unsaved { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
@@ -490,13 +623,13 @@ form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-
 .key-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 34px; }
 .key-view {
   font-family: var(--font-mono); font-size: 12.5px; padding: 6px 10px; border-radius: 8px; min-width: 0;
-  background: var(--bg-tertiary); border: 1px solid var(--border-color); overflow-wrap: anywhere;
+  background-color: var(--bg-tertiary); border: 1px solid var(--border-color); overflow-wrap: anywhere;
 }
 .mcp-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
 .snippets { display: flex; flex-direction: column; gap: 10px; }
 .snippet-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .snippet pre {
-  margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  margin: 0; padding: 8px 10px; border-radius: 8px; background-color: var(--bg-tertiary); border: 1px solid var(--border-color);
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .copy-buffer { position: fixed; left: -9999px; top: 0; opacity: 0; }
@@ -504,7 +637,7 @@ form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-
 .test-results { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; min-width: 0; flex: 1; padding-top: 6px; }
 .test-results:empty { display: none; }
 .test-result { color: var(--text-primary); overflow-wrap: anywhere; }
-.test-result.failed { color: var(--error-color); }
+.test-result.failed { color: var(--failure-text); }
 .test-result .hint { display: block; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field-label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
@@ -521,13 +654,13 @@ form label.inline-input { flex-direction: row; align-items: center; gap: 6px; fo
    they paint above it. */
 .segmented, .mode-switch {
   position: relative; padding: 3px; border-radius: 9px;
-  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  background-color: var(--seg-track); border: 1px solid transparent;
 }
 .segmented { display: inline-flex; gap: 2px; }
 .mode-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .seg-thumb {
   position: absolute; left: 0; top: 0; width: var(--thumb-w, 0); height: var(--thumb-h, 0); border-radius: 6px;
-  background: var(--primary-color); box-shadow: var(--shadow);
+  background-color: var(--seg-thumb); box-shadow: var(--seg-edge);
   translate: var(--thumb-x, 0) var(--thumb-y, 0);
   transition: translate 480ms var(--ease-bounce), width 480ms var(--ease-bounce), height 480ms var(--ease-bounce);
 }
@@ -544,8 +677,8 @@ form label.mode-option {
   font-size: 12.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; transition: color 200ms ease;
 }
 .mode-option input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
-.mode-option:has(input:checked) { color: var(--primary-contrast); }
-.mode-option:has(input:focus-visible) { box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 25%, transparent); }
+.mode-option:has(input:checked) { color: var(--text-primary); }
+.mode-option:has(input:focus-visible) { box-shadow: 0 0 0 3px var(--focus-ring); }
 .mode-option span { display: inline-block; transition: scale 300ms var(--ease-bounce); }
 .mode-option:has(input:checked) span { scale: 1.06; }
 .mode-option:active span { scale: 0.92; }
@@ -553,7 +686,7 @@ form label.mode-option {
   position: relative; font: inherit; font-size: 12.5px; font-weight: 600; padding: 4px 12px; border-radius: 6px; border: 0; cursor: pointer;
   background: transparent; color: var(--text-secondary); transition: color 200ms ease, scale 300ms var(--ease-bounce);
 }
-.seg[aria-pressed="true"] { color: var(--primary-contrast); scale: 1.06; }
+.seg[aria-pressed="true"] { color: var(--text-primary); scale: 1.06; }
 .seg:active:not([aria-pressed="true"]) { scale: 0.92; }
 .hint, form .hint { font-size: 12px; font-weight: 400; color: var(--text-tertiary); margin: 0; }
 table.services th, table.services td { padding: 8px 10px; }
@@ -572,10 +705,11 @@ table.services .sub-row td { border-bottom: none; padding-top: 4px; text-align: 
 #key-section input { flex: 1; }
 
 .toast {
-  position: fixed; right: 20px; bottom: 20px; background: var(--floating-surface); color: var(--text-primary);
+  position: fixed; right: 20px; bottom: 20px; background-color: var(--floating-surface); color: var(--text-primary);
   border: 1px solid var(--border-color); box-shadow: var(--floating-shadow);
   padding: 9px 14px; border-radius: 10px; font-size: 13px; max-width: 420px; z-index: 10;
 }
+.toast-address { display: block; width: 100%; margin-top: 6px; font-family: var(--font-mono); font-size: 12px; }
 
 @media (max-width: 640px) {
   .settings-section > .card-title > :first-child, form legend > :first-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -590,7 +724,8 @@ table.services .sub-row td { border-bottom: none; padding-top: 4px; text-align: 
   .notify-modes .mode-corner { display: none; }
   .notify-modes .mode-row { grid-column: 1 / -1; margin-top: 4px; }
   form label.mode-option { padding: 4px 2px; }
-  .event-row { grid-template-columns: 82px minmax(0, 1fr); }
+  .events, .event-row { grid-template-columns: 82px minmax(0, 1fr); }
+  .event-row { grid-template-columns: subgrid; row-gap: 4px; }
   .event-label, .event-detail { grid-column: 2; }
   .event-detail { flex-wrap: wrap; }
   .event-text { white-space: normal; overflow-wrap: anywhere; }
