@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // commandTimeout bounds how long a management request waits for the loop.
@@ -34,7 +34,7 @@ type Event struct {
 	Detail string `json:"detail,omitempty"`
 	// Params holds the values of the event, such as the model or the retry
 	// delay, so the page can write the event in its own language. Message
-	// and Detail stay in Chinese for the CPA log and older events.
+	// and Detail stay in Chinese for the log and older events.
 	Params map[string]string `json:"params,omitempty"`
 	// Account is the auth index of the account an account event concerns.
 	// It is internal: MCP maps it to the current account label, and Group
@@ -46,7 +46,7 @@ func (e *Engine) addEvent(level, kind, group, message string) {
 	e.addEventDetail(level, kind, group, "", message, message, nil)
 }
 
-// addEventDetail records an event. message is the full text for the CPA log;
+// addEventDetail records an event. message is the full text for the log;
 // label and detail are the quota group and a short description for the page,
 // which shows the event type separately.
 func (e *Engine) addEventDetail(level, kind, group, label, detail, message string, params map[string]string) {
@@ -113,7 +113,7 @@ type commandReply struct {
 }
 
 // ErrNotRunning means the background loop has not started yet.
-var ErrNotRunning = errors.New("Lamplighter 尚未就绪：CPA 启动后约 20 秒开始运行，或插件已在配置中停用")
+var ErrNotRunning = errors.New("Lamplighter 尚未就绪：启动后约 5 秒开始运行")
 
 func (e *Engine) send(kind, arg string) error {
 	return e.dispatch(kind, arg).err
@@ -122,7 +122,7 @@ func (e *Engine) send(kind, arg string) error {
 // dispatch hands a command to the loop and waits for its reply.
 func (e *Engine) dispatch(kind, arg string) commandReply {
 	e.mu.Lock()
-	ready := e.running && e.enabled
+	ready := e.running
 	e.mu.Unlock()
 	if !ready {
 		return commandReply{err: ErrNotRunning}
@@ -307,14 +307,10 @@ type AccountStatus struct {
 	Title     string `json:"title"`
 	Email     string `json:"email,omitempty"`
 	Name      string `json:"name"`
-	// Note is the CPA credential note, whose first line names the account.
-	Note        string `json:"note,omitempty"`
-	Unavailable bool   `json:"unavailable"`
-	// CooldownUntil is when CPA ends its cooldown of the account.
-	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
-	// StaleCooldown is true when the cooldown outlasts a recovered quota.
-	StaleCooldown bool   `json:"stale_cooldown,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// Note is the account name from account_names, else Magpie's label
+	// when it is not the email.
+	Note  string `json:"note,omitempty"`
+	Error string `json:"error,omitempty"`
 	// CredentialProblem is "auth" when the provider rejects the credential
 	// and "suspended" when it disabled the account, see
 	// store.CredentialState; empty otherwise.
@@ -333,7 +329,6 @@ type Status struct {
 	MCP                mcp.State `json:"mcp"`
 	Version            string    `json:"version"`
 	Running            bool      `json:"running"`
-	Enabled            bool      `json:"enabled"`
 	ConfigError        string    `json:"config_error,omitempty"`
 	LockError          string    `json:"lock_error,omitempty"`
 	ModelsError        string    `json:"models_error,omitempty"`
@@ -405,12 +400,11 @@ func (e *Engine) Status() Status {
 	cfg := e.cfg
 	cfg.MCPKeySet = cfg.MCPKey != ""
 	cfg.MCPKey = ""
+	cfg.AdminKeySet = cfg.AdminKey != ""
+	cfg.AdminKey = ""
 	cfg.AccountOrder = append([]string(nil), cfg.AccountOrder...)
 	if cfg.BarkURL != "" {
 		cfg.BarkURL = "已设置"
-	}
-	if cfg.ModelsAPIKey != "" {
-		cfg.ModelsAPIKey = "已设置"
 	}
 	// The webhook URL, headers and body can hold tokens and topic names.
 	if cfg.Webhook.URL != "" {
@@ -430,7 +424,6 @@ func (e *Engine) Status() Status {
 		ConfigAppliedToken: e.configAppliedToken,
 		Version:            e.version,
 		Running:            e.running,
-		Enabled:            e.enabled,
 		ConfigError:        e.cfgErr,
 		LockError:          e.lockErr,
 		ModelsError:        e.modelsErr,
@@ -479,14 +472,13 @@ func (e *Engine) Status() Status {
 	})
 	for _, cred := range creds {
 		account := AccountStatus{
-			AuthIndex:   cred.AuthIndex,
-			Provider:    cred.Provider,
-			Title:       labelFor(providers.Title(cred.Provider), cred),
-			Email:       cred.Email,
-			Name:        cred.Name,
-			Note:        cred.Note,
-			Unavailable: cred.Unavailable,
-			Error:       e.pollErrs[cred.AuthIndex],
+			AuthIndex: cred.AuthIndex,
+			Provider:  cred.Provider,
+			Title:     labelFor(providers.Title(cred.Provider), cred),
+			Email:     cred.Email,
+			Name:      cred.Name,
+			Note:      cred.Note,
+			Error:     e.pollErrs[cred.AuthIndex],
 
 			CredentialProblem: e.credProblems[cred.AuthIndex],
 		}
@@ -504,10 +496,6 @@ func (e *Engine) Status() Status {
 			}
 			return groups[i].Key < groups[j].Key
 		})
-		if now := e.now(); cred.CooldownUntil.After(now) {
-			account.CooldownUntil = cred.CooldownUntil
-			account.StaleCooldown = staleCooldown(cred, groups, now)
-		}
 		for _, group := range groups {
 			gs := GroupStatus{Key: group.Key, Label: group.Label, SourceLabel: group.SourceLabel}
 			for _, w := range group.Windows {

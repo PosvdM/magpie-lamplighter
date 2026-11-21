@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // scanWatchContext 在真实历史扫描反复检查取消时发出信号，不替代历史后端。

@@ -4,6 +4,9 @@
 
 [English](./README_EN.md)
 
+> [!NOTE]
+> 本仓库是 Lamplighter 的 Magpie 版（npm 包 `magpie-lamplighter`），v0.1.0 正在开发，尚未发布。下文仍是 CLIProxyAPI 版 [cpa-plugin-lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter) 的说明，发布前改写。当前的实现见 [架构](./docs/architecture.md) 和 [开发](./docs/development.md)。
+
 > 当他点燃路灯时，就像他又创造了一颗星星，或者一朵花——《小王子》
 >
 > 点灯人的星球每分钟转一圈，他就每分钟点一次灯、熄一次灯，从不误点。Lamplighter 做的也是按时点灯：每个 5 小时额度窗口一重置，就点亮下一个窗口。

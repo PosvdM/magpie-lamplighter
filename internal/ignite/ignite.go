@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // Some providers report an unstarted 5-hour window as a rolling placeholder:

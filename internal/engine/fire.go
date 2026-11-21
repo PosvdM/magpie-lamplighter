@@ -8,18 +8,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // maxCandidates limits how many models one ignition tries.
 const maxCandidates = 6
+
+// exhaustedWindow returns a window of the group other than the 5-hour one
+// that is used up and has not reset yet. While it lasts, every request on
+// the account is rejected, so ignition waits for it.
+func exhaustedWindow(g GroupView, now time.Time) (WindowView, bool) {
+	for _, w := range g.Windows {
+		if quota.IsFiveHour(w.Window) {
+			continue
+		}
+		if w.Remaining <= notify.ExhaustedRemaining && (w.Reset.IsZero() || w.Reset.After(now)) {
+			return w, true
+		}
+	}
+	return WindowView{}, false
+}
 
 // TargetView is the ignition status of one quota group.
 type TargetView struct {
@@ -230,7 +244,7 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// new login the request did not use. See noteFingerprint.
 	fingerprint := ""
 	if !manual {
-		fingerprint = e.credentialFingerprint(t.cred)
+		fingerprint = e.credentialFingerprint(ctx, t.cred)
 	}
 
 	model, resp, err := e.execute(ctx, cfg, t)
@@ -341,13 +355,13 @@ func (e *Engine) group(key string) (GroupView, bool) {
 // execute sends the ignition request with the newest candidate model. It
 // tries the next candidate when CPA rejects a model for the pinned
 // credential, and once per ignition when the provider refuses a model.
-func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, pluginapi.HostModelExecutionResponse, error) {
-	var empty pluginapi.HostModelExecutionResponse
+func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (string, host.ModelResponse, error) {
+	var empty host.ModelResponse
 	spec := providers.Lookup(t.group.Provider)
 	override := configuredModel(cfg, t.group.Provider, t.group.SourceLabel)
 	ts := e.state.Target(t.group.Key)
 
-	available, err := e.lister.List(ctx, cfg.CPABaseURL, cfg.ModelsAPIKey)
+	available, err := e.lister.List(ctx, e.host.Models)
 	e.noteModels(available, err)
 	var candidates []string
 	switch {
@@ -381,18 +395,11 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target) (stri
 		if err != nil {
 			return "", empty, err
 		}
-		forced := t.cred.HostProvider
-		if forced == "" {
-			forced = t.group.Provider
-		}
-		resp, err := e.executeStream(ctx, t, pluginapi.HostModelExecutionRequest{
-			EntryProtocol:  protocol,
-			ExitProtocol:   protocol,
-			Model:          model,
-			Stream:         true,
-			Body:           body,
-			ForcedProvider: forced,
-			AuthID:         t.cred.ID,
+		resp, err := e.executeStream(ctx, t, host.ModelRequest{
+			Account:  t.cred.AuthIndex,
+			Protocol: protocol,
+			Model:    model,
+			Body:     body,
 		}, ignitionOutputWindow)
 		if err == nil {
 			if refused != "" {
@@ -469,28 +476,16 @@ func (e *Engine) skipRefused(key string, candidates []string) []string {
 	return out
 }
 
-// maybeReadModels reads the CPA model list after a start and after a change
-// of the CPA address or models key, so that the settings show the next
-// automatic model without waiting for an ignition. Otherwise the list is only
-// read for an ignition. A failed read is retried with the next poll.
-func (e *Engine) maybeReadModels(ctx context.Context, cfg config.Config, pollDue bool) {
-	source := ""
-	if cfg.ModelsAPIKey != "" {
-		source = cfg.CPABaseURL + "\x00" + cfg.ModelsAPIKey
-	}
-	if source != e.modelsSource {
-		// Models and errors of another CPA or key do not describe the next
-		// ignition.
-		e.modelsSource, e.modelsTried, e.modelsOK = source, false, false
-		e.mu.Lock()
-		e.nextModels, e.modelsErr = nil, ""
-		e.mu.Unlock()
-	}
-	if source == "" || e.modelsOK || (e.modelsTried && !pollDue) {
+// maybeReadModels reads the model list after a start, so that the settings
+// show the next automatic model without waiting for an ignition. Otherwise
+// the list is only read for an ignition. A failed read is retried with the
+// next poll.
+func (e *Engine) maybeReadModels(ctx context.Context, pollDue bool) {
+	if e.modelsOK || (e.modelsTried && !pollDue) {
 		return
 	}
 	e.modelsTried = true
-	available, err := e.lister.List(ctx, cfg.CPABaseURL, cfg.ModelsAPIKey)
+	available, err := e.lister.List(ctx, e.host.Models)
 	e.noteModels(available, err)
 	e.modelsOK = err == nil
 }
@@ -545,10 +540,10 @@ func (e *Engine) confirmed(key string, start, now time.Time) bool {
 // of the same request. When neither arrives, and for providers without quota
 // in their headers, the credential is queried actively. The queries of a
 // manual ignition leave the credential state alone, like its failure.
-func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start time.Time, resp pluginapi.HostModelExecutionResponse, manual bool) error {
+func (e *Engine) confirm(ctx context.Context, cfg config.Config, t target, start time.Time, resp host.ModelResponse, manual bool) error {
 	var groups []quota.RawGroup
 	if spec := providers.Lookup(t.group.Provider); spec != nil && spec.Headers != nil {
-		groups = spec.Headers(resp.Headers, e.now())
+		groups = spec.Headers(resp.Header, e.now())
 	}
 	if len(groups) > 0 {
 		now := e.now()

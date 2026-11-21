@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 )
 
 func TestConfigAppliedTokenWaitsForRuntimeAndMCP(t *testing.T) {
@@ -117,10 +117,10 @@ func TestMCPOnlyConfigAdvancesTokenAndRotatesAuthentication(t *testing.T) {
 	server := mcp.New(NewMCPBackend(e), "test")
 	defer server.Close()
 	cfg := config.Default()
-	cfg.MCPEnabled, cfg.MCPListen, cfg.MCPKey, cfg.ConfigToken = true, freeMCPAddress(t), "old-key", "old"
+	cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey, cfg.ConfigToken = true, freeMCPAddress(t), "old-key", "old"
 	configure := func() {
 		rev := e.Configure(cfg, nil)
-		server.Configure(cfg.MCPEnabled, cfg.MCPListen, cfg.MCPKey)
+		server.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
 		e.MCPConfigured(rev)
 	}
 	configure()
@@ -139,7 +139,7 @@ func TestMCPOnlyConfigAdvancesTokenAndRotatesAuthentication(t *testing.T) {
 		key    string
 		status int
 	}{{"old-key", 401}, {"new-key", 200}} {
-		req, _ := http.NewRequestWithContext(context.Background(), "POST", "http://"+cfg.MCPListen+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		req, _ := http.NewRequestWithContext(context.Background(), "POST", "http://"+cfg.PublicListen+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+tc.key)
 		resp, err := http.DefaultClient.Do(req)

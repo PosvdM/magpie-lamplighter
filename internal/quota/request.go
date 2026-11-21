@@ -28,10 +28,10 @@ type Doer interface {
 	Do(ctx context.Context, proxyURL string, req Request) (Response, error)
 }
 
-// ErrUnauthorized means the upstream rejected the access token. CPA refreshes
-// tokens in the background, so the caller skips this round. An HTTPError
+// ErrUnauthorized means the upstream rejected the access token. Magpie or the
+// agent CLI that owns the token refreshes it, so the caller skips this round. An HTTPError
 // with status 401 matches it in errors.Is and keeps the response.
-var ErrUnauthorized = errors.New("上游返回 401，access token 可能刚过期，等待 CPA 刷新")
+var ErrUnauthorized = errors.New("上游返回 401，access token 可能刚过期，等待 Magpie 刷新")
 
 // errorTextLength is how much of an error response Error includes; the text
 // is shown on the management page.

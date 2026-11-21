@@ -1,4 +1,5 @@
-// Package config parses the plugins.configs.lamplighter subtree of the CPA config.
+// Package config parses the Lamplighter configuration and keeps it in a
+// file in the data directory; see Store.
 package config
 
 import (
@@ -12,19 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"gopkg.in/yaml.v3"
 )
 
-// PluginID is the CPA plugin ID and the key under plugins.configs.
+// PluginID is the plugin name: the npm package is magpie-lamplighter, and
+// the data directory and log lines use this name.
 const PluginID = "lamplighter"
 
 // DefaultBarkIcon is the Lamplighter logo.
-const DefaultBarkIcon = "https://raw.githubusercontent.com/PosvdM/cpa-plugin-lamplighter/main/assets/logo.png"
-
-// oldBarkIcon is the CPA Management Center logo, the default before v0.1.17.
-// Saved configs that still hold it get the new default.
-const oldBarkIcon = "https://raw.githubusercontent.com/router-for-me/Cli-Proxy-API-Management-Center/main/logo.jpg"
+const DefaultBarkIcon = "https://raw.githubusercontent.com/PosvdM/magpie-lamplighter/main/assets/logo.png"
 
 // Provider holds the per-provider monitoring and ignition switches.
 type Provider struct {
@@ -118,14 +116,9 @@ type Config struct {
 	// RecoveryNotify and ResetReminder hold one mode per window kind.
 	RecoveryNotify WindowModes `yaml:"recovery_notify" json:"recovery_notify"`
 	ResetReminder  WindowModes `yaml:"reset_reminder" json:"reset_reminder"`
-	// LegacyNotifyRecovery and LegacyResetReminders are the switches that
-	// RecoveryNotify and ResetReminder replace. Parse maps them when the new
-	// key is absent.
-	LegacyNotifyRecovery *bool `yaml:"notify_recovery,omitempty" json:"-"`
-	LegacyResetReminders *bool `yaml:"notify_reset_reminders,omitempty" json:"-"`
 	// Timezone is an IANA name such as Asia/Shanghai. When both Timezone and
-	// TimezoneOffsetHours are empty, the plugin uses the time zone of the CPA
-	// process.
+	// TimezoneOffsetHours are empty, the plugin uses the time zone of its
+	// process, which is UTC in Magpie's Docker image.
 	Timezone            string   `yaml:"timezone" json:"timezone"`
 	TimezoneOffsetHours *float64 `yaml:"timezone_offset_hours,omitempty" json:"timezone_offset_hours,omitempty"`
 
@@ -134,11 +127,18 @@ type Config struct {
 	PassiveSkipSeconds    int `yaml:"passive_skip_seconds" json:"passive_skip_seconds"`
 	PassiveSkipMaxMinutes int `yaml:"passive_skip_max_minutes" json:"passive_skip_max_minutes"`
 
-	CPABaseURL   string `yaml:"cpa_base_url" json:"cpa_base_url"`
-	ModelsAPIKey string `yaml:"models_api_key" json:"models_api_key"`
-
+	// PublicListen is the address of the public listener, which serves the
+	// page and API when WebEnabled and /mcp when MCPEnabled. It runs when
+	// either is on. The internal listener, on loopback for Magpie, is set
+	// on the command line instead.
+	PublicListen string `yaml:"public_listen" json:"public_listen"`
+	// WebEnabled serves the page and API on the public listener, behind
+	// AdminKey; an empty AdminKey keeps them off.
+	WebEnabled  bool   `yaml:"web_enabled" json:"web_enabled"`
+	AdminKey    string `yaml:"admin_key" json:"admin_key,omitempty"`
+	AdminKeySet bool   `yaml:"-" json:"admin_key_set"`
+	// MCPEnabled serves /mcp on the public listener, behind MCPKey.
 	MCPEnabled bool   `yaml:"mcp_enabled" json:"mcp_enabled"`
-	MCPListen  string `yaml:"mcp_listen" json:"mcp_listen"`
 	MCPKey     string `yaml:"mcp_key" json:"mcp_key,omitempty"`
 	MCPKeySet  bool   `yaml:"-" json:"mcp_key_set"`
 
@@ -146,19 +146,21 @@ type Config struct {
 	Providers         map[string]Provider `yaml:"providers" json:"providers"`
 	CodexResetUpdates CodexResetUpdates   `yaml:"codex_reset_updates" json:"codex_reset_updates"`
 
-	HistoryRetentionDays int    `yaml:"history_retention_days" json:"history_retention_days"`
-	DataDir              string `yaml:"data_dir" json:"data_dir"`
+	HistoryRetentionDays int `yaml:"history_retention_days" json:"history_retention_days"`
 
 	// RememberChartFilters makes the page keep the chart filters in the
 	// browser and restore them when it opens.
 	RememberChartFilters bool `yaml:"remember_chart_filters" json:"remember_chart_filters"`
 
-	// AccountWeights maps a credential file name to the weight of the account
-	// in the total of several accounts on the page. Accounts without one use
+	// AccountNames maps an account pin to the name Lamplighter shows for
+	// it. Magpie has no way for a plugin to rename an account.
+	AccountNames map[string]string `yaml:"account_names,omitempty" json:"account_names,omitempty"`
+	// AccountWeights maps an account pin to the weight of the account in
+	// the total of several accounts on the page. Accounts without one use
 	// the default of their plan.
 	AccountWeights map[string]float64 `yaml:"account_weights,omitempty" json:"account_weights,omitempty"`
-	// AccountOrder lists credential file names in display order. Accounts
-	// absent from the list follow the provider and account-name order.
+	// AccountOrder lists account pins in display order. Accounts absent
+	// from the list follow the provider and account-name order.
 	AccountOrder []string `yaml:"account_order" json:"account_order"`
 }
 
@@ -182,7 +184,7 @@ func Default() Config {
 		defaults[id] = DefaultProvider(id)
 	}
 	return Config{
-		BarkGroup:             "CPA",
+		BarkGroup:             "Magpie",
 		BarkIcon:              DefaultBarkIcon,
 		NoticeThreshold:       50,
 		LowThreshold:          20,
@@ -193,8 +195,7 @@ func Default() Config {
 		RequestTimeoutSeconds: 20,
 		PassiveSkipSeconds:    60,
 		PassiveSkipMaxMinutes: 30,
-		CPABaseURL:            "http://127.0.0.1:8317",
-		MCPListen:             "127.0.0.1:8318",
+		PublicListen:          "127.0.0.1:8318",
 		Ignition: Ignition{
 			Enabled:                  true,
 			StartHour:                7,
@@ -216,8 +217,8 @@ func Default() Config {
 	}
 }
 
-// Parse reads the plugin YAML subtree on top of the defaults. Keys that CPA
-// owns, such as enabled and priority, are ignored.
+// Parse reads a configuration in YAML or JSON on top of the defaults.
+// Unknown keys are ignored.
 func Parse(raw []byte) (Config, error) {
 	cfg := Default()
 	if len(strings.TrimSpace(string(raw))) > 0 {
@@ -225,24 +226,10 @@ func Parse(raw []byte) (Config, error) {
 			return Default(), fmt.Errorf("parse plugin config: %w", err)
 		}
 		var overlay struct {
-			Providers      map[string]yaml.Node `yaml:"providers"`
-			RecoveryNotify *yaml.Node           `yaml:"recovery_notify"`
-			ResetReminder  *yaml.Node           `yaml:"reset_reminder"`
+			Providers map[string]yaml.Node `yaml:"providers"`
 		}
 		if err := yaml.Unmarshal(raw, &overlay); err != nil {
 			return Default(), fmt.Errorf("parse plugin config: %w", err)
-		}
-		if overlay.RecoveryNotify == nil && cfg.LegacyNotifyRecovery != nil {
-			cfg.RecoveryNotify = WindowModes{FiveHour: RecoveryOff, SevenDay: RecoveryOff}
-			if *cfg.LegacyNotifyRecovery {
-				cfg.RecoveryNotify = WindowModes{FiveHour: RecoveryAll, SevenDay: RecoveryAll}
-			}
-		}
-		if overlay.ResetReminder == nil && cfg.LegacyResetReminders != nil {
-			cfg.ResetReminder = WindowModes{FiveHour: ReminderOff, SevenDay: ReminderOff}
-			if *cfg.LegacyResetReminders {
-				cfg.ResetReminder = WindowModes{FiveHour: ReminderAll, SevenDay: ReminderAll}
-			}
 		}
 		// Each provider block starts from its own defaults so that a partial
 		// block such as {ignite: true} keeps the other keys.
@@ -311,23 +298,17 @@ func (c *Config) normalize() {
 	c.BarkURL = strings.TrimRight(strings.TrimSpace(c.BarkURL), "/")
 	c.BarkGroup = strings.TrimSpace(c.BarkGroup)
 	c.BarkIcon = strings.TrimSpace(c.BarkIcon)
-	if c.BarkIcon == oldBarkIcon {
-		c.BarkIcon = DefaultBarkIcon
-	}
 	c.Webhook.URL = strings.TrimSpace(c.Webhook.URL)
 	c.Webhook.Method = strings.ToUpper(strings.TrimSpace(c.Webhook.Method))
 	if c.Webhook.Method == "" {
 		c.Webhook.Method = "POST"
 	}
-	c.CPABaseURL = strings.TrimRight(strings.TrimSpace(c.CPABaseURL), "/")
-	if c.CPABaseURL == "" {
-		c.CPABaseURL = "http://127.0.0.1:8317"
+	c.PublicListen = strings.TrimSpace(c.PublicListen)
+	if c.PublicListen == "" {
+		c.PublicListen = "127.0.0.1:8318"
 	}
-	c.ModelsAPIKey = strings.TrimSpace(c.ModelsAPIKey)
-	c.MCPListen = strings.TrimSpace(c.MCPListen)
-	if c.MCPListen == "" {
-		c.MCPListen = "127.0.0.1:8318"
-	}
+	c.AdminKey = strings.TrimSpace(c.AdminKey)
+	c.AdminKeySet = false
 	c.MCPKey = strings.TrimSpace(c.MCPKey)
 	c.MCPKeySet = false
 	before := [3]float64{c.NoticeThreshold, c.LowThreshold, c.CriticalThreshold}
@@ -344,7 +325,6 @@ func (c *Config) normalize() {
 	if before != after {
 		log.Printf("lamplighter: normalized notice/low/critical thresholds from %v to %v", before, after)
 	}
-	c.DataDir = strings.TrimSpace(c.DataDir)
 	c.Timezone = strings.TrimSpace(c.Timezone)
 	if c.TimezoneOffsetHours != nil && (*c.TimezoneOffsetHours < -14 || *c.TimezoneOffsetHours > 14) {
 		c.TimezoneOffsetHours = nil
@@ -371,6 +351,13 @@ func (c *Config) normalize() {
 		provider.Model = strings.TrimSpace(provider.Model)
 		c.Providers[name] = provider
 	}
+	for pin, name := range c.AccountNames {
+		if name = strings.TrimSpace(name); name == "" {
+			delete(c.AccountNames, pin)
+		} else {
+			c.AccountNames[pin] = name
+		}
+	}
 	// A weight must be a positive finite number; others are dropped, so the
 	// account uses the default of its plan.
 	for name, weight := range c.AccountWeights {
@@ -382,7 +369,7 @@ func (c *Config) normalize() {
 
 // Location returns the time zone used for display and the ignition window:
 // timezone when set, then timezone_offset_hours, then the time zone of the
-// CPA process (the official Docker image sets it from TZ).
+// process.
 func (c Config) Location() *time.Location {
 	if c.Timezone != "" {
 		if loc, err := time.LoadLocation(c.Timezone); err == nil {

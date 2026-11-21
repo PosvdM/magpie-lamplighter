@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // Sources of a credential problem, the source param of its events.
@@ -127,14 +127,14 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 	e.logf("info", "%s 的凭证已更新，恢复自动点火", accountLabel(cred))
 }
 
-// credentialFingerprint reads the fingerprint of cred's credential file, ""
+// credentialFingerprint reads the fingerprint of cred's credential, ""
 // when it cannot be read.
-func (e *Engine) credentialFingerprint(cred *Cred) string {
-	raw, err := e.host.AuthGet(cred.AuthIndex)
+func (e *Engine) credentialFingerprint(ctx context.Context, cred *Cred) string {
+	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
 		return ""
 	}
-	return providers.Fingerprint(raw)
+	return credential.Fingerprint
 }
 
 // noteQueryFailure handles a failed quota query of cred. A suspended account

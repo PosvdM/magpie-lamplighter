@@ -9,28 +9,28 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
-func TestStatusAccountOrderUsesCredentialFileNames(t *testing.T) {
+func TestStatusAccountOrderUsesPins(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	e, _ := newTestEngine(t, standardHost(c), c)
-	if _, err := e.loadCreds(e.config()); err != nil {
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
 		t.Fatal(err)
 	}
-	// The credential ID and auth index must not act as account_order keys.
+	// The runtime ID must not act as an account_order key; the pin does.
 	e.creds["1"].ID = "different-id"
 	for _, tc := range []struct {
 		name  string
 		order []string
 		want  []string
 	}{
-		{"default", nil, []string{"codex-b.json", "codex-a.json", "claude.json", "ag.json"}},
-		{"cross provider", []string{"ag.json", "codex-a.json"}, []string{"ag.json", "codex-a.json", "codex-b.json", "claude.json"}},
-		{"unknown and duplicate", []string{"missing.json", "claude.json", "codex-a.json", "claude.json", "codex-b.json"}, []string{"claude.json", "codex-a.json", "codex-b.json", "ag.json"}},
-		{"not ID or index", []string{"different-id", "1"}, []string{"codex-b.json", "codex-a.json", "claude.json", "ag.json"}},
+		{"default", nil, []string{"2", "1", "3", "4"}},
+		{"cross provider", []string{"4", "1"}, []string{"4", "1", "2", "3"}},
+		{"unknown and duplicate", []string{"missing", "3", "1", "3", "2"}, []string{"3", "1", "2", "4"}},
+		{"not ID", []string{"different-id"}, []string{"2", "1", "3", "4"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := e.config()
@@ -87,7 +87,7 @@ func TestActiveWindowDisappearanceAndReturn(t *testing.T) {
 				cfg.RecoveryNotify = config.WindowModes{FiveHour: config.RecoveryAll, SevenDay: config.RecoveryAll}
 				cfg.ResetReminder = config.WindowModes{FiveHour: config.ReminderAll, SevenDay: config.ReminderAll}
 				e.alerts.Cfg = cfg
-				if _, err := e.loadCreds(cfg); err != nil {
+				if _, err := e.loadCreds(context.Background(), cfg); err != nil {
 					t.Fatal(err)
 				}
 				cred := e.creds["1"]

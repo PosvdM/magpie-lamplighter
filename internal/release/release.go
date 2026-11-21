@@ -14,7 +14,7 @@ import (
 
 // LatestURL is the GitHub API address of the latest published release.
 // Drafts and prereleases are not returned by this endpoint.
-var LatestURL = "https://api.github.com/repos/PosvdM/cpa-plugin-lamplighter/releases/latest"
+var LatestURL = "https://api.github.com/repos/PosvdM/magpie-lamplighter/releases/latest"
 
 // Release is a published release.
 type Release struct {

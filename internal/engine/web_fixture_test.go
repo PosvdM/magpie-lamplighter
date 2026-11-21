@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/mcp"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,7 +41,7 @@ func TestWebPreviewFixture(t *testing.T) {
 	}
 	cfg := parse()
 	e.Configure(cfg, nil)
-	if _, err := e.loadCreds(cfg); err != nil {
+	if _, err := e.loadCreds(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i <= 72; i++ {
@@ -78,7 +78,7 @@ func TestWebPreviewFixture(t *testing.T) {
 		t.Helper()
 		cfg := parse()
 		e.Configure(cfg, nil)
-		listener.Configure(cfg.MCPEnabled, cfg.MCPListen, cfg.MCPKey)
+		listener.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
 		status := e.Status()
 		status.MCP = listener.State()
 		if status.Config.Webhook.URL != "" || status.Config.BarkURL != "已设置" || status.Config.MCPKey != "" {

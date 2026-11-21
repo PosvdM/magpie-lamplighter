@@ -5,20 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
+
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // Cred is one monitored credential.
@@ -27,17 +27,13 @@ type Cred struct {
 	AuthIndex string `json:"auth_index"`
 	Name      string `json:"name"`
 	Provider  string `json:"provider"`
-	// HostProvider is the provider name CPA reports, which can be an alias
-	// of Provider, such as "kimi-ai" for "kimi".
+	// HostProvider is Magpie's provider id, which can be an alias of
+	// Provider.
 	HostProvider string `json:"host_provider,omitempty"`
 	Email        string `json:"email,omitempty"`
 	Disabled     bool   `json:"disabled"`
-	Unavailable  bool   `json:"unavailable"`
-	// CooldownUntil is when CPA lets the credential serve requests again,
-	// or zero when it is not cooling down.
-	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
-	// Note is the credential note set in CPA. Its first line names the
-	// account.
+	// Note names the account: account_names, else Magpie's label when it
+	// is not the email.
 	Note string `json:"note,omitempty"`
 	// Suffix tells accounts apart: "#" and the account name, such as
 	// "#主力号", or the masked email of an unnamed account, such as "#rk".
@@ -84,10 +80,10 @@ func (g *GroupView) fiveHour() (WindowView, bool) {
 	return WindowView{}, false
 }
 
+// usageEvent is a passive reading of the account authIndex taken at at.
 type usageEvent struct {
-	provider  string
 	authIndex string
-	header    http.Header
+	groups    []quota.RawGroup
 	at        time.Time
 }
 
@@ -97,25 +93,46 @@ type sampleMark struct {
 	reset     int64
 }
 
-// ObserveUsage receives a usage record from usage.handle. It only parses the
-// record and queues it, so the host call returns immediately.
-func (e *Engine) ObserveUsage(record pluginapi.UsageRecord) {
-	p := providers.Lookup(record.Provider)
-	if p == nil || p.Headers == nil {
+// ObservePassive queues a passive reading of one account: groups read
+// from Magpie's kept quota, or from the rate-limit headers of a response, at
+// the time at. It returns at once; the loop applies the reading.
+func (e *Engine) ObservePassive(pin string, groups []quota.RawGroup, at time.Time) {
+	pin = strings.TrimSpace(pin)
+	if pin == "" || len(groups) == 0 {
 		return
 	}
-	authIndex := strings.TrimSpace(record.AuthIndex)
-	if authIndex == "" || len(record.ResponseHeaders) == 0 {
-		return
-	}
-	at := record.RequestedAt
 	if at.IsZero() {
 		at = e.now()
 	}
 	select {
-	case e.usageCh <- usageEvent{provider: p.ID, authIndex: authIndex, header: record.ResponseHeaders, at: at}:
+	case e.usageCh <- usageEvent{authIndex: pin, groups: groups, at: at}:
 	default:
 		// The loop is busy; dropping one passive sample is harmless.
+	}
+}
+
+// pollKept reads Magpie's kept quotas and applies each account's reading
+// that is newer than the last one applied. Magpie updates them from the
+// rate-limit data of the requests it serves, so they are this plugin's
+// passive data.
+func (e *Engine) pollKept(ctx context.Context) {
+	kept, err := e.host.KeptQuotas(ctx)
+	if err != nil {
+		e.logf("debug", "读取 Magpie 额度记录失败：%v", err)
+		return
+	}
+	e.mu.Lock()
+	known := make(map[string]bool, len(e.creds))
+	for pin := range e.creds {
+		known[pin] = true
+	}
+	e.mu.Unlock()
+	for _, k := range kept {
+		if !known[k.Pin] || k.ReadAt.IsZero() || !k.ReadAt.After(e.keptAt[k.Pin]) {
+			continue
+		}
+		e.keptAt[k.Pin] = k.ReadAt
+		e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt})
 	}
 }
 
@@ -132,16 +149,14 @@ func (e *Engine) drainUsage(ctx context.Context) {
 
 func (e *Engine) applyUsage(ctx context.Context, ev usageEvent) {
 	now := e.now()
-	// Relative reset times count from the request, not from when the usage
-	// record is processed; a long request delivers its record late.
-	groups := providers.Lookup(ev.provider).Headers(ev.header, ev.at)
+	groups := ev.groups
 	if len(groups) == 0 {
 		return
 	}
 	e.mu.Lock()
 	cred := e.creds[ev.authIndex]
 	e.mu.Unlock()
-	if cred == nil || cred.Provider != ev.provider {
+	if cred == nil {
 		return
 	}
 	cfg := e.config()
@@ -175,20 +190,6 @@ func (e *Engine) notePassiveFable(cred *Cred, groups []quota.RawGroup) {
 	}
 }
 
-var emailPattern = regexp.MustCompile(`([A-Za-z0-9._%+]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})`)
-
-func credentialEmail(entry pluginapi.HostAuthFileEntry) string {
-	for _, value := range []string{entry.Email, entry.Account} {
-		if strings.Contains(value, "@") {
-			return strings.TrimSpace(value)
-		}
-	}
-	if match := emailPattern.FindString(entry.Name); match != "" {
-		return match
-	}
-	return ""
-}
-
 func maskedSuffix(email string, ordinal int) string {
 	local, _, _ := strings.Cut(email, "@")
 	runes := []rune(local)
@@ -205,8 +206,8 @@ func maskedSuffix(email string, ordinal int) string {
 // with "…".
 const maxNameRunes = 20
 
-// accountName returns the account name in a CPA credential note: its first
-// line, cut to maxNameRunes characters.
+// accountName returns the account name in a note: its first line, cut to
+// maxNameRunes characters.
 func accountName(note string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(note), "\n")
 	runes := []rune(strings.TrimSpace(line))
@@ -216,25 +217,22 @@ func accountName(note string) string {
 	return string(runes)
 }
 
-// loadCreds reads the credential list and assigns account suffixes. A named
+// loadCreds reads the account list and assigns account suffixes. A named
 // account gets "#" and its name. An unnamed account gets the masked email,
-// unless it is the only monitored credential of its provider. A named account
+// unless it is the only monitored account of its provider. A named account
 // whose suffix equals that of another account of its provider, such as two
 // accounts with the same name, also gets the masked email.
-func (e *Engine) loadCreds(cfg config.Config) ([]*Cred, error) {
-	entries, err := e.host.AuthList()
+func (e *Engine) loadCreds(ctx context.Context, cfg config.Config) ([]*Cred, error) {
+	accounts, err := e.host.Accounts(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var creds []*Cred
 	counts := map[string]int{}
-	for _, entry := range entries {
-		hostProvider := strings.ToLower(strings.TrimSpace(entry.Provider))
-		if hostProvider == "" {
-			hostProvider = strings.ToLower(strings.TrimSpace(entry.Type))
-		}
+	for _, account := range accounts {
+		hostProvider := strings.ToLower(strings.TrimSpace(account.Provider))
 		p := providers.Lookup(hostProvider)
-		if p == nil || entry.Disabled || strings.TrimSpace(entry.AuthIndex) == "" {
+		if p == nil || !account.On || strings.TrimSpace(account.Pin) == "" {
 			continue
 		}
 		provider := p.ID
@@ -242,18 +240,14 @@ func (e *Engine) loadCreds(cfg config.Config) ([]*Cred, error) {
 			continue
 		}
 		creds = append(creds, &Cred{
-			ID:           entry.ID,
-			AuthIndex:    entry.AuthIndex,
-			Name:         entry.Name,
+			ID:           account.Pin,
+			AuthIndex:    account.Pin,
+			Name:         account.Pin,
 			Provider:     provider,
 			HostProvider: hostProvider,
-			Email:        credentialEmail(entry),
-			Note:         entry.Note,
-			Unavailable:  entry.Unavailable,
+			Email:        account.Email,
+			Note:         accountNote(cfg, account),
 		})
-		if entry.Unavailable {
-			creds[len(creds)-1].CooldownUntil = entry.NextRetryAfter
-		}
 		counts[provider]++
 	}
 	ordinals := map[string]int{}
@@ -293,6 +287,24 @@ func (e *Engine) loadCreds(cfg config.Config) ([]*Cred, error) {
 	return creds, nil
 }
 
+// accountNote returns the name of account: account_names, else Magpie's
+// label when it is neither empty nor the email.
+func accountNote(cfg config.Config, account host.Account) string {
+	if name := cfg.AccountNames[account.Pin]; name != "" {
+		return name
+	}
+	label := strings.TrimSpace(account.Label)
+	if label == "" || strings.EqualFold(label, strings.TrimSpace(account.Email)) {
+		return ""
+	}
+	return label
+}
+
+// hostAccount is the host's view of cred.
+func hostAccount(cred *Cred) host.Account {
+	return host.Account{Pin: cred.AuthIndex, Provider: cred.HostProvider, Email: cred.Email, On: true}
+}
+
 // shouldSkipActive reports whether the active query of cred can be skipped at
 // slot because a passive update arrived shortly before it. Skipping stops
 // after PassiveSkipMaxMinutes so that windows without passive data, such as
@@ -318,7 +330,7 @@ func (e *Engine) shouldSkipActive(cfg config.Config, cred *Cred, slot, now time.
 // passive skip rule, for the manual refresh button.
 func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool) {
 	start := e.now()
-	creds, err := e.loadCreds(cfg)
+	creds, err := e.loadCreds(ctx, cfg)
 	if err != nil {
 		e.mu.Lock()
 		e.pollErrs = map[string]string{"": "读取凭证列表失败：" + err.Error()}
@@ -355,8 +367,27 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 	}
 	e.mu.Unlock()
 	e.dirty = true
-	e.checkCooldowns(ctx, cfg)
 	e.flushCredentialNotices(ctx, start)
+}
+
+// keptFallback applies Magpie's kept quota of cred, for an account whose
+// token has expired. It is an error when Magpie has none.
+func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred) error {
+	kept, err := e.host.KeptQuotas(ctx)
+	if err != nil {
+		return fmt.Errorf("凭证已过期，读取 Magpie 额度记录失败：%w", err)
+	}
+	for _, k := range kept {
+		if k.Pin != cred.AuthIndex {
+			continue
+		}
+		if k.ReadAt.After(e.keptAt[k.Pin]) {
+			e.keptAt[k.Pin] = k.ReadAt
+			e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt})
+		}
+		return nil
+	}
+	return errors.New("凭证已过期，Magpie 也没有这个账号的额度记录")
 }
 
 // refreshCred runs the active query of one credential.
@@ -368,22 +399,26 @@ func (e *Engine) refreshCred(ctx context.Context, cfg config.Config, cred *Cred)
 // result does not change the credential state: no new or ended credential
 // problem, event or notification.
 func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, track bool) error {
-	raw, err := e.host.AuthGet(cred.AuthIndex)
+	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
-		return fmt.Errorf("读取凭证文件失败：%w", err)
+		return fmt.Errorf("读取凭证失败：%w", err)
 	}
 	p := providers.Lookup(cred.Provider)
 	if p == nil {
 		return fmt.Errorf("不支持的额度 provider: %s", cred.Provider)
 	}
-	credential := providers.ParseCredential(raw)
 	credential.Provider, credential.ID, credential.Name = cred.HostProvider, cred.ID, cred.Name
-	fingerprint := providers.Fingerprint(raw)
+	fingerprint := credential.Fingerprint
 	if track {
 		e.noteFingerprint(cred, fingerprint)
 	}
+	if credential.Expired {
+		// The token can only be renewed by Magpie or the agent CLI that
+		// owns it; Magpie's own last reading stands in.
+		return e.keptFallback(ctx, cfg, cred)
+	}
 	readAt := e.now()
-	groups, err := providers.Fetch(ctx, p, e.egress, credential, readAt)
+	groups, err := providers.Fetch(ctx, p, e.doer, credential, readAt)
 	if err != nil {
 		if track {
 			e.noteQueryFailure(ctx, cred, fingerprint, err)
@@ -468,7 +503,7 @@ func (e *Engine) notePlan(ctx context.Context, p *providers.Provider, cred *Cred
 	if raw == "" && p.Profile != nil && (rechecking || now.Sub(time.Unix(state.Checked, 0)) >= planCheckPeriod) {
 		state.Checked = now.Unix()
 		e.dirty = true
-		plan, err := p.Profile(ctx, e.egress, credential, now)
+		plan, err := p.Profile(ctx, e.doer, credential, now)
 		if err != nil {
 			e.logf("debug", "读取套餐失败：%s：%v", labelFor(providers.Title(cred.Provider), cred), err)
 			if rechecking {
@@ -805,7 +840,7 @@ func absInt64(v int64) int64 {
 }
 
 func (e *Engine) pollResetFeed(ctx context.Context, cfg config.Config) {
-	records, err := notify.FetchResetRecords(ctx, &http.Client{Timeout: cfg.RequestTimeout()}, "cpa-plugin-lamplighter/"+e.version)
+	records, err := notify.FetchResetRecords(ctx, &http.Client{Timeout: cfg.RequestTimeout()}, "magpie-lamplighter/"+e.version)
 	if err != nil {
 		e.logf("warn", "Did Codex Reset 检查失败：%v", err)
 		return

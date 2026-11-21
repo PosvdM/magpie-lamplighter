@@ -1,21 +1,22 @@
 # 架构
 
-Lamplighter 是用 Go 编写、以 `-buildmode=c-shared` 构建的 CPA 原生插件。CPA 加载动态库后调用 `cliproxy_plugin_init`，此后所有交互都是 JSON 信封形式的 RPC：CPA 调用插件的方法，插件通过宿主回调调用 CPA。
+Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm 包）在 Magpie 的插件宿主（Bun）中启动它；它通过 Magpie 网关（环境变量 `MAGPIE_ADDR`）和 Magpie 配置目录中的文件读取账号、额度和凭证，自己向厂商查询额度，经网关点火，并提供页面、HTTP 接口和 MCP。
 
 ## 模块
 
 | 路径 | 职责 |
 | --- | --- |
-| `main.go` | cgo 入口：导出 C ABI 函数，转发 RPC，实现宿主回调 |
-| `internal/plugin` | 插件 RPC 方法：注册、重新配置、暂停、管理接口、`usage.handle` |
+| `main.go` | 程序入口：打开数据目录和配置，启动引擎和内部监听，收到 SIGINT 或 SIGTERM 时退出 |
+| `internal/server` | 内部监听的 HTTP 接口：页面、状态和操作接口、配置读写、插件宿主的 tool 调用；把配置交给引擎和 MCP 监听 |
+| `internal/host` | Lamplighter 与 Magpie 之间的接口 `host.Host` 及其数据类型，见“与 Magpie 的接口” |
+| `internal/magpie` | `host.Host` 的实现：网关请求、Magpie 文件的读取 |
 | `internal/engine` | 后台循环：主动查询、被动数据、点火、通知、历史和状态页数据；`mcp.go` 提供模型可读 DTO 和额度预测 |
-| `internal/mcp` | 独立 HTTP 监听器、MCP Streamable HTTP 协议、Bearer 鉴权和 Origin 校验 |
-| `internal/host` | 宿主回调的 Go 封装、模型流打开/读取/关闭，以及 `host.http.do` 的超时控制 |
-| `internal/config` | 插件配置解析、默认值和取值范围；读取 CPA 配置判断插件是否启用、计算默认数据目录 |
+| `internal/mcp` | 对外 HTTP 监听器、MCP Streamable HTTP 协议、Bearer 鉴权和 Origin 校验 |
+| `internal/config` | 配置解析、默认值和取值范围；配置文件的读写（`Store`）和数据目录 |
 | `internal/providers` | 每个服务一个文件：额度请求和解析、响应头解析、点火请求、候选模型、默认设置；注册表，见下文“服务” |
 | `internal/quota` | 额度窗口和上游请求的类型，窗口种类判断，时间解析 |
-| `internal/egress` | 选择额度请求的网络出口 |
-| `internal/models` | 读取 CPA 模型列表，提供按新旧排列候选模型的工具 |
+| `internal/egress` | 按账号的代理发送额度请求 |
+| `internal/models` | 缓存网关的模型列表，提供按新旧排列候选模型的工具 |
 | `internal/ignite` | 点火时间计算、滑动重置判断、失败分类和失败保护 |
 | `internal/failure` | 把点火和额度查询的上游错误分成凭证失效、账号停用、限流，并提炼一句话摘要 |
 | `internal/notify` | Bark 和 webhook 发送、额度提醒、Did Codex Reset 转发 |
@@ -23,38 +24,64 @@ Lamplighter 是用 Go 编写、以 `-buildmode=c-shared` 构建的 CPA 原生插
 | `internal/store` | `state.json`、额度历史和实例锁 |
 | `internal/web` | 管理页面，HTML、CSS、JS 分文件编辑，运行时合成一个文档 |
 
-## 与 CPA 的接口
+## 进程和数据目录
 
-插件在 `plugin.register` 中返回 `schema_version` 6，并声明两项能力：
+`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
-- `management_api`：注册管理接口和页面；
-- `usage_plugin`：接收每个请求的用量记录，其中包含上游响应头。
+- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。
+- `state.json`、`history/`、`instance.lock`：见下文“数据”。
 
-管理接口（需要 CPA 管理密钥）：
+## 与 Magpie 的接口
+
+引擎只通过 `host.Host` 访问 Magpie，测试使用假的实现。`internal/magpie` 按下表实现它：
+
+| 方法 | 来源 |
+| --- | --- |
+| `Accounts` | 网关的 `GET /v1/magpie/accounts`。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控 |
+| `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的 `logins.json` 和 agy-cli 插件的账号文件，以及 `providers.json`、`settings.json` 中的代理。Claude 和 Codex 的 token 刷新时会更换 refresh token，Lamplighter 只读取、绝不刷新，否则会让 Magpie 或代理 CLI 掉线；Google 的 refresh token 刷新后不变，可以在内存中刷新。token 已过期且无法自己刷新时返回 `Expired`，引擎改读 `KeptQuotas` |
+| `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。额度组 key 和窗口 ID 与该服务 `Fetch` 的结果相同 |
+| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh`。Claude 的刷新会运行 Claude Code 的 `/usage`，调用方要限频 |
+| `Models` | 网关的 `GET /v1/models` |
+| `OpenModelStream` / `ReadModelStream` / `CloseModelStream` | 向网关发送点火请求（`openai-response` 为 `POST /v1/responses`，`claude` 为 `POST /v1/messages`，`openai` 为 `POST /v1/chat/completions`），带 `X-Magpie-Account`；关闭流时取消请求 |
+| `Log` | 标准错误输出，由插件宿主转交 Magpie 的日志 |
+
+Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，实现返回包装 `host.ErrFormat` 的错误，不猜测字段。
+
+被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
+
+## HTTP 接口
+
+内部监听（`internal/server`）的路由：
 
 | 方法和路径 | 作用 |
 | --- | --- |
-| `GET /v0/management/lamplighter/status` | 状态页数据，配置中的密钥只显示是否已设置。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
-| `GET /v0/management/lamplighter/history?range=1h\|3h\|6h\|12h\|24h\|26h\|4d\|8d\|15d\|1mo\|36d&window=5h\|7d` | 额度历史和点火事件，默认 `24h`。`window` 为 `5h` 或 `7d` 时只返回这种窗口的系列，省略或为其他值时返回全部窗口；点火事件不按窗口筛选。每个系列的第一个点是范围开始前的最后一个样本（往前最多找一天，`historyLead`；分段时不与后面的样本合并），曲线因此画到横轴左端，页面在左端裁掉它；范围内没有样本的系列不返回。5 小时额度按小时、7 天额度按天，依次是：1 个单位；半个窗口加 1（`3h`、`4d`）；一个窗口加 1（`6h`、`8d`）；半天或半月，能完整显示两个窗口（`12h`、`15d`）；一天或一个月（`24h`、`1mo`）；五个窗口加 1（`26h`、`36d`）。`1mo` 从插件时区上个月的同一日期（该月没有这一天时取最后一天）到现在 |
-| `POST /v0/management/lamplighter/refresh` | 立即主动查询，`{"auth_index": "..."}` 只查一个账号 |
-| `POST /v0/management/lamplighter/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
-| `POST /v0/management/lamplighter/test-notify` | 同时向已配置的渠道发送测试通知，`results` 中每个渠道一项：`channel`、`ok`、`error`，webhook 还有 `response`（响应的前 200 字）和 `unchecked`（没有设置 `success_json`，只检查了 HTTP 状态码） |
-| `POST /v0/management/lamplighter/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
-| `POST /v0/management/lamplighter/check-update` | 检查新版本，返回状态；页面打开时调用 |
+| `GET /` | 管理页面 |
+| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
+| `GET /api/history?range=…&window=5h\|7d` | 额度历史和点火事件，参数和返回格式见下文“额度变化图表” |
+| `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号 |
+| `POST /api/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
+| `POST /api/test-notify` | 同时向已配置的渠道发送测试通知，`results` 中每个渠道一项：`channel`、`ok`、`error`，webhook 还有 `response`（响应的前 200 字）和 `unchecked`（没有设置 `success_json`，只检查了 HTTP 状态码） |
+| `POST /api/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
+| `POST /api/check-update` | 检查新版本，返回状态；页面打开时调用 |
+| `GET /api/config` | 已保存的配置原文，含密钥，供设置页填表 |
+| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析，然后整体写入 `config.json` 并应用。返回保存后的原文 |
+| `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
-页面注册为资源 `GET /v0/resource/plugins/lamplighter/page`，菜单名为 `Lamplighter`。资源本身不需要认证，页面中的数据请求都带管理密钥。页面从管理中心保存在 `localStorage` 的 `cli-proxy-auth` 中读取密钥：支持以 `location.host` 做可逆 XOR 混淆的 `enc::v2::`、同时使用 `location.host` 和 User-Agent 的 `enc::v1::`，以及不带前缀的明文 JSON。读不到时让用户输入并只保存在 `sessionStorage`。
+`config` 中的 `public_listen`、`web_enabled`、`admin_key`、`mcp_enabled`、`mcp_key` 设置对外监听：页面和接口需要 `admin_key`，`/mcp` 需要 `mcp_key`。`account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
 
-设置通过 CPA 的 `PATCH /v0/management/plugins/lamplighter/config` 自动保存：开关和勾选框的 `change` 事件触发保存，文本和数字在失焦或按回车时保存，每次只提交改动字段所在的顶层键；三档提醒阈值校验 `notice ≥ low ≥ critical` 后一起提交。`bark_url` 和 `cpa_base_url` 去掉尾部斜线，空的 CPA 地址和 MCP 监听地址按后端默认值保存，避免已应用判断与后端规整结果不一致。该接口只合并顶层键，所以 `ignition`、`providers`、`recovery_notify` 等对象以已保存的对象为基础整体提交。保存依次进行，后一次以前一次写入的配置为基础；数字不满足输入框的范围或步长时不保存。
+## 管理页面
 
-浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。设置中只有 `models_api_key` 是密码框，它的值按以下规则保存：输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示；与当前管理密钥相同的值不保存，并提示这是管理密钥；其他非空值先用它请求 `GET /v1/models`（插件读取模型列表的请求），返回 401 或 403 时不保存并提示 CPA 不接受这个 key，其他结果（包括请求失败）照常保存。拒绝保存时保留输入草稿并显示失败原因；页面加载时的自动填入恢复为已保存的值。该输入框还带有让 1Password、Bitwarden 和 LastPass 跳过它的属性。`models_api_key` 输入框设为 `autocomplete="one-time-code"`：Chrome 的密码管理不把这类字段当作密码，表单中没有其他密码框时只把它作为备用字段，不在页面加载时自动填入，也不在修改后弹出保存或更新密码的提示。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
+设置通过 `PATCH /api/config` 自动保存：开关和勾选框的 `change` 事件触发保存，文本和数字在失焦或按回车时保存，每次只提交改动字段所在的顶层键；三档提醒阈值校验 `notice ≥ low ≥ critical` 后一起提交。`bark_url` 去掉尾部斜线，空的对外监听地址按后端默认值保存，避免已应用判断与后端规整结果不一致。该接口整体替换顶层键，所以 `ignition`、`providers`、`recovery_notify` 等对象以已保存的对象为基础整体提交。保存依次进行，后一次以前一次写入的配置为基础；数字不满足输入框的范围或步长时不保存。页面的请求都使用相对路径（`api/…`），所以页面在自己监听的根路径和 Magpie 页面服务的反向代理后面都能工作。
 
-`webhook.headers` 和 `webhook.success_json` 在页面上以文本编辑（每行一个 `名称: 值`、JSON 对象），无法解析时不保存。状态接口只返回 webhook 的地址、请求头和请求体是否已设置，页面从 CPA 的插件配置接口读取原值填入表单。
+浏览器会把为本站保存的密码（通常是管理密钥）填进密码输入框。输入框没有焦点时由浏览器填入（匹配 `:autofill` 或 `:-webkit-autofill`）的值来自页面加载时的自动填入，不保存也不提示，输入框恢复为已保存的值。`autocomplete="off"` 对密码框不起作用，`new-password` 会让 Chrome 提示生成强密码，所以都不使用。
+
+`webhook.headers` 和 `webhook.success_json` 在页面上以文本编辑（每行一个 `名称: 值`、JSON 对象），无法解析时不保存。状态接口只返回 webhook 的地址、请求头和请求体是否已设置，页面从 `GET /api/config` 读取原值填入表单。
 
 保存失败时保留输入草稿；普通设置通过 `settingsDirty`、账号字段通过 `accountDirty` 避免回填覆盖草稿。`captureIntent` 在变更事件发生时保存字段值及各控件的 `settingsEdit` 编辑代次，队列中的 `buildPatch` 按这份意图构造补丁并记录实际提交的控件。配置确认后，`refillSaved` 清理本次实际提交、代次仍匹配且没有独立失败标记的控件草稿，再回填有效值。同一顶层键内其他控件的后续保存不阻止这项清理；后续编辑的草稿、无法解析或未提交的字段仍保留。单选组共享编辑代次并作为整体确认；组内仍有草稿或失败时跳过整组回填，避免设置某个单选框时间接覆盖较新的选择。`claimState` 按项设置 `owner`，后续状态通过绑定该所有权的 `say` 更新。任何 `input` 事件都会推进编辑代次、撤销旧 `owner` 并清除该项的普通进度，未解决的失败仍保留。旧请求继续完成并等待自己的令牌，但不能用迟到的响应更新新输入的结果。
 
-每次保存携带新的 `config_token`，它是可为空的字符串，不是密钥，不参与配置校验和运行时行为。`status.config` 表示最近接收的有效配置；顶层 `config_applied_token` 表示引擎后台循环已经确认并完成运行时应用、且插件已执行完 `mcp.Configure` 的同一份配置。只修改 MCP 或其他非运行时字段也需要后台循环确认；MCP 监听成功、停用或绑定失败并记录 `mcp.error` 均算完成配置执行，监听是否可用仍读取 `mcp.running` 和 `mcp.error`。解析失败保留上一令牌；实例重启后确认 CPA 下发的同一令牌，无需持久化计数器。插件以实例内接收序号协调两项确认，读取管理状态时持有生命周期锁，避免跨配置拼接状态。页面每次 PATCH 插件配置都用 `crypto.getRandomValues` 生成 8 字节随机数，以 16 位十六进制字符串作为令牌；设置、权重和卡片顺序等写入共用 `patchConfig`。保存后显示“已保存，等待生效”，等待期间轮询状态；轮询在前一次请求结束后间隔 1 秒发起，单次请求通过 `AbortController` 设置 4 秒超时。`config_applied_token` 与本次令牌相等，或等于本页之后一次保存的令牌时，本次保存显示“已生效”；`whenApplied` 为每次等待设置独立的 15 秒截止计时器，状态请求挂起也会按时结束等待、移除等待项并显示“未确认生效”；截止后到达的令牌不改变已结束的等待结果。脱敏占位和 `mcp_key_set` 不用于确认密钥替换。MCP 配置确认后继续结合 `status.mcp.running` 和 `status.mcp.error` 显示服务状态及错误。测试推送先等待未完成的保存，再按相同令牌规则最多等待 15 秒；确认后发送，超时则显示“配置尚未生效，未发送测试”，不调用测试接口。
+每次保存携带新的 `config_token`，它是可为空的字符串，不是密钥，不参与配置校验和运行时行为。`status.config` 表示最近接收的有效配置；顶层 `config_applied_token` 表示引擎后台循环已经确认并完成运行时应用、且插件已执行完 `mcp.Configure` 的同一份配置。只修改 MCP 或其他非运行时字段也需要后台循环确认；MCP 监听成功、停用或绑定失败并记录 `mcp.error` 均算完成配置执行，监听是否可用仍读取 `mcp.running` 和 `mcp.error`。解析失败的配置不保存，保留上一令牌；程序重启后从 `config.json` 读回同一令牌，无需持久化计数器。插件以实例内接收序号协调两项确认，读取管理状态时持有生命周期锁，避免跨配置拼接状态。页面每次 PATCH 插件配置都用 `crypto.getRandomValues` 生成 8 字节随机数，以 16 位十六进制字符串作为令牌；设置、权重和卡片顺序等写入共用 `patchConfig`。保存后显示“已保存，等待生效”，等待期间轮询状态；轮询在前一次请求结束后间隔 1 秒发起，单次请求通过 `AbortController` 设置 4 秒超时。`config_applied_token` 与本次令牌相等，或等于本页之后一次保存的令牌时，本次保存显示“已生效”；`whenApplied` 为每次等待设置独立的 15 秒截止计时器，状态请求挂起也会按时结束等待、移除等待项并显示“未确认生效”；截止后到达的令牌不改变已结束的等待结果。脱敏占位和 `mcp_key_set` 不用于确认密钥替换。MCP 配置确认后继续结合 `status.mcp.running` 和 `status.mcp.error` 显示服务状态及错误。测试推送先等待未完成的保存，再按相同令牌规则最多等待 15 秒；确认后发送，超时则显示“配置尚未生效，未发送测试”，不调用测试接口。
 
-“设置”视图“账号”区的“名称”输入框用 CPA 的 `PATCH /v0/management/auth-files/fields` 写入凭证的 `note`：替换备注的第一行，保留其余各行，再调用 `refresh` 查询这个账号，使插件立即读到新名称。CPA 保存备注时去掉首尾空白，第一行为空的备注会以下一行为名称，所以有多行的备注清空名称时，确认后删除整条备注。额度查询失败不影响改名，只是不更新页面，所以 `refresh` 的结果不作为改名的结果显示。同一服务有多个账号时，该区还显示“权重”输入框：输入大于 0 的数字后，页面把整个 `account_weights` 对象通过插件配置接口保存（CPA 只合并顶层键），留空则删除这个账号的权重，并立即按新值重画；`config.Parse` 丢弃不大于 0 或无穷大的权重。名称和权重在离开输入框或按回车时通过保存队列提交。名称、权重及排序分别持有保存结果和提示所有权，在“账号”标题右侧汇总显示；字段保存失败时保留输入草稿。账号行按凭证文件名复用 DOM，刷新、排序和较早保存的响应保留正在编辑的输入及焦点。保存结果按稳定的账号字段键保留，与当前 DOM 绑定分开；监控关闭再开启导致账号行重建时，`saveEntry` 重新绑定控件并恢复失败标记、草稿和待保存计数。排队中的账号保存通过当前绑定完成更新。
+“设置”视图“账号”区的“名称”输入框把整个 `account_names` 对象（以 pin 为键）通过配置接口保存，留空则删除这个账号的名称，账号重新显示 Magpie 中的名称；然后调用 `refresh` 查询这个账号，使状态立即带上新名称。额度查询失败不影响改名，只是不更新页面，所以 `refresh` 的结果不作为改名的结果显示。同一服务有多个账号时，该区还显示“权重”输入框：输入大于 0 的数字后，页面把整个 `account_weights` 对象保存，留空则删除这个账号的权重，并立即按新值重画；`config.Parse` 丢弃不大于 0 或无穷大的权重。名称和权重在离开输入框或按回车时通过保存队列提交。名称、权重及排序分别持有保存结果和提示所有权，在“账号”标题右侧汇总显示；字段保存失败时保留输入草稿。账号行按 pin 复用 DOM，刷新、排序和较早保存的响应保留正在编辑的输入及焦点。保存结果按稳定的账号字段键保留，与当前 DOM 绑定分开；监控关闭再开启导致账号行重建时，`saveEntry` 重新绑定控件并恢复失败标记、草稿和待保存计数。排队中的账号保存通过当前绑定完成更新。
 
 页顶、卡片区标题栏和曲线详情标题栏的眼睛按钮共用一个打码开关，状态保存在 `localStorage` 的 `lamplighter-mask-accounts` 中（`1` 为打码），脚本加载时即应用到根元素，首次渲染前生效；各浏览器分别保存。HTML 中的账号标识及“账号”区的输入框使用 `.account-sensitive` 和 CSS `blur`，SVG 图表文字使用模糊滤镜；敏感标识集合同时读取当前账号、事件标签和历史系列标签，包含改名及删除后仍保留的名称。当前状态没有对应额度组元数据的历史系列将 `label`、`source_label` 和 `group` 全部纳入敏感集合，即使标签和来源标签相等。没有当前账号的行标记为 `orphan`，在概览 SVG、详情标题和数据表中将名称整体模糊，读屏标签使用账号编号；详情截图保留相同模糊状态。事件标签整体标为敏感，详情中的标签、错误摘要（`params.summary`，没有时为页面提炼的一行，见下文“事件列表”）和错误原文（`params.error`）也整体标为敏感。以下事件的详情整段标为敏感：`error` 事件；事件本身没有 `params`、也没有存储的 `label` 的旧事件（不看由 `group` 推出的标签）；没有 `params` 且为失败或警告样式的旧事件（`ignite_failed`、`ignite_paused`、`notify_failed`、`error`、`model_refused`、`cooldown_stale`、`plan_change`、`exhausted`，以及未知类型中级别为 error 或 warn 的），因为这些原文可能提到已删除或改名的账号，按当前账号名替换遮不住。旧的成功类事件和带 `params` 的事件仍只遮住账号名和错误原文。概览及详情的点火悬停提示沿用相同规则。打码时省略含账号名的 `title` 提示，以及事件行的推送标记和事件详情的悬停提示，无障碍标签使用账号序号；清空名称等确认对话框保留原文。此开关不改变接口数据或 DOM 中的原始文本。
 
@@ -96,7 +123,7 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 - **多账号合计**：同一服务、同一 `source_label` 的多个账号合成一行，取各账号剩余百分比按权重的加权平均值（`pooled`），权重与各账号的额度大小成比例时，这等于总额度的剩余比例。合计行的当前值、曲线和延长线都用加权值；详情图的阴影仍是各账号的最低到最高。权重依次取 `account_weights` 中按凭证文件名（状态接口中账号的 `name`）设置的值、状态接口中账号的 `default_weight`，都没有时为 1（`accountWeight`）；权重全为 1 时就是简单平均。
 - **窗口种类与行集合**：标签页和图表行取当前状态中的窗口与所选范围内历史系列的并集，按 `kind` 分到“5 小时额度”和“7 天额度”两个标签页（一个都不知道时两个都显示），默认打开第一个；其他长度的窗口不画进图表。当前窗口没有对应历史系列时，前端补一条空样本行，使用当前剩余和重置时间显示标题，曲线区显示缺数据，不伪造样本。同一额度名下有自己标签的窗口（例如 Claude 的 `7 Day Opus`）单独成行，不与主窗口合并。
 - **已停用窗口**：历史系列在当前状态中没有对应窗口时，且所选范围内仍有样本，单独显示为“已停用”。该行放在同一额度组的当前行后，不计入合计，不参与剩余最低排序；条带和曲线停在最后一个样本，不画匀速参考线和延长线。最后一个样本移出范围时隐藏；历史接口仍返回这些系列，由前端过滤。
-- **排序**：图表默认跟随卡片顺序，同一额度的合计行使用其第一个当前账号的位置；同一账号内按 `group_order` 排列（Claude、GPT、Gemini、Kimi、Grok、Fable、Claude / GPT，来自 `internal/providers/provider.go` 的 `groupOrder`）。也可按当前剩余从低到高排列。状态接口中账号优先按 `account_order` 的凭证文件名排列，未列出的按服务注册顺序、账号后缀排列；不存在的条目忽略，重复条目以第一次为准。同一账号的额度组按额度组注册顺序排列，所以账号卡片上 Gemini 在 Claude / GPT 之前、Claude 在 Fable 之前。
+- **排序**：图表默认跟随卡片顺序，同一额度的合计行使用其第一个当前账号的位置；同一账号内按 `group_order` 排列（Claude、GPT、Gemini、Fable、Claude / GPT，来自 `internal/providers/provider.go` 的 `groupOrder`）。也可按当前剩余从低到高排列。状态接口中账号优先按 `account_order` 中的 pin 排列，未列出的按服务注册顺序、账号后缀排列；不存在的条目忽略，重复条目以第一次为准。同一账号的额度组按额度组注册顺序排列，所以账号卡片上 Gemini 在 Claude / GPT 之前、Claude 在 Fable 之前。
 - **记住筛选**：`remember_chart_filters` 开启时，页面把所选窗口、排序和每个窗口各自的时间范围存在 `localStorage` 的 `lamplighter-chart-filters` 中，打开页面时恢复；5 小时和 7 天的时间范围选项不同，所以分开保存。保存的值不在当前选项中时使用默认值。开关读取设置表单中的勾选状态，所以改动在保存前就生效；关闭时删除这项记录。
 - **加载**：页面按所选窗口请求历史（`window` 参数），并按窗口和时间范围缓存响应。切换到缓存过的组合时立即画出缓存的数据，同时重新请求，响应到达后重画；没有缓存时图表变灰，等响应到达。只有最近一次加载的响应会画到图上，切换后才到达的旧响应只存入缓存；同一组合已有请求在进行时，加载沿用这个请求，刷新和点火后的加载除外。请求失败且没有所选组合的数据时，图表显示错误信息，不再显示其他组合的旧图。页面打开、第一张图加载成功后，预先请求另一个窗口的时间范围，切换窗口时不用等待。页面每 30 秒读取一次状态；某个窗口的 `observed_at` 晚于图表中该窗口的最后一个样本，并且来自主动查询或剩余值与最后一个样本不同时（数值不变的被动读数不写入历史），重新请求当前图表（`refreshHistory`）。鼠标在图表卡片内时只保存新数据，移开后再重画，以免替换鼠标下的竖线和提示。
 - **重置**：相邻样本的剩余上升 5 个百分点及以上视为重置。曲线在重置处断开，前一段保持最后的值画到重置样本的时间，新的一段从重置后的值开始，图上标出重置时间；相隔一个样本的两次上升算一次重置。单个账号重置只让合计上升一部分，上升不足 5 个百分点时合计曲线不断开。
@@ -112,23 +139,11 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 - **详情图标题行**：图表宽度不小于 640 px（左侧标签区 `labelW` 至少 190 px）、且标题行不高于图表时，`placeDetailHead` 把标题行竖排放进图表左侧与概览图对齐留出的空白，右侧留 `SIDE_GAP`（46 px）给纵轴刻度；否则标题行放在图表上方。
 - **悬停**：在概览图或详情图上悬停时，竖线吸附到详情图当前行（多账号为合计线）离鼠标最近的采样点，提示中的时间和各行数值都取该时刻；采样时间不同的其他行显示该时刻之前最近的样本。最近的采样点也超过缺数据阈值时，竖线停在鼠标所在的时间。在现在右侧悬停时，竖线跟随鼠标，详情图的提示显示该时刻延长线的值和匀速参考值，概览图不显示提示。
 
-使用的宿主回调：
-
-| 回调 | 用途 |
-| --- | --- |
-| `host.auth.list` | 凭证列表，含 `auth_index`、运行时 ID、邮箱、备注（`note`）、停用状态，以及 CPA 冷却状态（`unavailable`、`next_retry_after`） |
-| `host.auth.get` | 凭证文件 JSON，取凭证指纹（见“凭证问题”）、access token、Codex 账号 ID、Antigravity 的 `project_id` 和 `user_agent`、Kimi 的 `domain` 和 `base_url`、Grok 的 `sub`、`proxy_url` |
-| `host.model.execute_stream` / `host.model.stream_read` / `host.model.stream_close` | 流式点火，带 `auth_id` 和 `forced_provider`，关闭流时取消上游请求 |
-| `host.http.operation_open` / `host.http.do` / `host.http.cancel` | 没有账号代理时的额度请求，以及读取 Antigravity Hub 更新清单 |
-| `host.log` | 写入 CPA 日志 |
-
-宿主回调绑定在插件实例上，不依赖某次 RPC，所以后台循环可以随时调用。
-
-每轮主动查询开始时，`engine.loadCreds` 读取凭证列表，重新计算每个账号的后缀（`Cred.Suffix`）：备注第一行（`accountName`，最长 `maxNameRunes` 个字符）不为空时为 `#` 加名称，与同一服务另一个账号的后缀相同时（例如名称重复）再加邮箱后缀；没有名称时，同一服务有多个账号才加邮箱后缀（`maskedSuffix`）。额度组的 `Label` 随之更新。告警状态按额度组 key 记录，改名不会重新发送通知。
+每轮主动查询开始时，`engine.loadCreds` 读取账号列表，重新计算每个账号的后缀（`Cred.Suffix`）：名称（`account_names` 中的名称，否则是 Magpie 的 `label`，与邮箱相同时不算）的第一行（`accountName`，最长 `maxNameRunes` 个字符）不为空时为 `#` 加名称，与同一服务另一个账号的后缀相同时（例如名称重复）再加邮箱后缀；没有名称时，同一服务有多个账号才加邮箱后缀（`maskedSuffix`）。额度组的 `Label` 随之更新。告警状态按额度组 key 记录，改名不会重新发送通知。
 
 ## MCP
 
-CPA 在转发插件管理请求之前用管理密钥鉴权，并一次性写回响应。MCP 使用插件自己的 `net.Listen` 和 `http.Server`，监听 `mcp_listen`（默认 `127.0.0.1:8318`），路径固定为 `/mcp`，与管理路由和密钥独立。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
+MCP 使用自己的 `net.Listen` 和 `http.Server`，监听 `public_listen`（默认 `127.0.0.1:8318`），路径固定为 `/mcp`，用 `mcp_key` 鉴权。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
 
 `plugin.Plugin` 持有 `mcp.Server` 和生命周期互斥锁。注册及重新配置成功时根据 `mcp_enabled`、`mcp_listen`、`mcp_key` 应用监听配置，先关闭旧监听器再绑定新地址。监听正在运行、开关和地址都不变而只换了非空密钥时，`mcp.Server.Configure` 只替换密钥并取消用旧密钥进入的请求，不关闭监听：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让换密钥后的第一个请求失败。处理请求时在 `mu` 内读取密钥，`Configure` 返回后的请求都按新密钥校验；配置无法解析时保留有效配置。空密钥阻止启动。绑定失败记录状态并每 2 秒重试，以便热重载中先注册的新实例在旧实例释放端口后接管。`plugin.quiesce`、`plugin.shutdown` 和 C ABI shutdown 均关闭监听器、取消连接并等待 HTTP 工具调用退出，再停止引擎；停止的实例不重启。监听状态由插件填入管理响应的 `mcp`：`enabled`、`listen`、`running`、`error`、`path`。`status.config` 清除 `mcp_key`，以 `mcp_key_set` 表示是否设置密钥；配置执行确认使用顶层 `config_applied_token`，不能通过布尔值确认密钥轮换。宿主的配置 GET/PATCH 保留原值。
 
@@ -149,15 +164,15 @@ CPA 在转发插件管理请求之前用管理密钥鉴权，并一次性写回�
 - `refresh_quotas` 将请求交给原有引擎命令队列，全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。等待上限 180 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
 - `get_quota_events` 从最近保留的最多 200 条引擎事件中筛选重置、耗尽、点火成功/失败和凭证问题（`credential_invalid`、`credential_restored`），支持 `since` 和最多 100 条的 `limit`。事件带 `reason`（`auth`、`suspended`、`rate_limited`，只输出这三个取值），凭证事件还带 `source`（`ignite`、`query`）；账号还没有额度组时，凭证事件的 `group` 为空。重置和耗尽事件独立于通知渠道记录，窗口消失或首次返回不产生事件。
 
-CPA 的 `sdk/cliproxy/auth` 在请求执行中应用模型别名、会话亲和、可用凭据、模型冷却及选择器。插件 SDK 不提供完整的模型到凭据路由快照，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。
+Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到完整的模型到账号的路由，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。
 
 ## 服务
 
-`internal/providers` 中每个服务是一个 `providers.Provider`，在 `provider.go` 的 `registry` 中按显示顺序注册：GPT（`codex`）、Claude、Antigravity、Kimi、Grok（`xai`）。服务定义包含：
+`internal/providers` 中每个服务是一个 `providers.Provider`，在 `provider.go` 的 `registry` 中按显示顺序注册：GPT（`codex`）、Claude、Antigravity。服务定义包含：
 
 | 字段 | 内容 |
 | --- | --- |
-| `ID`、`Aliases`、`Title` | 配置键和额度组 key 使用的服务名；CPA 中的其他写法（Kimi 的 `kimi-ai`、`kimi.ai`、`kimi.com`，Grok 的 `x-ai`、`x.ai`、`grok`）；显示名 |
+| `ID`、`Aliases`、`Title` | 配置键和额度组 key 使用的服务名；Magpie 中的其他写法；显示名 |
 | `Monitor`、`Ignite` | 默认是否监控、点火 |
 | `Fetch` | 主动查询，返回额度组 |
 | `Headers` | 解析模型请求的响应头；为空表示响应头里没有额度，被动跳过对该服务不生效 |
@@ -165,30 +180,31 @@ CPA 的 `sdk/cliproxy/auth` 在请求执行中应用模型别名、会话亲和�
 
 `providers.Lookup` 按服务名或别名查找（忽略大小写，`_` 视同 `-`）。凭证列表中的服务名换成 `ID` 存进 `Cred.Provider`，原始写法存进 `Cred.HostProvider`。配置中用别名写的服务键在解析时换成 `ID`。
 
-**窗口种类**：`quota.Window.Period` 是窗口长度，由各服务从接口数据填入：Codex 的 `limit_window_seconds` 和 `Window-Minutes`，Claude 的字段名，Antigravity 的 `window`，Kimi 的 `duration` 和 `timeUnit`，Grok 的周期起止时间。`quota.Kind` 先看周期（与 5 小时或 7 天相差 5% 以内），没有周期时按 ID 和标签判断。5 小时和 7 天窗口使用固定的 ID 和标签（`five-hour`、`seven-day`），其他长度的窗口带自己的 ID，标签为 `quota.PeriodLabel` 给出的长度，例如 `30d`；Grok 的周期长度会随月份变化，固定使用 `credits`。点火、冷却判断、图表和通知都按种类处理，所以没有当前 5 小时窗口的账号（例如 ChatGPT Pro）不点火；图表仍可显示所选范围内保留的 5 小时历史窗口。
+**窗口种类**：`quota.Window.Period` 是窗口长度，由各服务从接口数据填入：Codex 的 `limit_window_seconds` 和 `Window-Minutes`，Claude 的字段名，Antigravity 的 `window`。`quota.Kind` 先看周期（与 5 小时或 7 天相差 5% 以内），没有周期时按 ID 和标签判断。5 小时和 7 天窗口使用固定的 ID 和标签（`five-hour`、`seven-day`），其他长度的窗口带自己的 ID，标签为 `quota.PeriodLabel` 给出的长度，例如 `30d`。点火、图表和通知都按种类处理，所以没有当前 5 小时窗口的账号（例如 ChatGPT Pro）不点火；图表仍可显示所选范围内保留的 5 小时历史窗口。
 
-**新增服务**：在 `internal/providers` 中新建一个文件，参照 CPA 管理中心额度页的请求实现 `Fetch`，有额度响应头时实现 `Headers`，窗口填上 `Period`；能点火时填写 `Ignition`；把服务加入 `registry`，需要固定位置时把主额度组的名称加入 `groupOrder`；在 `internal/web/page.css` 中加上管理中心同名服务的标签颜色（`--type-<id>-bg` 等）。同步更新 README 的服务表和本文档的主动查询、被动数据、点火请求和模型选择各节。
+**新增服务**：在 `internal/providers` 中新建一个文件，实现 `Fetch`，有额度响应头时实现 `Headers`，窗口填上 `Period`；能点火时填写 `Ignition`；把服务加入 `registry`，需要固定位置时把主额度组的名称加入 `groupOrder`；在 `internal/web/page.css` 中加上该服务的标签颜色（`--type-<id>-bg` 等）。同步更新 README 的服务表和本文档的主动查询、被动数据、点火请求和模型选择各节。
 
 ## 后台循环
 
 `engine.Engine` 用一个后台循环串行处理查询、点火和通知状态；HTTP 取消和模型流 watchdog 在独立 goroutine 中执行，不修改额度状态：
 
-1. 插件注册后启动，先等 20 秒，让 CPA 加载凭证和执行器。
+1. 程序启动后先等 5 秒（`startupDelay`），让同时启动的 Magpie 网关就绪。
 2. 打开数据目录，取得 `instance.lock`。
-3. 每 30 秒读取一次 CPA 的 `config.yaml`，判断 `plugins.enabled` 和本插件的 `enabled`。CPA 停用插件时不会通知插件，所以插件自己检查；停用期间不做任何工作。读不到配置文件时视为启用。
-4. 依次处理被动数据、Did Codex Reset、到点的主动查询、到期的点火、历史清理、新版本检查，并保存状态。
-5. 计算下一次需要醒来的时间，在这之前等待新的被动数据、管理操作或配置变更。
+3. 依次处理排队的被动数据、Did Codex Reset、到点的主动查询、Magpie 的额度记录（`pollKept`）、重置前后的查询、到期的点火、历史清理、新版本检查，并保存状态。
+4. 计算下一次需要醒来的时间，在这之前等待新的被动数据、管理操作或配置变更。
 
-`usage.handle` 和管理接口不直接执行网络请求：前者只解析响应头并放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果，最多 3 分钟。唯一的例外是 `check-update`，见下文。
+Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组一起退出，所以没有“停用”状态。
 
-新版本检查读取 GitHub API 的 `releases/latest`（不含草稿和预发布版本），后台循环开始工作后读一次，之后每 6 小时读一次，失败后 30 分钟重试。页面打开时调用 `check-update` 再读一次，距上次尝试读取（无论成败）不到 1 分钟（`releaseRecheckPeriod`）时不读：未登录的 GitHub API 每个地址每小时只能请求 60 次，GitHub 不响应时也不会让每次打开页面都等到超时。这次读取在处理请求的 goroutine 中进行，不经过后台循环，以免排在查询和点火之后；插件停止时请求随之取消。同一时间只有一个读取（`releaseMu`）：已有读取在进行时，页面的请求直接返回，后台循环不等待并在 30 分钟后重试；距上次成功读取不到 1 分钟时，后台循环也不读。插件停用期间不检查，状态接口保留上一次的结果。请求使用 Did Codex Reset 相同的出口（环境变量中的代理或直连）。版本号按数字逐段比较；最新版本比当前版本新时，状态接口返回 `latest_version` 和 `release_url`，页面在版本号右边显示更新图标。失败只记 debug 日志，保留上一次的结果。当前版本不是纯数字版本时（开发版本 `dev`、`0.0.0-dev.<commit>` 和预发布版本）不检查；最新 Release 的标签不是纯数字版本时视为没有新版本。
+`ObservePassive` 和 HTTP 接口不直接执行网络请求：前者只把读数放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果，最多 3 分钟。唯一的例外是 `check-update`，见下文。
 
-后台循环崩溃时，`supervise` 记录日志并在 30 秒后重启。插件中任何未恢复的 panic 都会结束整个 CPA 进程，所以每个 goroutine 和每个 RPC 方法都有 `recover`。
+新版本检查读取 GitHub API 的 `releases/latest`（不含草稿和预发布版本），后台循环开始工作后读一次，之后每 6 小时读一次，失败后 30 分钟重试。页面打开时调用 `check-update` 再读一次，距上次尝试读取（无论成败）不到 1 分钟（`releaseRecheckPeriod`）时不读：未登录的 GitHub API 每个地址每小时只能请求 60 次，GitHub 不响应时也不会让每次打开页面都等到超时。这次读取在处理请求的 goroutine 中进行，不经过后台循环，以免排在查询和点火之后；插件停止时请求随之取消。同一时间只有一个读取（`releaseMu`）：已有读取在进行时，页面的请求直接返回，后台循环不等待并在 30 分钟后重试；距上次成功读取不到 1 分钟时，后台循环也不读。请求使用 Did Codex Reset 相同的出口（环境变量中的代理或直连）。版本号按数字逐段比较；最新版本比当前版本新时，状态接口返回 `latest_version` 和 `release_url`，页面在版本号右边显示更新图标。失败只记 debug 日志，保留上一次的结果。当前版本不是纯数字版本时（开发版本 `dev`、`0.0.0-dev.<commit>` 和预发布版本）不检查；最新 Release 的标签不是纯数字版本时视为没有新版本。
+
+后台循环崩溃时，`supervise` 记录日志并在 30 秒后重启。未恢复的 panic 会结束进程，页面和 tool 随之不可用，所以每个 goroutine 都有 `recover`。
 
 ### 生命周期
 
-- `plugin.register` 和 `plugin.reconfigure` 解析配置并应用。无法解析的配置不生效，状态页显示错误，插件继续使用上一份配置。
-- 新版本动态库加载后，CPA 对旧实例调用 `plugin.quiesce`，但不会卸载它。插件收到 `plugin.quiesce` 或 `plugin.shutdown` 后停止后台循环且不再启动。
+- 启动时读取 `config.json`；`PATCH /api/config` 保存并应用新的配置。无法解析的配置不会写入文件。
+- 收到 SIGINT 或 SIGTERM 时关闭监听、停止后台循环并退出。
 - `instance.lock` 是数据目录中的独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个实例在查询、点火和推送。新实例拿不到锁时每 10 秒重试一次。
 
 ## 额度获取
@@ -200,28 +216,25 @@ CPA 的 `sdk/cliproxy/auth` 在请求执行中应用模型别名、会话亲和�
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage`，带 `Chatgpt-Account-Id` |
 | Claude | `GET https://api.anthropic.com/api/oauth/usage`，`anthropic-beta: oauth-2025-04-20` |
 | Antigravity | `POST .../v1internal:retrieveUserQuotaSummary`，依次尝试三个地址，正文为 `{"project": "<project_id>"}` |
-| Kimi | `GET https://api.kimi.com/coding/v1/usages`；与 CPA 的 Kimi 执行器一样，依次看凭证的 `domain`、`base_url`、`type`、服务名，最后看运行时 ID 或文件名是否含 `kimi-ai`、`kimi.ai`，指向 kimi.ai 时用 `api.kimi.ai` |
-| Grok | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`，带 Grok CLI 的请求头和凭证 `sub` 作为 `x-userid`。`currentPeriod` 为每周时是 7 天窗口；没有 `currentPeriod` 时才用按月的 `billingPeriodStart`/`End`。其他长度的周期固定使用 ID `credits`，让历史和提醒在周期之间延续 |
 
-请求头与 CPA 管理中心额度页相同，常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 CPA 的 Codex 执行器一致；Claude 的 User-Agent 与 CPA 默认的 Claude Code 指纹一致。
+请求头取自 CLIProxyAPI 管理中心的额度页，常量在 `internal/providers` 中各服务的文件里。Codex 的 User-Agent 与 Codex CLI 一致，Claude 的 User-Agent 与 Claude Code 一致。
 
-Antigravity 的 User-Agent 按 CPA 的 Antigravity 执行器的规则确定。Cloud Code 按 User-Agent 判断客户端，对旧格式的客户端（如 `antigravity/cli/1.0.13 (aidev_client; ...)`）不返回 Gemini 额度组。
+Antigravity 的 User-Agent 按以下规则确定。Cloud Code 按 User-Agent 判断客户端，对旧格式的客户端（如 `antigravity/cli/1.0.13 (aidev_client; ...)`）不返回 Gemini 额度组。
 
 - 凭证设置了 `user_agent`（文件顶层、`attributes` 或 `metadata` 中）时使用它；以 `antigravity/` 开头的值去掉 ` google-api-nodejs-client/...` 后缀。
-- 否则使用 `antigravity/hub/<版本> darwin/arm64`。版本读自 Antigravity Hub 更新清单（`AntigravityHubManifestURL`，与 CPA 使用的地址和请求头相同），成功后缓存 3 小时；读取失败时保留已缓存的版本，30 分钟后重试。还没有读到时使用 `2.23.0`，与 CPA 管理中心一致。清单在查询额度时按需读取，不经过凭证代理。
+- 否则使用 `antigravity/hub/<版本> darwin/arm64`。版本读自 Antigravity Hub 更新清单（`AntigravityHubManifestURL`），成功后缓存 3 小时；读取失败时保留已缓存的版本，30 分钟后重试。还没有读到时使用 `2.23.0`。清单在查询额度时按需读取，不经过凭证代理。
 
-token 来自凭证文件。CPA 在后台刷新 token 并写回文件，插件不自行刷新；上游返回 401 时跳过本轮，等 CPA 刷新。401 持续下去时按凭证失效处理；401 的正文说账号已停用时（如 `account_deactivated`）第一次就按账号停用处理，见“凭证问题”。非 2xx 的响应（包括 401）返回 `quota.HTTPError`：错误文字（显示在页面上）只带响应的前 300 个字节，`Body` 保留前 4096 个字节，供 `failure.Diagnose` 读取靠后的 `reason`。状态码为 401 的 `HTTPError` 在 `errors.Is` 中等同 `quota.ErrUnauthorized`，Antigravity 遇到它不再换下一个地址。
+token 来自 `host.Credential`。Claude 和 Codex 的 token 由 Magpie 或代理 CLI 刷新，Lamplighter 不刷新；上游返回 401 时跳过本轮，等它们刷新。401 持续下去时按凭证失效处理；401 的正文说账号已停用时（如 `account_deactivated`）第一次就按账号停用处理，见“凭证问题”。非 2xx 的响应（包括 401）返回 `quota.HTTPError`：错误文字（显示在页面上）只带响应的前 300 个字节，`Body` 保留前 4096 个字节，供 `failure.Diagnose` 读取靠后的 `reason`。状态码为 401 的 `HTTPError` 在 `errors.Is` 中等同 `quota.ErrUnauthorized`，Antigravity 遇到它不再换下一个地址。
 
 查询时间对齐到绝对时间边界（`alignedAfter`），默认 300 秒间隔落在每小时的 `:00 / :05 / ... / :55`。不使用“上次时间加间隔”，以免时间点随启动时间漂移。
 
 ### 网络出口
 
-`internal/egress` 让额度请求和 CPA 的模型请求使用同一个出口：
+`internal/egress` 让额度请求和 Magpie 对同一账号的请求使用同一个出口。`host.Credential.ProxyURL` 是 Magpie 为该账号使用的代理（账号或服务自己的代理，否则是 Magpie 的全局代理）：
 
-- 凭证有 `proxy_url` 时，用 CPA 的 `sdk/proxyutil` 建立连接，和 CPA 执行器的做法一致；`direct` / `none` 表示直连。无法解析时返回错误，不退回其他出口。
-- 没有 `proxy_url` 时调用 `host.http.do`。CPA 依次使用全局 `proxy-url`、环境变量代理、直连。`host.http.do` 本身没有超时，插件先用 `host.http.operation_open` 打开一个操作，超时后用 `host.http.cancel` 取消。
-
-CPA 的 `/api-call`（管理中心额度页使用）会忽略环境变量代理，而模型请求不会。插件按模型请求的规则选择出口。
+- 支持 `http`、`https`、`socks5`、`socks5h` 代理；`direct` 或 `none` 表示直连。无法解析的地址返回错误（错误中隐藏用户名和密码），不退回其他出口。
+- 为空时使用环境变量代理（`HTTPS_PROXY` 等），没有时直连。
+- 每个请求的超时为 `request_timeout_seconds`。
 
 ### 套餐
 
@@ -238,21 +251,21 @@ Claude 和 Antigravity 的单独请求（`Provider.Profile`）每个账号每 24
 
 ### 被动数据
 
-CPA 在用量记录的 `ResponseHeaders` 中提供上游响应头：
+被动数据有两个来源：Magpie 的额度记录（`KeptQuotas`，见“与 Magpie 的接口”），以及点火响应的响应头。响应头按下表解析：
 
 | 服务 | 响应头 | 窗口 |
 | --- | --- | --- |
 | Claude | `Anthropic-Ratelimit-Unified-5h-Utilization` / `-5h-Reset`，`-7d-` 同理 | 5 小时、7 天；值是已用比例，如 `0.2` |
-| Claude | `Anthropic-Ratelimit-Unified-7d_oi-Utilization` / `-7d_oi-Reset` | Fable 的 7 天窗口，写入与主动查询相同的 Fable 额度组（`providers.FableGroupKey`）。CPA 也把 `7d_oi` 当作 Fable 专用窗口。普通（非 Fable）请求的响应头里没有这组；Fable 请求时是否返回，还没有在能用 Fable 的账号上验证过。插件每次启动后第一次读到时记一条日志 |
+| Claude | `Anthropic-Ratelimit-Unified-7d_oi-Utilization` / `-7d_oi-Reset` | Fable 的 7 天窗口，写入与主动查询相同的 Fable 额度组（`providers.FableGroupKey`）。普通（非 Fable）请求的响应头里没有这组；Fable 请求时是否返回，还没有在能用 Fable 的账号上验证过。插件每次启动后第一次读到时记一条日志 |
 | Codex | `X-Codex-Primary-Used-Percent`、`-Reset-At`、`-Reset-After-Seconds`、`-Window-Minutes`，`Secondary` 同理 | 按窗口长度区分，300 分钟为 5 小时，10080 分钟为 7 天，其他长度各自成为一个窗口；没有长度时 Primary 为 5 小时、Secondary 为 7 天 |
 
-Antigravity、Kimi 和 Grok 的响应头里没有额度。
+Antigravity 的响应头里没有额度。
 
-被动数据只更新响应头里有的窗口，主动查询结果替换整个凭证的额度组及窗口；未返回的额度组保留空组，避免被动响应头重新补回。主动结果缺席的持久化窗口基线标记 `Rebase`，跨重启保留；窗口重新出现后的第一次读数只作为新起点，不触发恢复或重置前提醒。窗口消失本身不发送通知；没有 5 小时窗口时 `collectTargets` 跳过点火，恢复后自动继续。管理历史仍包含过去出现的所有窗口，由页面决定显示哪些窗口。额度组有过主动查询结果后，被动数据只更新那次结果中出现过的窗口，不新增窗口：ChatGPT Pro 账号的额度接口只返回 7 天窗口，页面上却出现过一个没有重置时间、一直是 100% 的 5 小时窗口，它只能来自响应头。最近一次成功主动查询的窗口集合保存在 `state.json` 的 `groups.active_windows` 中：`null` 或字段缺失表示尚未确认，空数组表示已确认整组缺席。被动数据只接受保存集合中的窗口，启动后首次主动查询失败也沿用该集合；只有新的成功主动查询能恢复缺席窗口。旧状态缺少 `active_windows` 时，优先从非空且格式有效的 `plans.windows` 恢复集合；这个签名只在成功主动查询后写入，组未出现在签名中表示该组缺席。空签名无法区分尚未查询和主动返回空集合，不作为迁移依据。无法可靠迁移的已有组在首次主动查询成功前，禁止被动数据新增窗口；当前内存视图中已有的窗口仍可更新，首次成功主动结果只建立新的通知基线。迁移能确认缺席的旧窗口同样标记为首次返回时重建基线，即使旧文件尚未设置 `Rebase`。此限制在加载时标记，不通过通知基线、`Rebase` 或点火观测推断窗口存在与否。状态文件中没有的真正新组允许被动数据先建立窗口。服务新开的窗口要到下一次主动查询才出现。`-Reset-After-Seconds` 从用量记录的 `RequestedAt` 起算：用量记录在请求结束时才到达，从处理时刻起算会把长请求带回的上一周期重置时间推到重置之后。
+被动数据只更新响应头里有的窗口，主动查询结果替换整个凭证的额度组及窗口；未返回的额度组保留空组，避免被动响应头重新补回。主动结果缺席的持久化窗口基线标记 `Rebase`，跨重启保留；窗口重新出现后的第一次读数只作为新起点，不触发恢复或重置前提醒。窗口消失本身不发送通知；没有 5 小时窗口时 `collectTargets` 跳过点火，恢复后自动继续。管理历史仍包含过去出现的所有窗口，由页面决定显示哪些窗口。额度组有过主动查询结果后，被动数据只更新那次结果中出现过的窗口，不新增窗口：ChatGPT Pro 账号的额度接口只返回 7 天窗口，页面上却出现过一个没有重置时间、一直是 100% 的 5 小时窗口，它只能来自响应头。最近一次成功主动查询的窗口集合保存在 `state.json` 的 `groups.active_windows` 中：`null` 或字段缺失表示尚未确认，空数组表示已确认整组缺席。被动数据只接受保存集合中的窗口，启动后首次主动查询失败也沿用该集合；只有新的成功主动查询能恢复缺席窗口。旧状态缺少 `active_windows` 时，优先从非空且格式有效的 `plans.windows` 恢复集合；这个签名只在成功主动查询后写入，组未出现在签名中表示该组缺席。空签名无法区分尚未查询和主动返回空集合，不作为迁移依据。无法可靠迁移的已有组在首次主动查询成功前，禁止被动数据新增窗口；当前内存视图中已有的窗口仍可更新，首次成功主动结果只建立新的通知基线。迁移能确认缺席的旧窗口同样标记为首次返回时重建基线，即使旧文件尚未设置 `Rebase`。此限制在加载时标记，不通过通知基线、`Rebase` 或点火观测推断窗口存在与否。状态文件中没有的真正新组允许被动数据先建立窗口。服务新开的窗口要到下一次主动查询才出现。点火响应的 `-Reset-After-Seconds` 从收到响应的时刻起算。
 
-每个窗口记下当前读数的读取时间（`WindowView.ReadAt`）：主动查询为查询开始的时刻，被动数据为用量记录的 `RequestedAt`，点火确认为点火请求开始的时刻。被动数据的读取时间早于窗口当前读数时，`applyGroups` 丢弃这个窗口的读数；一组窗口全部被丢弃时，不写历史样本，也不处理通知。多个请求并发时，先开始、后结束的长请求会在较新的读数之后带回较高的额度；额度下降较快时，两者相差可能达到 `RecoveryJump`，会被当成恢复，同一档提醒会再推送一次。主动查询结果不受这条规则限制。
+每个窗口记下当前读数的读取时间（`WindowView.ReadAt`）：主动查询为查询开始的时刻，Magpie 的额度记录为它的读取时间（`KeptQuota.ReadAt`），点火确认为点火请求开始的时刻。被动数据的读取时间早于窗口当前读数时，`applyGroups` 丢弃这个窗口的读数；一组窗口全部被丢弃时，不写历史样本，也不处理通知。多个请求并发时，先开始、后结束的长请求会在较新的读数之后带回较高的额度；额度下降较快时，两者相差可能达到 `RecoveryJump`，会被当成恢复，同一档提醒会再推送一次。主动查询结果不受这条规则限制。
 
-跳过规则（`shouldSkipActive`）：响应头里没有额度的服务从不跳过。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
+跳过规则（`shouldSkipActive`）：响应头里没有额度的服务（Antigravity）从不跳过。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
 
 ## 点火
 
@@ -272,7 +285,7 @@ Antigravity、Kimi 和 Grok 的响应头里没有额度。
 
 ### 请求
 
-点火通过 `host.model.execute_stream` 发送，`auth_id` 为凭证的运行时 ID，`forced_provider` 为 CPA 报告的服务名（`Cred.HostProvider`）。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。Kimi 和 Grok 没有点火：Kimi 订阅的 5 小时和 7 天窗口从开通时间起按固定时间切换，不论是否使用；Grok 的每周额度在上一周期结束时自动开始。其余服务的请求如下：
+点火通过 `host.Host.OpenModelStream` 经 Magpie 网关发送，`Account` 为账号的 pin（网关请求头 `X-Magpie-Account`），`Protocol` 为下表的入口协议。请求体由各服务的 `Ignition.Body` 给出，经 `providers.Request` 编码。各服务的请求如下：
 
 | 服务 | 入口协议 | 请求要点 |
 | --- | --- | --- |
@@ -306,17 +319,17 @@ Reply with only OK. Do not think, do not use tools, do not do anything else.
 
 ### 调用日志
 
-每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：CPA 默认 formatter 会丢弃任意 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
+每次模型调用结束后写一条 `Lamplighter ignition` JSON 日志，启动失败也记录。JSON 放在 `host.Log` 的 Message 中，同时附带 structured fields：日志输出可能丢弃 fields，不能只依赖 fields。`json.Marshal` 转义换行及控制字符，正文不会伪造额外日志行。日志不写入 UI 事件、历史或状态文件。
 
 记录包含 `provider`、`model`、`auth_index`、随机 `correlation_id`、`stream_id`、HTTP 状态、`reply`、`reply_truncated`、`output_received`、`usage`、`usage_source`、`usage_completeness`、`end_reason`、`first_output_wait_ms` 和 `total_ms`。未收到输出时等待时间为 `null`，总耗时仍包含启动等待。`reply` 按收到顺序拼接文本、可见推理和工具参数，最多 4096 个 Unicode 字符；截断不截断 UTF-8 字符。只保留这些可见字段和白名单内的 usage 计数，不记录完整请求、凭证、原始错误载荷或 opaque 加密推理。
 
-`usage_source` 固定为 `cpa_host`。`usage` 保留宿主提供的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 CPA 转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
+`usage_source` 固定为 `magpie_gateway`。`usage` 保留网关返回的白名单计数和已知细分项，插件不推算缺失值、不估算 token；这些数字可能已经过 Magpie 的协议转换，不能据此断言全部来自真实且完整的上游统计。Claude 的 `message_start` 和 `message_delta` 计数合并。
 
 `usage_completeness` 为 `missing`（没有计数）、`partial` 或 `complete`。只有 Claude/`claude` 和 Codex/`openai-response` 原生点火路由正常终止，且收到最终输入和输出计数时标为 `complete`；它表示宿主协议的最终计数齐全，不保证每个上游细分项均存在。其余有计数的调用均为 `partial`，包括主动断流及 Antigravity/Chat 的自然结束。CPA 的 Antigravity→OpenAI translator 会为缺失计数补零，不同转换路径对推理 token 的合并和细分也可能不同；字段齐全或收到 `finish_reason` 不足以验证上游统计完整性，插件不把补出的零解释为确定的零用量。结束原因区分正常完成、主动断流、取消、启动/HTTP/读取/解析错误、异常 EOF 和关闭失败。
 
 ### 模型选择
 
-CPA 没有按凭证列出模型的宿主回调，插件用 `models_api_key` 读取 `GET /v1/models`。这个列表是所有凭证模型的合集，按模型 ID 去重，`owned_by` 在两个服务提供同一 ID 时可能指向另一个服务，所以候选只按名称挑选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型）：
+模型列表来自网关的 `GET /v1/models`（`host.Host.Models`，`models.Lister` 缓存 10 分钟）。这个列表是所有账号模型的合集，按模型 ID 去重，`owned_by` 在两个服务提供同一 ID 时可能指向另一个服务，所以候选只按名称挑选（各服务的 `Ignition.Candidates`，由 `providers.Candidates` 去重并处理指定模型）：
 
 - Codex：名称含 `luna` 的模型由新到旧，然后其他 `gpt-` 模型；排除图片模型和 `gpt-oss`。
 - Claude：`claude-` 开头的非 thinking Haiku 由新到旧，然后 Sonnet。
@@ -331,7 +344,7 @@ CPA 的模型列表来自它内置并定期更新的模型表，同一服务的�
 
 换到的候选成功时，被拒的模型确实与这个额度组的账号有关：`engine.noteRefused` 在内存中记下额度组和模型，并记录 `model_refused` 事件；之后 24 小时（`refusedFor`）内，这个额度组的自动选择跳过该模型（`engine.skipRefused`），到期后再试一次。反复请求账号没有权限的模型可能增加账号风险，而新模型可能分批开放，所以按天重试。记录不写入 `state.json`，插件重启后清空。指定模型不受影响。
 
-模型列表在三种情况下读取：插件启动后、CPA 地址或 `models_api_key` 变化后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；前两种读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选，放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果；CPA 地址或 `models_api_key` 变化时清空 `next_models` 和模型列表错误，再按新的地址和 key 读取。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
+模型列表在两种情况下读取：程序启动后（`engine.maybeReadModels`），以及每次点火时。额度查询不读取模型列表；启动后的读取失败时，随之后每轮额度查询重试，直到成功。每次读取后，`engine.noteModels` 不考虑指定模型，按服务算出自动选择的第一个候选，放在状态接口的 `next_models` 中（每个能点火的服务一项），设置页在点火模型输入框的提示文字后显示它。额度组按服务的 `Ignition.HintGroup` 计算：Antigravity 按 Gemini 组计算，与提示文字“最新的 Flash”一致。`next_models` 只保存在内存中。读取失败时保留上次的结果。`next_models` 按服务计算，不考虑某个额度组跳过的模型。
 
 ### 确认
 
@@ -359,8 +372,6 @@ CPA 的模型列表来自它内置并定期更新的模型表，同一服务的�
 
 CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.CooldownWait`），不计入失败次数，在冷却结束后再等 `grace_seconds` 重试。CPA 在 429 之后把凭证冷却到上游重置时间再加十几秒，额度在重置前用完时，重置后 3 秒的点火会撞上这段冷却。连续第二次冷却按普通临时错误计数，避免冷却不断续期时无限重试。
 
-**过期的 CPA 冷却**：CPA 收到账号级 429 后，把凭证冷却到上游报告的重置时间（7 天额度用完时可达数天），额度提前恢复（如重置卡）时不会自动解除。每轮查询后，`engine.checkCooldowns` 检查每个凭证：CPA 冷却还剩 10 分钟以上，且某个带 5 小时窗口的额度组在最近 15 分钟内的数据显示所有窗口都没有用完，就认为冷却已过期。每个冷却结束时间只推送一次（`state.json` 的 `cooldown_notices`），并记录 `cooldown_stale` 事件；状态接口的账号带 `cooldown_until` 和 `stale_cooldown`。插件不替用户清除冷却，因为那需要 CPA 管理密钥，并且会改变 CPA 的路由状态。
-
 暂停时推送一次通知（`circuit_notified_until_epoch` 防止重复），成功或看到固定的未来重置时间后清空失败状态。通知和事件详情只写 `failure.Diagnose` 提炼的一句话（`summary`）：上游的完整错误是多行 JSON，只保留在事件的 `error` 和状态的 `last_error` 中。HTTP 429（不含 CPA 本地冷却）暂停时发送限流通知代替暂停通知，并记录 `reason` 为 `rate_limited` 的 `credential_invalid` 事件。
 
 ### 凭证问题
@@ -378,7 +389,7 @@ CPA 本地冷却带有 `reset_seconds` 且不超过 10 分钟时（`ignite.Coold
 - **点火发现**：自动点火在发出请求前读一次凭证指纹。读不到时，这次失败的指纹记为未知，不在失败后补读：请求在途时用户可能已经换了凭证，补读到的是没用过的新凭证。遇到 `auth` 或 `suspended` 时，`ignite.RecordCredentialFailure` 记下失败但不设重试时间，记录不带 `until`、带 `reason` 的 `ignite_paused` 事件，账号进入问题状态。之后定时点火和下次点火时间的计算跳过这个账号的所有额度组（`credentialBlocked`），状态页不显示下次点火时间，也不再每天重试。手动点火不受影响。
 - **查询发现**：额度查询遇到 `suspended` 时立即进入问题状态。遇到 `auth` 时先计数（`query_reason`、`query_since`、`query_count`），连续至少 3 次、持续至少 30 分钟（`queryProblemCount`、`queryProblemAge`）才进入：access token 过期且 CPA 还没刷新时也返回 401，CPA 每 15 分钟刷新一次凭证，持续两个刷新周期以上的 401 不是过期。其他结果清零计数。
 - **通知**：进入问题状态时记录 `credential_invalid` 事件，并发送一次通知：`auth` 为“🔑 … 凭证失效”，`suspended` 为“⛔ … 账号已停用”（有申诉链接时附上，https 链接同时作为 Bark 的跳转链接）。同一账号已处于同一类问题时，点火和查询再发现都只更新指纹，不再记事件或通知；点火发现或以同一原因再次确认过的问题（例如查询发现、换凭证后点火又失败）记为点火确认（`ignited`），只有点火成功才能结束。之后查询发现另一种原因（例如停用后查询又连续 401 满 30 分钟）时，事件和通知按新原因和来源照常发出，点火确认继续保留；只有凭证指纹变化后，新原因的问题才不带点火确认；状态在 `state.json` 中，插件重启后也不重复。发送失败时随之后每轮查询重试，每轮最多发一次：查询发现问题的那一轮已经发过，轮末的 `flushCredentialNotices` 跳过本轮发过或试过的通知（`credNoticeTried`）；1 小时（`credentialNoticeAge`）后放弃；没有推送渠道时不发送，这个问题也就不发恢复通知。
-- **凭证变化**：进入问题状态时记下凭证指纹（`providers.Fingerprint`：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。CPA 会自己改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
+- **凭证变化**：进入问题状态时记下凭证指纹（`host.Credential.Fingerprint`，由 `internal/magpie` 计算：refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 API key，再没有时用 access token）。每次主动查询读凭证文件时比较指纹，不同则标记 `changed`，点火按日程恢复；再次失败且原因相同时记下新指纹、重新暂停，不再通知。进入问题状态时读不到凭证文件，指纹记为空；之后第一次读到非空指纹也标记 `changed`，点火再试一次，失败后记下这次的指纹。这样不会因为没有指纹可比而永远暂停，重启后同样适用，代价是可能多一次点火尝试。Magpie 和代理 CLI 会改写凭证文件：每次刷新 token 都替换 access token，上游返回 TOS_VIOLATION 后还会写入 `tos_appeal_url`，所以不能用修改时间或整个文件判断重新登录。2026-11-17 在 Antigravity 凭证上实测，access token 每次刷新都变，refresh token 不变。每次刷新都换 refresh token 的服务，只有刷新成功时指纹才变，代价是每次刷新后多一次点火尝试。
 - **恢复**：点火成功（含手动点火）结束任何凭证问题；额度查询成功只结束没有点火确认的问题。2026-11-16 Antigravity 账号因 TOS_VIOLATION 点火被拒后，额度查询仍然成功，查询成功不能说明停用已解除。结束时记录 `credential_restored` 事件；问题通知已送达时发送“✅ … 凭证已恢复”。
 
 状态接口的账号带 `credential_problem`（`auth` 或 `suspended`），是 `state.json` 的副本，由 `engine.mu` 保护。凭证事件和它们的通知带同一个额度组 key（存在 `credentials` 的 `group` 中）：点火发现时是点火的额度组，其余是账号按显示顺序的第一个额度组（`accountGroup`），页面据此把推送挂到事件上。账号还没有额度组时两边都为空，页面改按标签匹配。凭证事件另外记下账号的 auth index（`Event.Account`，历史记录的 `a`），只供 MCP 找到账号，见“MCP”。
@@ -423,15 +434,15 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 ## 数据
 
-数据目录默认是插件目录下的 `data/lamplighter`。`config.DefaultDataDir` 从 CPA 的 `config.yaml` 读取 `plugins.dir`（默认 `plugins`，开头的 `~` 展开为用户主目录，相对路径以 CPA 的工作目录为准），与 CPA 解析插件目录的规则相同。CPA 在所有平台上都从临时目录 `cliproxy-pluginhost/pid-<进程号>/` 中的副本加载动态库，这个目录在 CPA 重启或容器重建后不保留，所以数据目录不能按动态库所在位置计算。
+数据目录的位置见“进程和数据目录”。
 
 | 文件 | 内容 |
 | --- | --- |
-| `state.json` | `groups`：每个窗口的通知基线和最近一次成功主动查询确认的窗口集合；`scheduler`：每个额度组的点火状态；`codex_reset_updates`：已见记录和已推送的排期；`cooldown_notices`：已提醒的过期冷却；`language`：通知语言；`plans`：各账号的原始套餐值、上次单独读取套餐的时间、上次主动查询的窗口、重读截止时间和待发送的套餐变化通知；`credentials`：各账号的凭证问题、指纹和通知状态（见“凭证问题”）。写入临时文件后替换 |
+| `state.json` | `groups`：每个窗口的通知基线和最近一次成功主动查询确认的窗口集合；`scheduler`：每个额度组的点火状态；`codex_reset_updates`：已见记录和已推送的排期；`language`：通知语言；`plans`：各账号的原始套餐值、上次单独读取套餐的时间、上次主动查询的窗口、重读截止时间和待发送的套餐变化通知；`credentials`：各账号的凭证问题、指纹和通知状态（见“凭证问题”）。写入临时文件后替换 |
 | `history/YYYY-MM-DD.jsonl` | 按 UTC 日期分文件的额度样本和事件 |
 | `instance.lock` | 实例锁 |
 
-历史记录每行一个 JSON：样本为 `{"k":"s","t":秒,"g":额度组,"w":窗口,"r":剩余,"x":重置,"s":"active|passive"}`，事件为 `{"k":"e","t":秒,"g":额度组,"e":类型,"v":级别,"m":文本,"l":标签,"d":详情,"p":参数,"a":账号}`，`a` 是账号的 auth index，只有凭证事件有。`m` 和 `d` 是写给 CPA 日志的中文；`p` 是页面拼出事件文字所需的值：`ignite` 和 `ignite_manual` 为 `model`、`reset`，自动点火的 `ignite_failed` 为 `retry_seconds`、`error`、`summary` 和可选的 `cooldown`，手动点火的 `ignite_failed` 为 `manual`（`1`）、`error`、`summary`，`ignite_paused` 为 `until`、`error`、`summary` 和可选的 `reason`（`reason` 为 `auth` 或 `suspended` 时没有 `until`），`credential_invalid` 为 `reason`、`status`、`code`、`summary`、`appeal_url`、`source`（`ignite` 或 `query`），限流时还有 `until`，`credential_restored` 为 `source`，`model_refused` 为 `model`、`fallback`、`hours`，`notify` 为 `title`、`notify_kind`，`notify_failed` 为 `title`、`error`、`notify_kind`（`quota`、`recovery`、`reminder`、`cooldown`、`plan`、`circuit`、`credential`、`suspended`、`rate_limited`、`credential_ok`、`codex_reset`），恢复通知还有 `windows`（以逗号连接的窗口 ID），`cooldown_stale` 为 `until`，`plan_change` 为 `from`、`to`（套餐名），`codex_reset` 为 `count`；`reset` 和 `exhausted` 为 `window`、`remaining`、`kind`（`5h`、`7d` 或空）、`label`（窗口短名）及可选的 `reset`；时间为 RFC 3339 UTC。主动样本每次都写；被动样本只在数值或重置时间变化时写，同一窗口每分钟最多一次，期间的新值暂存在 `pendingSamp`，满一分钟后写入。历史接口对超过 2 天的范围分段，每段取最后一个样本：超过 2 天按 10 分钟，超过 4 天按 15 分钟，超过 8 天按 30 分钟，超过 15 天按 1 小时，使这些范围的每个系列不超过约 800 个点（图表约 1000 像素宽）。2 天及以内不分段。分段长度在响应的 `bucket_seconds` 中。每个系列还带有 `resets: [[t, x], ...]`，两个值均为 Unix 秒，表示从样本时间 `t` 起预定重置时间为 `x`。此数组在点降采样之前按原始样本生成，按 `t` 升序；相邻原始样本的非零 `x` 相差超过 60 秒才记为变化，已知与未知之间的切换始终记录，未知使用 `x=0`。范围前生效项使用范围开始前时间最大的样本的 `[t, x]`，其 `t` 可以早于样本的一天前导范围，不要求是该 `x` 首次出现的时间；整个系列从未有重置时间时返回空数组。`points` 仍为 `[t, remaining, passive]`，分段规则独立于重置事件。每个系列带有 `label`（含账号后缀，例如 `ChatGPT#rk`）和 `source_label`（不含后缀），页面按服务和 `source_label` 合并同一额度的多个账号。
+历史记录每行一个 JSON：样本为 `{"k":"s","t":秒,"g":额度组,"w":窗口,"r":剩余,"x":重置,"s":"active|passive"}`，事件为 `{"k":"e","t":秒,"g":额度组,"e":类型,"v":级别,"m":文本,"l":标签,"d":详情,"p":参数,"a":账号}`，`a` 是账号的 auth index，只有凭证事件有。`m` 和 `d` 是写给日志的中文；`p` 是页面拼出事件文字所需的值：`ignite` 和 `ignite_manual` 为 `model`、`reset`，自动点火的 `ignite_failed` 为 `retry_seconds`、`error`、`summary` 和可选的 `cooldown`，手动点火的 `ignite_failed` 为 `manual`（`1`）、`error`、`summary`，`ignite_paused` 为 `until`、`error`、`summary` 和可选的 `reason`（`reason` 为 `auth` 或 `suspended` 时没有 `until`），`credential_invalid` 为 `reason`、`status`、`code`、`summary`、`appeal_url`、`source`（`ignite` 或 `query`），限流时还有 `until`，`credential_restored` 为 `source`，`model_refused` 为 `model`、`fallback`、`hours`，`notify` 为 `title`、`notify_kind`，`notify_failed` 为 `title`、`error`、`notify_kind`（`quota`、`recovery`、`reminder`、`cooldown`、`plan`、`circuit`、`credential`、`suspended`、`rate_limited`、`credential_ok`、`codex_reset`），恢复通知还有 `windows`（以逗号连接的窗口 ID），`plan_change` 为 `from`、`to`（套餐名），`codex_reset` 为 `count`；`reset` 和 `exhausted` 为 `window`、`remaining`、`kind`（`5h`、`7d` 或空）、`label`（窗口短名）及可选的 `reset`；时间为 RFC 3339 UTC。主动样本每次都写；被动样本只在数值或重置时间变化时写，同一窗口每分钟最多一次，期间的新值暂存在 `pendingSamp`，满一分钟后写入。历史接口对超过 2 天的范围分段，每段取最后一个样本：超过 2 天按 10 分钟，超过 4 天按 15 分钟，超过 8 天按 30 分钟，超过 15 天按 1 小时，使这些范围的每个系列不超过约 800 个点（图表约 1000 像素宽）。2 天及以内不分段。分段长度在响应的 `bucket_seconds` 中。每个系列还带有 `resets: [[t, x], ...]`，两个值均为 Unix 秒，表示从样本时间 `t` 起预定重置时间为 `x`。此数组在点降采样之前按原始样本生成，按 `t` 升序；相邻原始样本的非零 `x` 相差超过 60 秒才记为变化，已知与未知之间的切换始终记录，未知使用 `x=0`。范围前生效项使用范围开始前时间最大的样本的 `[t, x]`，其 `t` 可以早于样本的一天前导范围，不要求是该 `x` 首次出现的时间；整个系列从未有重置时间时返回空数组。`points` 仍为 `[t, remaining, passive]`，分段规则独立于重置事件。每个系列带有 `label`（含账号后缀，例如 `ChatGPT#rk`）和 `source_label`（不含后缀），页面按服务和 `source_label` 合并同一额度的多个账号。
 
 管理历史查询通过 `store.History.QueryWindow` 单遍扫描保留记录。每个系列在范围外只保留时间最大的一个前驱样本，以及是否出现过非零重置时间的标记；同一时间的前驱取最后补写值，乱序补写不会覆盖较新的前驱。范围内记录收集后按时间稳定排序，再计算重置变化、点降采样和事件。前驱在一天前导范围内时也作为 `points` 的起始点，更早的前驱只提供重置状态；范围内没有样本的系列不输出。内存为 `O(系列数 + 范围内记录数)`，不对范围外记录排序，不创建磁盘临时文件，不依赖临时目录。扫描循环和范围内处理保留 context 取消检查。
 
@@ -439,8 +450,8 @@ Did Codex Reset 每 `poll_seconds` 秒（最少 300 秒，对齐时间边界）�
 
 ## 设计约束
 
-- 点火只通过 `host.model.execute_stream` 发送，并锁定到具体凭证；不要在插件中拼装服务的模型请求。
-- 额度请求的出口必须与 CPA 模型请求一致；出口无法确定时跳过请求，不能退回直连。
-- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `models_api_key`、`mcp_key`。
-- 宿主回调的 JSON 字段以 CPA v8.0.4 的 `sdk/pluginapi` 和 `internal/pluginhost` 为准；修改前对照 CPA 源码。
+- 点火只经 Magpie 网关发送，并用 `X-Magpie-Account` 锁定到具体账号；不要直接向服务发送模型请求。
+- 额度请求的出口必须与 Magpie 对同一账号的请求一致；出口无法确定时跳过请求，不能退回直连。
+- 不在日志、事件、状态接口或磁盘中输出 access token、`bark_url`、`webhook` 的地址、请求头和请求体，以及 `admin_key`、`mcp_key`。
+- Magpie 的接口和文件格式以 Magpie 最新源码为准；格式与预期不符时返回 `host.ErrFormat`，不猜测字段。
 - 修改 `state.json` 结构时保持向后兼容：新字段使用缺省值，旧字段缺失时继续运行。

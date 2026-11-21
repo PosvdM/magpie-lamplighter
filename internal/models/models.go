@@ -1,22 +1,14 @@
-// Package models reads the CPA model list and provides the helpers that
+// Package models caches the gateway model list and provides the helpers that
 // order ignition candidates.
 //
-// CPA has no host callback that lists the models of one credential, so the
-// plugin reads /v1/models with a dedicated API key. That list is the union of
-// all credentials, deduplicated by model ID, and its owned_by field can point
-// at another provider when two providers serve the same ID. Candidates are
-// therefore picked by name (see internal/providers). When CPA rejects a
-// candidate because the pinned credential does not serve it, the caller
-// tries the next one.
+// The Magpie gateway lists the models of every account together, so a model
+// on the list may not be served by every account. Candidates are therefore
+// picked by name (see internal/providers), and the engine tries the next
+// candidate when an account refuses one.
 package models
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,73 +17,42 @@ import (
 	"time"
 )
 
-// Lister fetches and caches the CPA model list.
+// Lister caches the model list.
 type Lister struct {
-	Client *http.Client
-	TTL    time.Duration
+	TTL time.Duration
 
 	mu      sync.Mutex
 	cached  []string
 	fetched time.Time
-	key     string
 }
 
-// List returns the model IDs exposed by CPA at baseURL.
-func (l *Lister) List(ctx context.Context, baseURL, apiKey string) ([]string, error) {
-	if strings.TrimSpace(apiKey) == "" {
-		return nil, errors.New("未配置 models_api_key，无法读取模型列表")
-	}
+// List returns the cached model ids, or reads them with fetch when the cache
+// is empty or older than TTL (10 minutes by default).
+func (l *Lister) List(ctx context.Context, fetch func(context.Context) ([]string, error)) ([]string, error) {
 	ttl := l.TTL
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
 	}
-	cacheKey := baseURL + "\x00" + apiKey
 	l.mu.Lock()
-	if l.key == cacheKey && time.Since(l.fetched) < ttl && len(l.cached) > 0 {
+	if time.Since(l.fetched) < ttl && len(l.cached) > 0 {
 		out := append([]string(nil), l.cached...)
 		l.mu.Unlock()
 		return out, nil
 	}
 	l.mu.Unlock()
-
-	client := l.Client
-	if client == nil {
-		// The request goes to CPA itself, so it must not use a proxy.
-		client = &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/v1/models", nil)
+	raw, err := fetch(ctx)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("读取 CPA 模型列表失败: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("读取 CPA 模型列表失败: HTTP %d", resp.StatusCode)
-	}
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("CPA 模型列表格式错误: %w", err)
-	}
-	ids := make([]string, 0, len(payload.Data))
-	for _, item := range payload.Data {
-		if id := strings.TrimSpace(item.ID); id != "" {
+	ids := make([]string, 0, len(raw))
+	for _, id := range raw {
+		if id = strings.TrimSpace(id); id != "" {
 			ids = append(ids, id)
 		}
 	}
 	l.mu.Lock()
 	l.cached = append([]string(nil), ids...)
 	l.fetched = time.Now()
-	l.key = cacheKey
 	l.mu.Unlock()
 	return ids, nil
 }

@@ -35,7 +35,6 @@ func TestMCPReadiness(t *testing.T) {
 		polled        bool
 		listFailed    bool
 		accountFailed bool
-		disabled      bool
 		stopped       bool
 		state         string
 	}{
@@ -45,14 +44,12 @@ func TestMCPReadiness(t *testing.T) {
 		{name: "only account query failed", running: true, accountFailed: true, state: "starting"},
 		{name: "credential listing failed", running: true, listFailed: true},
 		{name: "first full poll complete", running: true, polled: true},
-		{name: "disabled before running", disabled: true, state: "disabled"},
-		{name: "disabled with old data", running: true, polled: true, disabled: true, state: "disabled"},
 		{name: "shutdown in progress", running: true, polled: true, stopped: true, state: "starting"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := New(Options{})
 			e.dataDir = t.TempDir()
-			e.enabled, e.running, e.stopped = !tc.disabled, tc.running, tc.stopped
+			e.running, e.stopped = tc.running, tc.stopped
 			if tc.polled {
 				e.lastPoll = now
 			}
@@ -88,8 +85,7 @@ func TestMCPRefreshStartupDoesNotConsumeLimit(t *testing.T) {
 	now := time.Now().UTC()
 	e := New(Options{Now: func() time.Time { return now }})
 	b := NewMCPBackend(e)
-	for _, state := range []string{"starting", "disabled"} {
-		e.enabled = state != "disabled"
+	for _, state := range []string{"starting"} {
 		for range 2 {
 			value, err := b.CallTool(context.Background(), "refresh_quotas", map[string]string{"account": "not loaded yet"})
 			assertMCPNotReady(t, value, err, state)
@@ -98,7 +94,7 @@ func TestMCPRefreshStartupDoesNotConsumeLimit(t *testing.T) {
 			}
 		}
 	}
-	e.enabled, e.running = true, true
+	e.running = true
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -129,7 +125,7 @@ func TestMCPRefreshStartupDoesNotConsumeLimit(t *testing.T) {
 }
 
 func TestMCPRefreshShutdownRaceDoesNotConsumeLimit(t *testing.T) {
-	for _, state := range []string{"starting", "disabled"} {
+	for _, state := range []string{"starting"} {
 		t.Run(state, func(t *testing.T) {
 			now := time.Now().UTC()
 			snapshot := make(chan struct{}, 1)
@@ -143,7 +139,7 @@ func TestMCPRefreshShutdownRaceDoesNotConsumeLimit(t *testing.T) {
 			e.running = true
 			b := NewMCPBackend(e)
 			// Hold the reservation lock while refresh takes a running snapshot.
-			// Stop/disable then wins before the final running check and reservation.
+			// Stop then wins before the final running check and reservation.
 			b.mu.Lock()
 			locked := true
 			defer func() {
@@ -167,13 +163,7 @@ func TestMCPRefreshShutdownRaceDoesNotConsumeLimit(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("refresh did not take a status snapshot")
 			}
-			if state == "starting" {
-				e.Stop(0)
-			} else {
-				e.mu.Lock()
-				e.enabled = false
-				e.mu.Unlock()
-			}
+			e.Stop(0)
 			b.mu.Unlock()
 			locked = false
 			select {

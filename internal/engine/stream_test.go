@@ -11,23 +11,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/ignite"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
 )
 
 // streamHost blocks reads until a chunk arrives or Close cancels the upstream.
 // This models the host bridge rather than timing out only the caller's wait.
 type streamHost struct {
 	*fakeHost
-	chunks    chan pluginapi.HostModelStreamReadResponse
+	chunks    chan host.StreamChunk
 	closed    chan struct{}
 	reading   chan struct{}
 	closeOnce sync.Once
 	mu        sync.Mutex
 	closes    int
 	calls     int
-	opened    pluginapi.HostModelStreamResponse
+	opened    host.ModelStream
 	openErr   error
 	open      func()
 	messages  []string
@@ -36,13 +35,13 @@ type streamHost struct {
 
 func newStreamHost() *streamHost {
 	return &streamHost{
-		fakeHost: &fakeHost{}, chunks: make(chan pluginapi.HostModelStreamReadResponse, 10),
+		fakeHost: &fakeHost{}, chunks: make(chan host.StreamChunk, 10),
 		closed: make(chan struct{}), reading: make(chan struct{}, 10),
-		opened: pluginapi.HostModelStreamResponse{StatusCode: 200, StreamID: "stream-1", Headers: http.Header{"X-Test": {"quota"}}},
+		opened: host.ModelStream{StatusCode: 200, ID: "stream-1", Header: http.Header{"X-Test": {"quota"}}},
 	}
 }
 
-func (h *streamHost) ModelExecuteStream(req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelStreamResponse, error) {
+func (h *streamHost) OpenModelStream(_ context.Context, req host.ModelRequest) (host.ModelStream, error) {
 	h.calls++
 	if h.open != nil {
 		h.open()
@@ -50,7 +49,7 @@ func (h *streamHost) ModelExecuteStream(req pluginapi.HostModelExecutionRequest)
 	return h.opened, h.openErr
 }
 
-func (h *streamHost) ModelStreamRead(string) (pluginapi.HostModelStreamReadResponse, error) {
+func (h *streamHost) ReadModelStream(string) (host.StreamChunk, error) {
 	select {
 	case h.reading <- struct{}{}:
 	default:
@@ -59,11 +58,11 @@ func (h *streamHost) ModelStreamRead(string) (pluginapi.HostModelStreamReadRespo
 	case chunk := <-h.chunks:
 		return chunk, nil
 	case <-h.closed:
-		return pluginapi.HostModelStreamReadResponse{}, errors.New("upstream canceled SECRET")
+		return host.StreamChunk{}, errors.New("upstream canceled SECRET")
 	}
 }
 
-func (h *streamHost) ModelStreamClose(string) error {
+func (h *streamHost) CloseModelStream(string) error {
 	h.mu.Lock()
 	h.closes++
 	h.mu.Unlock()
@@ -76,7 +75,7 @@ func (h *streamHost) Log(_ string, message string, _ map[string]any) {
 }
 
 func (h *streamHost) raw(s string) {
-	h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(s)}
+	h.chunks <- host.StreamChunk{Payload: []byte(s)}
 }
 
 func (h *streamHost) event(s string) {
@@ -91,8 +90,8 @@ func streamTarget() target {
 	return target{group: GroupView{Provider: "codex", AuthIndex: "42"}}
 }
 
-func streamRequest() pluginapi.HostModelExecutionRequest {
-	return pluginapi.HostModelExecutionRequest{Model: "test-model", Stream: true, ExitProtocol: "openai-response", Body: []byte("SECRET request"), AuthID: "SECRET credential"}
+func streamRequest() host.ModelRequest {
+	return host.ModelRequest{Model: "test-model", Protocol: "openai-response", Body: []byte("SECRET request"), Account: "SECRET credential"}
 }
 
 func streamRecord(t *testing.T, h *streamHost) map[string]any {
@@ -126,7 +125,7 @@ func TestIgnitionStreamWatchdogClosesBlockedRead(t *testing.T) {
 	if err != nil || elapsed < 1900*time.Millisecond || elapsed > 5*time.Second || h.closes != 1 {
 		t.Fatalf("err=%v elapsed=%s closes=%d", err, elapsed, h.closes)
 	}
-	if resp.Headers.Get("X-Test") != "quota" {
+	if resp.Header.Get("X-Test") != "quota" {
 		t.Fatal("lost headers for quota confirmation")
 	}
 	r := streamRecord(t, h)
@@ -176,7 +175,7 @@ func TestIgnitionCodexScannerLines(t *testing.T) {
 			if metadata {
 				h.raw(": keepalive")
 			}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Done: true}
 			e := New(Options{Host: h})
 			_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
 			if err != nil || h.closes != 1 {
@@ -198,7 +197,7 @@ func TestIgnitionCodexScannerFailures(t *testing.T) {
 			h.raw(": keepalive")
 			h.raw("event: " + typ)
 			h.event(`{"type":"` + typ + `","delta":"OK"}`)
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Done: true}
 			e := New(Options{Host: h})
 			_, err := e.executeStream(context.Background(), streamTarget(), streamRequest(), ignitionOutputWindow)
 			if err == nil || h.closes != 1 {
@@ -218,15 +217,15 @@ func TestIgnitionCodexScannerFailures(t *testing.T) {
 func TestIgnitionHostChatJSONChunks(t *testing.T) {
 	for _, cutoff := range []bool{false, true} {
 		h := newStreamHost()
-		h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}`)}
+		h.chunks <- host.StreamChunk{Payload: []byte(`{"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}`)}
 		if !cutoff {
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Payload: []byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`)}
+			h.chunks <- host.StreamChunk{Payload: []byte(`{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)}
+			h.chunks <- host.StreamChunk{Done: true}
 		}
 		e := New(Options{Host: h})
 		req := streamRequest()
-		req.EntryProtocol, req.ExitProtocol = "openai", "openai"
+		req.Protocol = "openai"
 		_, err := e.executeStream(context.Background(), streamTarget(), req, 20*time.Millisecond)
 		if err != nil || h.closes != 1 {
 			t.Fatalf("cutoff=%v err=%v closes=%d", cutoff, err, h.closes)
@@ -269,15 +268,15 @@ func TestIgnitionStreamUsageProvenance(t *testing.T) {
 			h := newStreamHost()
 			for _, chunk := range tc.chunks {
 				if tc.protocol == "openai" {
-					h.chunks <- pluginapi.HostModelStreamReadResponse{Payload: []byte(chunk)}
+					h.chunks <- host.StreamChunk{Payload: []byte(chunk)}
 				} else {
 					h.event(chunk)
 				}
 			}
-			h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+			h.chunks <- host.StreamChunk{Done: true}
 			e := New(Options{Host: h})
 			target, req := streamTarget(), streamRequest()
-			target.group.Provider, req.ExitProtocol = tc.provider, tc.protocol
+			target.group.Provider, req.Protocol = tc.provider, tc.protocol
 			_, err := e.executeStream(context.Background(), target, req, ignitionOutputWindow)
 			if err != nil || h.closes != 1 || len(h.messages) != 1 {
 				t.Fatalf("err=%v closes=%d logs=%v", err, h.closes, h.messages)
@@ -286,7 +285,7 @@ func TestIgnitionStreamUsageProvenance(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(h.messages[0], "Lamplighter ignition ")), &record); err != nil {
 				t.Fatal(err)
 			}
-			if record["usage_completeness"] != tc.completeness || record["usage_source"] != "cpa_host" || record["end_reason"] != "completed" {
+			if record["usage_completeness"] != tc.completeness || record["usage_source"] != "magpie_gateway" || record["end_reason"] != "completed" {
 				t.Fatal(record)
 			}
 		})
@@ -360,16 +359,16 @@ func TestIgnitionStreamErrorsAndPartialUsage(t *testing.T) {
 			h := newStreamHost()
 			switch mode {
 			case "startup":
-				h.opened = pluginapi.HostModelStreamResponse{}
+				h.opened = host.ModelStream{}
 				h.openErr = &host.Error{Code: "auth_not_found", Message: "SECRET", Status: 503}
 			case "http":
 				h.opened.StatusCode = 400
 			case "error":
 				h.event(`{"error":{"message":"SECRET"}}`)
 			case "read terminal error":
-				h.chunks <- pluginapi.HostModelStreamReadResponse{Error: "SECRET", Done: true}
+				h.chunks <- host.StreamChunk{Error: "SECRET", Done: true}
 			case "eof":
-				h.chunks <- pluginapi.HostModelStreamReadResponse{Done: true}
+				h.chunks <- host.StreamChunk{Done: true}
 			case "invalid":
 				h.event(`SECRET invalid json`)
 			case "partial cutoff":
@@ -489,19 +488,19 @@ func TestStreamWatchdogOwnershipAndPanic(t *testing.T) {
 
 type cleanupStreamHost struct {
 	*streamHost
-	read    func() (pluginapi.HostModelStreamReadResponse, error)
+	read    func() (host.StreamChunk, error)
 	cleanup func() error
 }
 
-func (h *cleanupStreamHost) ModelStreamRead(id string) (pluginapi.HostModelStreamReadResponse, error) {
+func (h *cleanupStreamHost) ReadModelStream(id string) (host.StreamChunk, error) {
 	if h.read != nil {
 		return h.read()
 	}
-	return h.streamHost.ModelStreamRead(id)
+	return h.streamHost.ReadModelStream(id)
 }
 
-func (h *cleanupStreamHost) ModelStreamClose(id string) error {
-	_ = h.streamHost.ModelStreamClose(id)
+func (h *cleanupStreamHost) CloseModelStream(id string) error {
+	_ = h.streamHost.CloseModelStream(id)
 	return h.cleanup()
 }
 
@@ -518,14 +517,14 @@ func TestIgnitionStreamCleanupPriority(t *testing.T) {
 				case "output_timeout":
 					h.event(`{"type":"response.output_text.delta","delta":"OK"}`)
 				case "read_error", "canceled":
-					h.read = func() (pluginapi.HostModelStreamReadResponse, error) {
+					h.read = func() (host.StreamChunk, error) {
 						if owner == "canceled" {
 							cancel()
 							// Block until the watchdog closes upstream, ensuring
 							// cancellation owns the terminal result first.
 							<-h.closed
 						}
-						return pluginapi.HostModelStreamReadResponse{}, errors.New("SECRET")
+						return host.StreamChunk{}, errors.New("SECRET")
 					}
 				}
 				h.cleanup = func() error {
@@ -566,7 +565,7 @@ func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 				e.poll(context.Background(), e.config(), c.t, "", false)
 				h := newStreamHost()
 				h.fakeHost = base
-				h.opened.Headers = http.Header{
+				h.opened.Header = http.Header{
 					"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"},
 					"Anthropic-Ratelimit-Unified-5h-Reset":       {strconv.FormatInt(c.t.Add(5*time.Hour).Unix(), 10)},
 				}
@@ -593,7 +592,7 @@ func TestIgnitionStreamErrorsKeepFailureProtection(t *testing.T) {
 					}
 					switch channel {
 					case "host":
-						h.chunks <- pluginapi.HostModelStreamReadResponse{Error: `{"error":` + detail + `}`, Done: true}
+						h.chunks <- host.StreamChunk{Error: `{"error":` + detail + `}`, Done: true}
 					case "error":
 						h.event(`{"type":"error","error":` + detail + `}`)
 					case "response.failed":
@@ -644,7 +643,7 @@ func TestIgnitionCutoffConfirmsQuotaWindow(t *testing.T) {
 	e.poll(context.Background(), e.config(), c.t, "", false)
 	h := newStreamHost()
 	h.fakeHost = base
-	h.opened.Headers = http.Header{
+	h.opened.Header = http.Header{
 		"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.01"},
 		"Anthropic-Ratelimit-Unified-5h-Reset":       {strconv.FormatInt(c.t.Add(5*time.Hour).Unix(), 10)},
 	}

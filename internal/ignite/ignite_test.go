@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 var shanghai = time.FixedZone("UTC+8", 8*3600)

@@ -1,28 +1,24 @@
-// Package host wraps the CPA host callbacks used by Lamplighter.
+// Package host is the contract between Lamplighter and Magpie.
 //
-// The native ABI exchanges JSON envelopes. Package main supplies a Caller that
-// crosses the C boundary; everything above it works with Go values so that the
-// rest of the plugin can be tested with a fake host.
+// The engine sees Magpie only through Host. Package magpie implements it
+// against a running Magpie: the account list and quotas from the gateway at
+// MAGPIE_ADDR, the credentials from Magpie's configuration directory, and
+// ignition requests through the gateway with X-Magpie-Account. Tests use a
+// fake Host.
 package host
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
-// Caller sends one host callback and returns the raw envelope bytes.
-type Caller func(method string, payload []byte) ([]byte, error)
-
-// Error is a failed host callback. Status carries the HTTP status that CPA
-// attached to the error, or 0 when it did not set one.
+// Error is a failed host call or a normalized upstream error. Status carries
+// the HTTP status, or 0 when none is known.
 type Error struct {
 	Method  string
 	Code    string
@@ -49,180 +45,131 @@ func StatusOf(err error) int {
 	return 0
 }
 
-// Host is the set of host callbacks Lamplighter uses.
+// ErrNotImplemented is returned by the parts of a Host that are not written
+// yet.
+var ErrNotImplemented = errors.New("not implemented")
+
+// ErrFormat reports a Magpie file or response whose format Lamplighter does
+// not know. Implementations wrap it and never guess a field.
+var ErrFormat = errors.New("unknown Magpie format")
+
+// Account is one subscription account that Magpie serves.
+type Account struct {
+	// Pin is Magpie's "<provider>/<id>" from GET /v1/magpie/accounts. It is
+	// the stable account key in state.json, account_weights, account_order
+	// and account_names, and the value of X-Magpie-Account.
+	Pin string `json:"pin"`
+	// Provider is Magpie's provider id, such as "codex", "claude" or
+	// "antigravity". The engine maps it to a Lamplighter provider with
+	// providers.Lookup.
+	Provider string `json:"provider"`
+	// Label is the name Magpie shows; Email is the account's email when
+	// Magpie knows one.
+	Label string `json:"label,omitempty"`
+	Email string `json:"email,omitempty"`
+	// Plan is Magpie's plan name, for display only.
+	Plan string `json:"plan,omitempty"`
+	// On is false for an account the user switched off in Magpie.
+	On bool `json:"on"`
+}
+
+// Credential is what a provider needs to read the quota of an account.
+// Implementations read it from Magpie's files and never refresh a token
+// that Magpie or an agent CLI owns; see docs/architecture.md.
+type Credential struct {
+	// Provider is Magpie's provider id; ID and Name are the account pin.
+	Provider    string
+	ID          string
+	Name        string
+	AccessToken string
+	// AccountID is the ChatGPT account id of a Codex account.
+	AccountID string
+	// ProjectID is the Cloud Code project of an Antigravity account.
+	ProjectID string
+	// ProxyURL is the proxy Magpie uses for this account's requests: the
+	// account's or provider's own, else Magpie's global proxy. "" means
+	// the environment proxy or a direct connection, "direct" a direct one.
+	ProxyURL string
+	// Fingerprint identifies the login, such as a hash of the refresh
+	// token; it changes when the user signs in again. "" when unknown.
+	Fingerprint string
+	// Expired is set when the access token is known to be past its expiry
+	// and cannot be renewed by Lamplighter. The engine then reads Magpie's
+	// kept quota for the account instead of asking the vendor.
+	Expired bool
+	// Data holds provider-specific fields, such as an Antigravity
+	// user_agent.
+	Data map[string]any
+}
+
+// KeptQuota is Magpie's last reading of one account's quota, converted to
+// Lamplighter groups. Magpie sends no request to read it. The groups and
+// windows use the keys and IDs of the provider's own Fetch, such as
+// "claude:main" and quota.WindowFiveHour, so that they update the same
+// windows; a window the active query has not reported is ignored.
+type KeptQuota struct {
+	Pin    string
+	Groups []quota.RawGroup
+	// ReadAt is when Magpie took the reading.
+	ReadAt time.Time
+}
+
+// ModelRequest is one ignition request through the Magpie gateway.
+type ModelRequest struct {
+	// Account is the pin sent as X-Magpie-Account.
+	Account string
+	// Protocol is the request format: "openai-response" (POST
+	// /v1/responses), "claude" (POST /v1/messages) or "openai" (POST
+	// /v1/chat/completions).
+	Protocol string
+	Model    string
+	// Body is the JSON request body with stream set.
+	Body []byte
+}
+
+// ModelStream is an opened streaming response.
+type ModelStream struct {
+	ID         string
+	StatusCode int
+	Header     http.Header
+}
+
+// StreamChunk is the next part of a stream. Done marks the end of the body.
+type StreamChunk struct {
+	Payload []byte
+	Error   string
+	Done    bool
+}
+
+// ModelResponse is what the engine keeps of an ignition response to
+// confirm the new window.
+type ModelResponse struct {
+	StatusCode int
+	Header     http.Header
+}
+
+// Host is everything Lamplighter asks of Magpie.
 type Host interface {
-	AuthList() ([]pluginapi.HostAuthFileEntry, error)
-	AuthGet(authIndex string) (json.RawMessage, error)
-	ModelExecuteStream(req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelStreamResponse, error)
-	ModelStreamRead(streamID string) (pluginapi.HostModelStreamReadResponse, error)
-	ModelStreamClose(streamID string) error
-	HTTPDo(ctx context.Context, req pluginapi.HTTPRequest, timeout time.Duration) (pluginapi.HTTPResponse, error)
+	// Accounts lists the subscription accounts.
+	Accounts(ctx context.Context) ([]Account, error)
+	// Credential reads the credential of one account.
+	Credential(ctx context.Context, account Account) (Credential, error)
+	// KeptQuotas returns Magpie's last quota readings: the passive data,
+	// and the fallback for an account whose token has expired.
+	KeptQuotas(ctx context.Context) ([]KeptQuota, error)
+	// RefreshQuota asks Magpie to read one account's quota again. For
+	// Claude this runs Claude Code's /usage, so callers limit it.
+	RefreshQuota(ctx context.Context, pin string) error
+	// Models lists the model ids the gateway serves.
+	Models(ctx context.Context) ([]string, error)
+	// OpenModelStream sends an ignition request and returns once the
+	// response headers arrive. Cancelling ctx or CloseModelStream cancels
+	// the upstream request.
+	OpenModelStream(ctx context.Context, req ModelRequest) (ModelStream, error)
+	// ReadModelStream waits for the next chunk. CloseModelStream may run
+	// concurrently and unblocks it.
+	ReadModelStream(id string) (StreamChunk, error)
+	CloseModelStream(id string) error
+	// Log writes one log entry.
 	Log(level, message string, fields map[string]any)
-}
-
-// RPC implements Host on top of a Caller.
-type RPC struct {
-	Call Caller
-}
-
-type envelope struct {
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  *struct {
-		Code       string `json:"code"`
-		Message    string `json:"message"`
-		HTTPStatus int    `json:"http_status,omitempty"`
-	} `json:"error,omitempty"`
-}
-
-func (r RPC) call(method string, payload any, out any) error {
-	if r.Call == nil {
-		return &Error{Method: method, Code: "host_unavailable", Message: "host API is not initialized"}
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	resp, err := r.Call(method, raw)
-	if err != nil {
-		return &Error{Method: method, Code: "host_call_failed", Message: err.Error()}
-	}
-	if len(resp) == 0 {
-		return &Error{Method: method, Code: "host_call_failed", Message: "empty response"}
-	}
-	var env envelope
-	if err := json.Unmarshal(resp, &env); err != nil {
-		return &Error{Method: method, Code: "host_call_failed", Message: "invalid envelope: " + err.Error()}
-	}
-	if !env.OK {
-		hostErr := &Error{Method: method, Code: "host_call_failed", Message: "host callback failed"}
-		if env.Error != nil {
-			hostErr.Code = env.Error.Code
-			hostErr.Message = env.Error.Message
-			hostErr.Status = env.Error.HTTPStatus
-		}
-		return hostErr
-	}
-	if out == nil || len(env.Result) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(env.Result, out); err != nil {
-		return &Error{Method: method, Code: "host_call_failed", Message: "invalid result: " + err.Error()}
-	}
-	return nil
-}
-
-// AuthList returns every credential known to CPA.
-func (r RPC) AuthList() ([]pluginapi.HostAuthFileEntry, error) {
-	var resp struct {
-		Files []pluginapi.HostAuthFileEntry `json:"files"`
-	}
-	if err := r.call(pluginabi.MethodHostAuthList, map[string]any{}, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Files, nil
-}
-
-// AuthGet returns the credential file JSON for authIndex.
-func (r RPC) AuthGet(authIndex string) (json.RawMessage, error) {
-	var resp pluginapi.HostAuthGetResponse
-	if err := r.call(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: authIndex}, &resp); err != nil {
-		return nil, err
-	}
-	return resp.JSON, nil
-}
-
-// ModelExecuteStream waits synchronously for CPA to open a model stream.
-// The SDK exposes no cancellation handle until this call returns a stream ID.
-func (r RPC) ModelExecuteStream(req pluginapi.HostModelExecutionRequest) (pluginapi.HostModelStreamResponse, error) {
-	var resp pluginapi.HostModelStreamResponse
-	err := r.call(pluginabi.MethodHostModelExecuteStream, req, &resp)
-	return resp, err
-}
-
-// ModelStreamRead waits for a chunk. ModelStreamClose may run concurrently to
-// cancel the upstream request and unblock a pending read.
-func (r RPC) ModelStreamRead(streamID string) (pluginapi.HostModelStreamReadResponse, error) {
-	var resp pluginapi.HostModelStreamReadResponse
-	err := r.call(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: streamID}, &resp)
-	return resp, err
-}
-
-// ModelStreamClose releases the host stream and cancels its upstream request.
-func (r RPC) ModelStreamClose(streamID string) error {
-	return r.call(pluginabi.MethodHostModelStreamClose, pluginapi.HostModelStreamCloseRequest{StreamID: streamID}, nil)
-}
-
-type httpRequest struct {
-	OperationID string      `json:"operation_id,omitempty"`
-	Method      string      `json:"method,omitempty"`
-	URL         string      `json:"url,omitempty"`
-	Headers     http.Header `json:"headers,omitempty"`
-	Body        []byte      `json:"body,omitempty"`
-}
-
-// HTTPDo sends req through CPA's HTTP client, which applies the global
-// proxy-url, then environment proxies, then a direct connection. host.http.do
-// has no timeout of its own, so the request runs inside a host HTTP operation
-// that is cancelled when timeout or ctx expires.
-func (r RPC) HTTPDo(ctx context.Context, req pluginapi.HTTPRequest, timeout time.Duration) (pluginapi.HTTPResponse, error) {
-	var opened struct {
-		OperationID string `json:"operation_id"`
-	}
-	if err := r.call(pluginabi.MethodHostHTTPOperationOpen, map[string]any{}, &opened); err != nil {
-		return pluginapi.HTTPResponse{}, err
-	}
-	operationID := strings.TrimSpace(opened.OperationID)
-	if operationID == "" {
-		return pluginapi.HTTPResponse{}, &Error{Method: pluginabi.MethodHostHTTPOperationOpen, Code: "host_call_failed", Message: "empty operation id"}
-	}
-
-	done := make(chan struct{})
-	defer close(done)
-	if timeout <= 0 {
-		timeout = 20 * time.Second
-	}
-	go func() {
-		defer func() { _ = recover() }()
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		select {
-		case <-done:
-			return
-		case <-timer.C:
-		case <-ctx.Done():
-		}
-		_ = r.call(pluginabi.MethodHostHTTPCancel, map[string]any{"operation_id": operationID}, nil)
-	}()
-
-	var resp pluginapi.HTTPResponse
-	err := r.call(pluginabi.MethodHostHTTPDo, httpRequest{
-		OperationID: operationID,
-		Method:      req.Method,
-		URL:         req.URL,
-		Headers:     req.Headers,
-		Body:        req.Body,
-	}, &resp)
-	if err != nil {
-		select {
-		case <-ctx.Done():
-			return resp, ctx.Err()
-		default:
-		}
-		return resp, err
-	}
-	return resp, nil
-}
-
-// Log writes one entry to the CPA log.
-func (r RPC) Log(level, message string, fields map[string]any) {
-	if fields == nil {
-		fields = map[string]any{}
-	}
-	fields["plugin"] = "lamplighter"
-	_ = r.call(pluginabi.MethodHostLog, map[string]any{
-		"level":   level,
-		"message": message,
-		"fields":  fields,
-	}, nil)
 }

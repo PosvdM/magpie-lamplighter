@@ -8,8 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/host"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
 
 func checkManualFailure(t *testing.T, e *Engine, sender *fakeSender, c *clock, chosen target, seeded bool) {
@@ -55,8 +54,8 @@ func TestManualFailurePreservesAutomaticSchedule(t *testing.T) {
 			t.Run(name+"/seeded="+map[bool]string{false: "false", true: "true"}[seeded], func(t *testing.T) {
 				c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 				h := claudeIgnitionHost(c, nil)
-				h.execute = func(pluginapi.HostModelExecutionRequest) (pluginapi.HostModelExecutionResponse, error) {
-					return pluginapi.HostModelExecutionResponse{}, failure
+				h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
+					return host.ModelResponse{}, failure
 				}
 				e, sender := newTestEngine(t, h, c)
 				e.poll(context.Background(), e.config(), c.t, "", false)

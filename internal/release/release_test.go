@@ -42,7 +42,7 @@ func TestComparable(t *testing.T) {
 func serve(t *testing.T, status int, body string) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") != "cpa-plugin-lamplighter/0.4.0" {
+		if r.Header.Get("User-Agent") != "magpie-lamplighter/0.4.0" {
 			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
 		}
 		w.WriteHeader(status)
@@ -55,12 +55,12 @@ func serve(t *testing.T, status int, body string) {
 }
 
 func TestLatest(t *testing.T) {
-	serve(t, http.StatusOK, `{"tag_name":"v0.5.0","html_url":"https://github.com/PosvdM/cpa-plugin-lamplighter/releases/tag/v0.5.0"}`)
-	got, err := Latest(context.Background(), http.DefaultClient, "cpa-plugin-lamplighter/0.4.0")
+	serve(t, http.StatusOK, `{"tag_name":"v0.5.0","html_url":"https://github.com/PosvdM/magpie-lamplighter/releases/tag/v0.5.0"}`)
+	got, err := Latest(context.Background(), http.DefaultClient, "magpie-lamplighter/0.4.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Release{Version: "0.5.0", URL: "https://github.com/PosvdM/cpa-plugin-lamplighter/releases/tag/v0.5.0"}
+	want := Release{Version: "0.5.0", URL: "https://github.com/PosvdM/magpie-lamplighter/releases/tag/v0.5.0"}
 	if got != want {
 		t.Fatalf("Latest = %+v, want %+v", got, want)
 	}
@@ -78,7 +78,7 @@ func TestLatestFailures(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			serve(t, c.status, c.body)
-			if got, err := Latest(context.Background(), http.DefaultClient, "cpa-plugin-lamplighter/0.4.0"); err == nil {
+			if got, err := Latest(context.Background(), http.DefaultClient, "magpie-lamplighter/0.4.0"); err == nil {
 				t.Fatalf("Latest = %+v, want an error", got)
 			}
 		})
@@ -86,8 +86,8 @@ func TestLatestFailures(t *testing.T) {
 }
 
 func TestLatestWithNonNumericTagIsNeverNewer(t *testing.T) {
-	serve(t, http.StatusOK, `{"tag_name":"v0.6.0-beta","html_url":"https://github.com/PosvdM/cpa-plugin-lamplighter/releases/tag/v0.6.0-beta"}`)
-	got, err := Latest(context.Background(), http.DefaultClient, "cpa-plugin-lamplighter/0.4.0")
+	serve(t, http.StatusOK, `{"tag_name":"v0.6.0-beta","html_url":"https://github.com/PosvdM/magpie-lamplighter/releases/tag/v0.6.0-beta"}`)
+	got, err := Latest(context.Background(), http.DefaultClient, "magpie-lamplighter/0.4.0")
 	if err != nil {
 		t.Fatal(err)
 	}

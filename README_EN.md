@@ -4,6 +4,9 @@
 
 [中文](./README.md)
 
+> [!NOTE]
+> This repository is the Magpie edition of Lamplighter (npm package `magpie-lamplighter`). v0.1.0 is in development and not released yet. The text below still describes the CLIProxyAPI edition, [cpa-plugin-lamplighter](https://github.com/PosvdM/cpa-plugin-lamplighter), and will be rewritten before the release. The technical documents are in Chinese: [architecture](./docs/architecture.md) and [development](./docs/development.md).
+
 > When he lights his street lamp, it is as if he brought one more star to life, or one flower. — *The Little Prince*
 >
 > The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.

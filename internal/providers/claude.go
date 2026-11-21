@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/models"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/models"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // Claude endpoint and headers, the same as the CPA Management Center quota

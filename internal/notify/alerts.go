@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/config"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // Severities, from best to worst.
@@ -554,18 +554,6 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 	}
 	groupState.Label = g.Label
 	groupState.LastSeen = now.Unix()
-}
-
-// CooldownMessage is sent once when CPA keeps an account in a cooldown
-// although its quota has recovered.
-func CooldownMessage(lang, label string, until time.Time, loc *time.Location) Message {
-	return Message{
-		Kind:  KindCooldown,
-		Title: T(lang, "cooldown_title", label),
-		Body:  T(lang, "cooldown_body", until.In(loc).Format("01/02 15:04")),
-		Level: LevelTimeSensitive,
-		Label: label,
-	}
 }
 
 // PlanMessage is sent when the plan of an account changes, such as an

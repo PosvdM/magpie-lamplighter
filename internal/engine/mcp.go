@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/failure"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/notify"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/providers"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/quota"
-	"github.com/PosvdM/cpa-plugin-lamplighter/internal/store"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/notify"
+	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // MCPBackend exposes a separate, model-safe view of the engine.
@@ -194,8 +194,8 @@ func selectedAccounts(s Status, args map[string]string) map[string]string {
 const startupRetrySeconds = 30
 
 // notReady returns the result for a tool call that arrives before the
-// engine has quota data: while it waits after CPA starts, before its first
-// full poll, and while the plugin is disabled. Empty lists at that time
+// engine has quota data: while it waits after the start, and before its
+// first full poll. Empty lists at that time
 // would read as accounts without quota. nil means the engine is ready. A
 // failed credential listing counts as ready; list_quotas then shows no
 // accounts.
@@ -212,8 +212,6 @@ func (b *MCPBackend) notReadyLocked(needPoll bool) map[string]any {
 	e := b.engine
 	polled := !e.lastPoll.IsZero() || e.pollErrs[""] != ""
 	switch {
-	case !e.enabled:
-		return map[string]any{"ready": false, "state": "disabled", "certain": false, "note": "Lamplighter is disabled in the CPA config and reports no quota data."}
 	case !e.running || e.stopped || needPoll && !polled:
 		return map[string]any{"ready": false, "state": "starting", "certain": false, "retry_after_seconds": startupRetrySeconds, "note": "Lamplighter is starting and has not loaded quota data yet; this is not an empty quota list. Retry after retry_after_seconds."}
 	}
@@ -262,11 +260,9 @@ type quotaAccountDTO struct {
 	Account           string           `json:"account"`
 	Plan              string           `json:"plan"`
 	Weight            float64          `json:"weight"`
-	Unavailable       bool             `json:"unavailable"`
 	CredentialInvalid bool             `json:"credential_invalid"`
 	Suspended         bool             `json:"account_suspended"`
 	Error             string           `json:"recent_error,omitempty"`
-	Cooldown          *modelTime       `json:"cooldown_until"`
 	NextIgnition      *modelTime       `json:"next_ignition"`
 	Windows           []quotaWindowDTO `json:"windows"`
 }
@@ -360,7 +356,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 				groups = append(groups, group)
 			}
 			queryErr := safeQueryError(a)
-			account := quotaAccountDTO{Account: label, Plan: a.Plan, Weight: weight, Unavailable: a.Unavailable, CredentialInvalid: credentialInvalid(a), Suspended: a.CredentialProblem == failure.ReasonSuspended, Error: queryErr, Cooldown: describeTime(a.CooldownUntil, s.Now), NextIgnition: describeTime(targets[g.Key].NextDue, s.Now), Windows: []quotaWindowDTO{}}
+			account := quotaAccountDTO{Account: label, Plan: a.Plan, Weight: weight, CredentialInvalid: credentialInvalid(a), Suspended: a.CredentialProblem == failure.ReasonSuspended, Error: queryErr, NextIgnition: describeTime(targets[g.Key].NextDue, s.Now), Windows: []quotaWindowDTO{}}
 			for _, w := range g.Windows {
 				target := targets[g.Key]
 				target.Rolling = startStates[g.Key][1]
@@ -395,7 +391,7 @@ func (b *MCPBackend) listContext(ctx context.Context, args map[string]string) (a
 			group.Accounts = append(group.Accounts, account)
 		}
 		if !hasWindows {
-			withoutWindows = append(withoutWindows, map[string]any{"account": label, "provider": a.Provider, "plan": a.Plan, "weight": weight, "unavailable": a.Unavailable, "credential_invalid": credentialInvalid(a), "account_suspended": a.CredentialProblem == failure.ReasonSuspended, "recent_error": safeQueryError(a)})
+			withoutWindows = append(withoutWindows, map[string]any{"account": label, "provider": a.Provider, "plan": a.Plan, "weight": weight, "credential_invalid": credentialInvalid(a), "account_suspended": a.CredentialProblem == failure.ReasonSuspended, "recent_error": safeQueryError(a)})
 		}
 	}
 	for _, g := range groups {

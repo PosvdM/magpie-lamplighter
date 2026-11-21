@@ -54,11 +54,22 @@ test("config tokens are 16 hexadecimal digits", () => {
   assert.notEqual(a, b);
 });
 
-test("account names preserve trailing note lines and clearing removes the whole note", () => {
-  const ctx = context(["accountNote"]);
-  assert.equal(ctx.accountNote("old\r\nsecond\r\nthird", "new"), "new\nsecond\nthird");
-  assert.equal(ctx.accountNote("old\nsecond", ""), "");
-  assert.equal(ctx.accountNote("", "new"), "new");
+test("account names are saved in account_names by pin and clearing removes the entry", async () => {
+  const writes = [];
+  const ctx = context(["saveAccountName"], {
+    rawConfig: { account_names: { "codex/b": "B" } }, status: { accounts: [{ auth_index: "codex/a" }] },
+    API: "api",
+    patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
+    loadConfig: async () => {}, api: async () => ({}), renderStatus: () => {}, loadHistory: () => {},
+  });
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "A");
+  assert.deepEqual(writes.pop(), { account_names: { "codex/b": "B", "codex/a": "A" } });
+  assert.equal(ctx.status.accounts[0].note, "A");
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "");
+  assert.deepEqual(writes.pop(), { account_names: { "codex/b": "B" } });
+  ctx.rawConfig.account_names = { "codex/a": "A" };
+  await ctx.saveAccountName({ auth_index: "codex/a" }, "");
+  assert.deepEqual(writes.pop(), { account_names: null });
 });
 
 test("drag targets use layout midpoints rather than animated rectangles", () => {
@@ -76,7 +87,7 @@ test("drag targets use layout midpoints rather than animated rectangles", () => 
 
 test("queued inline weights merge changes and an empty field removes only its own override", async () => {
   const states = [], writes = [];
-  const ctx = context(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
     rawConfig: {}, saveQueue: Promise.resolve(), history: null,
     saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     translate: (key) => key, setSaveState: (...args) => states.push(args),
@@ -105,7 +116,7 @@ test("queued inline weights merge changes and an empty field removes only its ow
 });
 
 test("an earlier account name save does not overwrite a newer unsaved edit", async () => {
-  const ctx = context(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
     saveQueue: Promise.resolve(), history: null, saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     claimState: () => () => {}, translate: (key) => key, renderAccounts: () => {},
     saveAccountName: async () => {},
@@ -161,7 +172,7 @@ function accountSaveContext(fail) {
   const heading = saveNode("H2", { id: "account-order-state" });
   const section = { tagName: "SECTION", querySelector: selector => { assert.equal(selector, ".card-title"); return heading; } };
   const row = { account: { name: "a", note: "old" }, getAttribute: () => "a" };
-  const ctx = stateContext(["saveAccountField", "accountFieldHost", "accountNote", "fmtWeight", "saveAccountOrder"], {
+  const ctx = stateContext(["saveAccountField", "accountFieldHost", "fmtWeight", "saveAccountOrder"], {
     fail, rawConfig: {}, saveQueue: Promise.resolve(), history: null, pendingOrder: null,
     $: () => heading, toast: () => {},
     showApplied: say => { say("waiting", "waiting"); say("saved", "applied"); },
@@ -568,9 +579,7 @@ test("normal saves use the backend URL defaults and generate a key when enabling
     inputs = [{ name, value, type: type || "text", checked: value, getAttribute: () => null }];
     return JSON.parse(JSON.stringify(ctx.buildPatch(name)));
   }
-  assert.deepEqual(patch("cpa_base_url", " http://127.0.0.1:8317/// "), { cpa_base_url: "http://127.0.0.1:8317" });
-  assert.deepEqual(patch("cpa_base_url", ""), { cpa_base_url: "http://127.0.0.1:8317" });
-  assert.deepEqual(patch("mcp_listen", ""), { mcp_listen: "127.0.0.1:8318" });
+  assert.deepEqual(patch("public_listen", ""), { public_listen: "127.0.0.1:8318" });
   assert.deepEqual(patch("bark_url", "https://api.day.app/test/"), { bark_url: "https://api.day.app/test" });
   ctx.rawConfig.mcp_key = "  ";
   assert.deepEqual(patch("mcp_enabled", true, "checkbox"), { mcp_enabled: true, mcp_key: "llmcp_generated" });
@@ -772,13 +781,6 @@ test("matching needs the same group, the order, the time limit and the windows",
   assert.deepEqual(plain(built.rows.map((r) => r.event.params.window)), ["gemini-weekly"]);
   assert.equal(built.hidden, 1);
   assert.equal(built.fiveHour, 1);
-  // Older notifications have no group: their label decides.
-  built = ctx.eventRows([
-    event("notify", 20, { label: "Gemini", params: { title: "⚠️ Gemini 额度已恢复，CPA 仍在冷却" } }),
-    event("cooldown_stale", 10, { label: "Gemini", params: { until: "2026-11-17T00:00:00Z" } }),
-  ], false);
-  assert.equal(built.rows.length, 1);
-  assert.equal(built.rows[0].event.kind, "cooldown_stale");
 });
 
 test("older notifications are told by their titles", () => {
@@ -789,8 +791,6 @@ test("older notifications are told by their titles", () => {
   assert.equal(kind("⚠️ Gemini 点火已暂停"), "circuit");
   assert.equal(kind("⚠️ Gemini ignition paused"), "circuit");
   assert.equal(kind("🎫 GPT · 套餐 plus → free"), "plan");
-  assert.equal(kind("⚠️ GPT 额度已恢复，CPA 仍在冷却"), "cooldown");
-  assert.equal(kind("⚠️ GPT quota is back, CPA still cooling down"), "cooldown");
   assert.equal(kind("🟡 GPT · 5h 45%"), "quota");
   assert.equal(kind("🔴 GPT · 5h 5%"), "quota");
   assert.equal(kind("⏰ GPT · 5h 重置提醒"), "reminder");
