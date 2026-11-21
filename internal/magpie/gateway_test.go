@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,8 +277,37 @@ func TestModelStreamOutlivesContextAfterHeaders(t *testing.T) {
 	}
 }
 
-// The provider's error status counts when ctx is cancelled while its body
-// is read: the body is read within errorBodyWait regardless of ctx.
+// firstBodyRead replaces the gateway client with one that calls atRead
+// once, right before the first read of a response body: after
+// OpenModelStream has seen the headers and stopped following its ctx.
+func firstBodyRead(t *testing.T, atRead func()) {
+	t.Helper()
+	old := gatewayClient
+	var once sync.Once
+	gatewayClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp, err := gatewayTransport.RoundTrip(r)
+		if err == nil {
+			resp.Body = readHook{ReadCloser: resp.Body, before: func() { once.Do(atRead) }}
+		}
+		return resp, err
+	})}
+	t.Cleanup(func() { gatewayClient = old })
+}
+
+// readHook calls before ahead of each read of its body.
+type readHook struct {
+	io.ReadCloser
+	before func()
+}
+
+func (b readHook) Read(p []byte) (int, error) {
+	b.before()
+	return b.ReadCloser.Read(p)
+}
+
+// The provider's error status and body count when ctx is cancelled while
+// the body is read: the body is read within errorBodyWait regardless of
+// ctx.
 func TestModelStreamErrorBodyOutlivesContext(t *testing.T) {
 	release := make(chan struct{})
 	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
@@ -286,17 +316,21 @@ func TestModelStreamErrorBodyOutlivesContext(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.(http.Flusher).Flush()
-		<-release
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
 		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}`)
 	})
-	seen := headersSeen(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-seen
+	firstBodyRead(t, func() {
 		cancel()
+		// Long enough for a cancellation that still reached the request
+		// to cut it.
 		time.Sleep(50 * time.Millisecond)
 		close(release)
-	}()
+	})
 	opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "claude/x", Protocol: "claude", Body: []byte("{}")})
 	if opened.StatusCode != 401 || host.StatusOf(err) != 401 || !strings.Contains(err.Error(), "OAuth token has expired") {
 		t.Fatalf("%+v %v", opened, err)
@@ -322,6 +356,33 @@ func TestModelStreamErrorBodyOutlivesContext(t *testing.T) {
 	opened, err = h.OpenModelStream(context.Background(), host.ModelRequest{Account: "claude/x", Protocol: "claude", Body: []byte("{}")})
 	if opened.StatusCode != 403 || host.StatusOf(err) != 403 || time.Since(started) > 5*time.Second {
 		t.Fatalf("%+v %v after %s", opened, err, time.Since(started))
+	}
+}
+
+// A cancellation that comes with the error headers, before
+// OpenModelStream stops following ctx, may cut the body, but the status
+// still counts.
+func TestModelStreamErrorStatusOutlivesCancelAtHeaders(t *testing.T) {
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client going away once the body is read.
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	old := gatewayClient
+	gatewayClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp, err := gatewayTransport.RoundTrip(r)
+		// The headers are in; ctx ends before OpenModelStream sees them.
+		cancel()
+		return resp, err
+	})}
+	t.Cleanup(func() { gatewayClient = old })
+	opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "claude/x", Protocol: "claude", Body: []byte("{}")})
+	if opened.StatusCode != 401 || host.StatusOf(err) != 401 {
+		t.Fatalf("%+v %v", opened, err)
 	}
 }
 
