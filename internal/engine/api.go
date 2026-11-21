@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
@@ -354,6 +355,10 @@ type Status struct {
 	Events    []Event         `json:"events"`
 	// NextModels is the model automatic selection picks next, per provider.
 	NextModels map[string]string `json:"next_models,omitempty"`
+	// MagpieWarmup lists the pins of the monitored accounts whose 5-hour
+	// window Magpie's own warm-up starts; with Lamplighter's ignition they
+	// are ignited twice. Never null.
+	MagpieWarmup []string `json:"magpie_warmup"`
 	// Providers lists the supported providers in display order, for the
 	// settings, and GroupOrder the display order of quota groups.
 	Providers  []ProviderInfo `json:"providers"`
@@ -392,9 +397,46 @@ func providerInfos() []ProviderInfo {
 	return out
 }
 
+// warmupReader is implemented by a host that can read Magpie's warm-up
+// settings (magpie.Host.MagpieWarmup). It is no part of host.Host: a test
+// host or another host leaves the list empty.
+type warmupReader interface {
+	MagpieWarmup(accounts []host.Account) ([]string, error)
+}
+
+// magpieWarmup returns the pins of the monitored accounts that Magpie's
+// warm-up ignites, read on every call: the user can change the setting in
+// Magpie at any time. An unreadable setting gives an empty list.
+func (e *Engine) magpieWarmup() []string {
+	reader, ok := e.host.(warmupReader)
+	if !ok {
+		return []string{}
+	}
+	e.mu.Lock()
+	accounts := make([]host.Account, 0, len(e.creds))
+	for _, cred := range e.creds {
+		provider := cred.HostProvider
+		if provider == "" {
+			provider = cred.Provider
+		}
+		accounts = append(accounts, host.Account{Pin: cred.AuthIndex, Provider: provider, Email: cred.Email, On: true})
+	}
+	e.mu.Unlock()
+	pins, err := reader.MagpieWarmup(accounts)
+	if err != nil {
+		e.logf("debug", "读取 Magpie 预热设置失败：%v", err)
+	}
+	if pins == nil {
+		pins = []string{}
+	}
+	sort.Strings(pins)
+	return pins
+}
+
 // Status returns a snapshot for the management page. Secrets are removed
 // from the config: only whether they are set is reported.
 func (e *Engine) Status() Status {
+	warmup := e.magpieWarmup()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	cfg := e.cfg
@@ -428,6 +470,7 @@ func (e *Engine) Status() Status {
 		LockError:          e.lockErr,
 		ModelsError:        e.modelsErr,
 		NextModels:         maps.Clone(e.nextModels),
+		MagpieWarmup:       warmup,
 		ListError:          e.pollErrs[""],
 		NotifyError:        e.notifyErr,
 		Language:           notify.NormalizeLang(e.lang),

@@ -10,6 +10,11 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
 
+// The engine finds MagpieWarmup through this interface (engine.warmupReader).
+var _ interface {
+	MagpieWarmup([]host.Account) ([]string, error)
+} = (*Host)(nil)
+
 var warmAccounts = []host.Account{
 	{Pin: "codex/a", Provider: "codex", Email: "A@example.com"},
 	{Pin: "codex/b", Provider: "codex", Email: "b@example.com"},
