@@ -391,3 +391,13 @@ func credentialOf(t *testing.T, raw string) Credential {
 	}
 	return Credential{AccessToken: firstString(data, nil, "access_token"), ProjectID: firstString(data, nil, "project_id"), Data: data}
 }
+
+// Antigravity accounts reach Lamplighter under the agy-cli plugin's
+// provider id.
+func TestLookupAgyCLI(t *testing.T) {
+	for _, name := range []string{"agy-cli", "AGY_CLI", "antigravity"} {
+		if p := Lookup(name); p == nil || p.ID != "antigravity" {
+			t.Fatalf("Lookup(%q) = %v, want antigravity", name, p)
+		}
+	}
+}

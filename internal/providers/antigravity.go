@@ -128,7 +128,11 @@ var AntigravityQuotaURLs = []string{
 const AntigravityLoadCodeAssistURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
 var antigravity = &Provider{
-	ID:      "antigravity",
+	ID: "antigravity",
+	// Magpie serves Antigravity accounts through the agy-cli plugin
+	// (@magpie-community/opencode-agy-cli-auth), whose provider id they
+	// carry.
+	Aliases: []string{"agy-cli"},
 	Title:   "Antigravity",
 	Monitor: true,
 	Fetch:   fetchAntigravity,

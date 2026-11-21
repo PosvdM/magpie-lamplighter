@@ -55,15 +55,49 @@ npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `n
 
 | 方法 | 来源 |
 | --- | --- |
-| `Accounts` | 网关的 `GET /v1/magpie/accounts`。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控 |
-| `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的 `logins.json` 和 agy-cli 插件的账号文件，以及 `providers.json`、`settings.json` 中的代理。Claude 和 Codex 的 token 刷新时会更换 refresh token，Lamplighter 只读取、绝不刷新，否则会让 Magpie 或代理 CLI 掉线；Google 的 refresh token 刷新后不变，可以在内存中刷新。token 已过期且无法自己刷新时返回 `Expired`，引擎改读 `KeptQuotas` |
-| `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。额度组 key 和窗口 ID 与该服务 `Fetch` 的结果相同 |
-| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh`。Claude 的刷新会运行 Claude Code 的 `/usage`，调用方要限频 |
+| `Accounts` | 网关的 `GET /v1/magpie/accounts`，只取 `kind` 为 `account` 的条目（API key 没有额度窗口）。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控。`Email` 取 `user` 中的邮箱，Team 等席位的 `a@b.com · Team` 取 `·` 之前的部分 |
+| `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的文件，见下文“凭证” |
+| `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。见下文“额度记录” |
+| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次尝试计算，过早时返回 `ErrRefreshLimited`。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒，请求的超时为 45 秒 |
 | `Models` | 网关的 `GET /v1/models` |
 | `OpenModelStream` / `ReadModelStream` / `CloseModelStream` | 向网关发送点火请求（`openai-response` 为 `POST /v1/responses`，`claude` 为 `POST /v1/messages`，`openai` 为 `POST /v1/chat/completions`），带 `X-Magpie-Account`；关闭流时取消请求 |
 | `Log` | 标准错误输出，由插件宿主转交 Magpie 的日志 |
 
-Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，实现返回包装 `host.ErrFormat` 的错误，不猜测字段。
+Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，实现返回包装 `host.ErrFormat` 的错误，不猜测字段。以下格式按 Magpie 2a2a8d7 和 agy-cli 插件 0.1.106（magpie-community/plugins f4c3f89）核对。
+
+### 网关请求
+
+`internal/magpie` 直接连接 `MAGPIE_ADDR`（`0.0.0.0:<端口>` 和 `:<端口>` 改为 `127.0.0.1:<端口>`，与插件宿主相同），不经过环境变量中的代理。网关对来自本机回环地址的请求不要求密钥；带有转发头（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`Cf-Connecting-IP` 等）或浏览器特征（`Origin`、`Sec-Fetch-*`、以 `Mozilla/` 开头的 User-Agent）的请求按其他机器的请求处理，需要网关密钥（Magpie 的 `internal/gateway/lan.go`），因此请求中不带这些头。`MAGPIE_ADDR` 设为局域网地址时，请求不算来自本机，网关会拒绝，Lamplighter 不处理这种情况。网关返回非 2xx 时得到 `host.Error`，`Message` 取响应中的 `error.message`。
+
+### 凭证
+
+Magpie 用 pin 中的 id 指认账号：Codex 和 Claude 账号是 `logins.json` 中该条目的 `id`，没有 `id` 时是 `"magpie login\n<agent>\n<小写账号名>"` 的 SHA-256 前 8 字节；插件账号的 id 总是用插件服务名（如 `agy-cli`）和账号名这样算出（`nameID`）。
+
+| 服务 | 凭证来源 |
+| --- | --- |
+| Codex（`codex`） | `logins.json` 中 `agent` 为 `codex` 的条目的 `auth`，即 Codex 的 `auth.json`：`tokens.access_token`、`refresh_token`、`account_id`（没有时取 `id_token` 中的 `chatgpt_account_id`）。access token 的 JWT `exp` 已过时设 `Expired` |
+| Claude（`claude`） | `logins.json` 中 `agent` 为 `claude` 的条目的 `auth.claudeAiOauth`（`accessToken`、`refreshToken`、毫秒时间戳 `expiresAt`）。Claude Code 在账号自己的配置目录 `claude-accounts/<SHA-256(小写账号名) 前 16 个十六进制字符>/.credentials.json` 中刷新 token，Magpie 隔一段时间才写回 `logins.json`，所以那里的 `expiresAt` 更晚时用那里的 token（macOS 上 Claude Code 把它放在钥匙串中，这个文件可能不存在）。`expiresAt` 已过时设 `Expired`。用 setup-token 添加的账号（`auth.setupToken`）的 token 不能读额度，返回 `Expired`，由引擎改读额度记录 |
+| Antigravity（`agy-cli`） | agy-cli 插件（`@magpie-community/opencode-agy-cli-auth`）的账号。`logins.json` 中 `agent` 为 `plugin:agy-cli` 的条目的 `home` 是该账号在 `plugin-auth.json` 中的键，键下 `metadata.agyHome` 指定 agy 的登录文件 `$XDG_STATE_HOME/magpie-agy-bridge/accounts/<agyHome>/.gemini/antigravity-cli/antigravity-oauth-token`（没有 `XDG_STATE_HOME` 时为 `~/.local/state`）。没有 `agyHome` 的账号是 agy 自己登录的第一个账号：macOS 和 Windows 上凭证在系统钥匙串中，Lamplighter 不读钥匙串（读取可能弹出授权框），返回 `errAgyKeyring`；Linux（如 Magpie 的 Docker 镜像）上读 `~/.gemini/antigravity-cli/antigravity-oauth-token`。文件内容是 `{"token": {"access_token", "refresh_token", "expiry"}, "auth_method", "id_token_email"}`，也可能带 go-keyring 的 `go-keyring-base64:` 前缀 |
+
+Claude 和 Codex 的 token 刷新时会更换 refresh token，Lamplighter 只读取、绝不刷新，否则会让 Magpie 或代理 CLI 掉线。Google 刷新 token 时 refresh token 不变：Antigravity 的 access token 已过期或 2 分钟内过期时，用 agy 的 OAuth 客户端向 `https://oauth2.googleapis.com/token` 刷新（经该账号的代理），新 token 只保存在内存中直到过期前 2 分钟，不写回 agy 的文件。Google 返回 `invalid_grant` 时报告需要在 Magpie 中重新登录；没有 refresh token 且 access token 已过期时返回 `Expired`。Antigravity 的 Cloud Code project 是个人 Google 账号共用的 `aicode-consumers`（`auth_method` 为空或 `consumer`）；其他 `auth_method` 的账号需要另行查询 project，返回错误。
+
+`Fingerprint` 是 refresh token 的 SHA-256 前 8 字节，没有 refresh token 时用 setup-token 或 access token，见“凭证问题”。`ProxyURL` 的取法见“网络出口”。
+
+### 额度记录
+
+`KeptQuotas` 把 `kept=1` 返回的每张 `kind` 为 `subscription` 的额度卡，按服务和账号名（`user`，不区分大小写）对应到 `Accounts` 中的 pin，转成与该服务 `Fetch` 相同的额度组和窗口 ID。来自远程 Magpie 的卡（`from` 不为空）和对应不上的卡不输出。读取时间取 `readAt`，没有时取 `asOf`，都没有时不输出。
+
+| Magpie 的窗口名 | 额度组 key | 窗口 ID |
+| --- | --- | --- |
+| Codex 的 `5 hours`、`7 days` | `codex:main` | `five-hour`、`seven-day` |
+| Codex 的其他 `<n> hours`、`<n> days` | `codex:main` | `window-<长度>`，如 `window-30d` |
+| Claude 的 `5 hours`、`7 days` | `claude:main` | `five-hour`、`seven-day` |
+| Claude 的 `7 days · Opus`、`7 days · Sonnet` | `claude:seven-day-opus`、`claude:seven-day-sonnet` | `seven-day-opus`、`seven-day-sonnet` |
+| Claude 的 `7 days · Fable` | `claude:seven-day-fable` | `seven-day-fable` |
+
+剩余额度为 `100 - used`。文字行（`text`）、无限额度（`unlimited`）、其他通道（`lane`）、钱包余额（`balance`）和其他名称的窗口（如 `Allowance`、`Extra usage`）不输出。Magpie 为还没有开始 5 小时窗口的 Claude 账号补一个没有重置时间、用量为 0 的 `5 hours` 窗口，额度接口不返回这样的窗口，所以没有重置时间且用量为 0 的窗口也不输出。参与转换的窗口缺少 `used` 时返回 `host.ErrFormat`。
+
+Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gemini · 5 hours`），不带 `Fetch` 用作窗口 ID 的 `bucketId`，转换后不会更新任何已有窗口。Antigravity 的 token 可以在内存中刷新，主动查询总能进行，所以不需要这份读数。
 
 被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
 
@@ -292,7 +326,14 @@ token 来自 `host.Credential`。Claude 和 Codex 的 token 由 Magpie 或代理
 
 ### 网络出口
 
-`internal/egress` 让额度请求和 Magpie 对同一账号的请求使用同一个出口。`host.Credential.ProxyURL` 是 Magpie 为该账号使用的代理（账号或服务自己的代理，否则是 Magpie 的全局代理）：
+`internal/egress` 让额度请求和 Magpie 对同一账号的请求使用同一个出口。`host.Credential.ProxyURL` 由 `internal/magpie` 按 Magpie 的规则（`ProxyOfLogin` 和 `netproxy`）确定：
+
+1. `providers.json` 中该服务的 `accountProxies` 里该账号的代理（键为小写的账号名），否则该服务的 `proxy`。
+2. 否则 `settings.json` 的全局代理 `proxy`。
+3. 否则插件宿主启动时得到的代理。Magpie 把它放在 `MAGPIE_HTTPS_PROXY`、`MAGPIE_ALL_PROXY`、`MAGPIE_HTTP_PROXY` 中（SOCKS5 代理已桥接成 HTTP），宿主的环境中没有 `HTTPS_PROXY`。
+4. 都没有时为空。
+
+`direct` 表示直连。`@<id>` 是 Settings 中保存的代理，换成 `settings.json` 的 `proxies` 中该代理的地址和登录信息；这个代理已不存在或是 SSH 服务器时返回错误，不改用其他出口。只写 `host:port` 时按 HTTP 代理处理。`egress` 按以下规则使用 `ProxyURL`：
 
 - 支持 `http`、`https`、`socks5`、`socks5h` 代理；`direct` 或 `none` 表示直连。无法解析的地址返回错误（错误中隐藏用户名和密码），不退回其他出口。
 - 为空时使用环境变量代理（`HTTPS_PROXY` 等），没有时直连。
@@ -327,7 +368,7 @@ Antigravity 的响应头里没有额度。
 
 每个窗口记下当前读数的读取时间（`WindowView.ReadAt`）：主动查询为查询开始的时刻，Magpie 的额度记录为它的读取时间（`KeptQuota.ReadAt`），点火确认为点火请求开始的时刻。被动数据的读取时间早于窗口当前读数时，`applyGroups` 丢弃这个窗口的读数；一组窗口全部被丢弃时，不写历史样本，也不处理通知。多个请求并发时，先开始、后结束的长请求会在较新的读数之后带回较高的额度；额度下降较快时，两者相差可能达到 `RecoveryJump`，会被当成恢复，同一档提醒会再推送一次。主动查询结果不受这条规则限制。
 
-跳过规则（`shouldSkipActive`）：响应头里没有额度的服务（Antigravity）从不跳过。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
+跳过规则（`shouldSkipActive`）：响应头里没有额度的服务（Antigravity）从不跳过，Magpie 也不为它提供额度记录，见“与 Magpie 的接口”的“额度记录”。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
 
 ## 点火
 
