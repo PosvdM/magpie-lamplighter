@@ -4,7 +4,7 @@
 
 - 方案已获用户同意，可以直接开工，做完后按“交付”一节合并和发版，中间不用再问用户。
 - 第一阶段（删除 CPA 专属代码、定义 `host.Host` 接口）和第二阶段（五项任务，见“第二阶段的结果”）都已完成并合并到 `dev`，`go vet ./...`、`go test -race ./...`、`node --test internal/web/page_test.cjs`、`node --test npm/test/` 都通过。`main` 停在 `0606041`（复制自 cpa-plugin-lamplighter v0.8.6），开发期间不动。
-- 下一步是 Docker 端到端联调，见“合并和联调”的第 2 步。
+- Docker 端到端联调已完成，结论和仍未实测的项见“合并和联调”的第 2 步。下一步是第 3 步。
 
 ## 已确定的决策
 
@@ -29,21 +29,11 @@
 ## 合并和联调
 
 1. 各任务合并回 `dev`，测试全部通过（已完成）。
-2. 在测试服务器的 Magpie Docker 中安装 dev 版本做端到端验证：账号列表、三种服务的主动查询和额度记录、页面嵌入和独立访问、两种 MCP、tool 调用。先关闭 `ignition.enabled`，确认无误后对一个账号手动点火。服务器的地址和登录方式由用户另行提供。以下几点目前只按 Magpie 源码和文档实现，要实测：
-   - **程序的启动和退出**：Bun 中 `node:child_process` 经 Magpie 包装的 `Bun.spawn` 能否正常启动程序；Magpie Restart（安装、更新、设置插件）和宿主退出时程序是否随之结束，不残留进程；端口被旧进程占用时 `Supervisor` 的重试。
-   - **页面加载**：在 Magpie 桌面窗口和 `magpie web` 两种方式下都能加载数据，即页面令牌、`Origin: null` 的 CORS 和 Host 检查都放行 Magpie 的请求（`magpie web` 的页面服务代理是否把 Host 设为 `127.0.0.1:<端口>`）。
-   - **502 和出错页**：页面 10 秒内没有发出 `hello` 时，Magpie 是否把服务未就绪（502）期间的页面标为出错。
-   - **主题、语言和截图**：主题和语言随 Magpie 切换；截图经 `image.copy` 能复制到剪贴板（桌面窗口和 `magpie web` 都试）；沙箱中复制文字的退路。
-   - **独立访问**：经对外监听打开页面，收到 401 后输入管理密钥的流程；`status.public` 的各字段和设置页的显示；`-listen` 绑定非回环地址后从别处访问得到 403。
-   - **预热提示**：在 Magpie 中开启 Codex 或 Claude 的预热后，`magpie_warmup` 和页面提示是否正确；关闭点火或取消勾选额度组后提示是否消失；Codex Team 席位账号自己的时间点（`codexWarmAtOf`）能否匹配。
-   - **账号对应**：`/v1/magpie/accounts` 的 pin 与 `logins.json` 中的 `id`、插件账号按 `nameID` 算出的 id 能否对上真实的 Magpie；额度记录（`kept=1`）的额度卡能否按 `user` 对应到账号，组 key 和窗口 ID 是否与主动查询一致。
-   - **手动刷新过期凭证**：闲置的 Claude 账号 token 过期后，点“刷新”或调用 `refresh_quotas` 是否经 `POST /v1/magpie/quotas/refresh` 拿到新读数，经 Magpie 的 tool 调用能否在 50 秒内返回。
-   - **Antigravity 的 User-Agent**：额度查询用 `internal/providers` 中的 Hub 格式（`antigravity/hub/<版本> darwin/arm64`），agy-cli 插件自己用 `antigravity/cli/<版本> (aidev_client; …; auth_method=…)`。确认 Hub 格式能拿到 Gemini 额度组，且不会因与 agy 的 UA 不同而增加风险。
-   - **Claude 点火**：经 Claude Code 转发的点火能否开始 5 小时窗口，`X-Magpie-Account` 在这条路径上是否生效，额度响应头（`anthropic-ratelimit-unified-*`）是否及时写回；Claude Code 启动慢时 2 分钟的点火时限是否够用。
-   - **Codex 点火**：网关是否把 `x-codex-*` 响应头转发给客户端；不转发时只能靠“确认”中的主动查询。
-   - **网关的错误格式**：锁定账号被拒（400 套餐不含该模型、404 没有账号提供该模型、429 账号休息中）时，`gateway_http_error` 的正文能否被 `ignite.Classify` 和 `failure.Diagnose` 正确分类。模型列表中 Antigravity 模型的前缀是否为 `agy-cli/`。
-   - **Docker 中的路径**：`XDG_STATE_HOME`（数据目录应为 `/config/state/lamplighter`）、`MAGPIE_CONFIG_DIR`（缺省为宿主的工作目录）和 agy-cli 的 token 文件（`$XDG_STATE_HOME/magpie-agy-bridge/accounts/<agyHome>/…`；第一个账号在 `~/.gemini/antigravity-cli/`）的实际位置；升级插件后数据是否保留。
-   - **端口冲突**：内部监听默认 `127.0.0.1:8317`，与 CPA 的默认端口相同；对外监听默认 `127.0.0.1:8318`，与 CPA 版 Lamplighter 的 MCP 端口相同。同一台机器还运行 CPA 时要改 Magpie 插件选项中的 `port` 或 `public_listen`，README 中要写明。
+2. 在测试服务器的 Magpie Docker（v0.1.4634）中安装了 dev 版本 `0.1.0-dev.fd766b7`（把包解压到配置卷中的文件夹，`magpie plugin add <文件夹>`），`ignition.enabled` 保持关闭，只对一个 Codex 账号手动点火一次（已完成）。没有发现要改代码的问题。结论：
+   - **通过**：程序的启动和退出（Restart 后旧宿主和程序都结束，端口被占用时按 1、2、4、8、16 秒重试并恢复）；`magpie web` 下的页面加载、令牌、CORS 和 Host 检查；服务未就绪时 Magpie 显示 502 页并每 2 秒重试，没有把页面标为出错，服务恢复后自动加载；语言跟随 Magpie；`magpie web` 下截图经 `image.copy` 进入剪贴板，沙箱中复制文字的退路可用；对外监听的 401、`WWW-Authenticate`、两把密钥互不通用、`/mcp` 的 Origin 校验和 `status.public` 各字段；`-listen 0.0.0.0` 时从容器 IP 访问得到 403；`magpie_warmup`（含 `codexWarmAtOf` 的设置和 `off`、取消勾选额度组、关闭点火）；pin 与 `logins.json` 的 `id` 及 agy-cli 账号按 `nameID` 算出的 id 一致，额度记录按 `user` 对应到账号，组 key 和窗口 ID 与主动查询一致；凭证过期时改读额度记录，手动刷新经 `POST /v1/magpie/quotas/refresh` 拿到新读数，tool 方式的 `refresh_quotas` 约 1 秒返回；Antigravity 用 Hub 格式的 User-Agent 拿到 Gemini 和 Claude / GPT 两个额度组；网关错误正文（404 锁定账号不提供该模型、404 未知模型）被正确分类，Antigravity 模型的前缀为 `agy-cli/`；数据目录为 `/config/state/lamplighter`，`MAGPIE_CONFIG_DIR` 为 `/config/magpie`，容器重建后插件和数据都保留；Codex 点火带 `X-Magpie-Account`，由锁定的账号完成，约 1.2 秒读完流。
+   - **结论与预期不同**：网关不转发 `x-codex-*` 响应头，Codex 点火由主动查询确认（已写入架构文档的“确认”）。v0.1.4479 的 Magpie 没有 `GET /v1/magpie/accounts`，读不到账号；README 改写时写明 Magpie 的最低版本。
+   - **未实测**：Magpie 桌面窗口中的页面加载、主题和截图（服务器没有桌面）；Magpie 主题设置的切换（不改用户的 Magpie 设置，只验证了“跟随系统”时随浏览器切换）；在浏览器中经对外监听输入管理密钥的流程（对外监听只在容器回环地址上，只用 HTTP 请求验证了 401）；Claude 点火能否开始 5 小时窗口、Claude Code 启动慢时 2 分钟是否够用（测试时两个 Claude 账号额度将尽，且 Magpie 的预热会开启窗口）；Antigravity 点火（账号曾被封，不发点火请求）；400 套餐不含该模型和 429 账号休息中的真实响应（只按 Magpie 源码中的文字验证了分类）；从 npm 升级插件后数据是否保留。
+   - 端口冲突仍要在 README 中说明：内部监听默认 `127.0.0.1:8317`，对外监听默认 `127.0.0.1:8318`，与 CPA 和 CPA 版 Lamplighter 的默认端口相同；Docker 中 Magpie 与它们不在同一个网络命名空间时不冲突。
 3. GPT 审查 `main...dev` 的差异，修完后开 PR 到 `main`。
 
 ## 已知限制
