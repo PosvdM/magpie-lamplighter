@@ -327,10 +327,10 @@ func TestRefreshQuotaGatewayUnavailable(t *testing.T) {
 // shortDeadlines shortens the deadlines of the gateway calls.
 func shortDeadlines(t *testing.T) {
 	t.Helper()
-	was := []time.Duration{accountsTimeout, keptTimeout, listTimeout, refreshTimeout}
-	accountsTimeout, keptTimeout, listTimeout, refreshTimeout = 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond
+	was := []time.Duration{accountsTimeout, keptTimeout, listTimeout, refreshLookTimeout, refreshTimeout}
+	accountsTimeout, keptTimeout, listTimeout, refreshLookTimeout, refreshTimeout = 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond
 	t.Cleanup(func() {
-		accountsTimeout, keptTimeout, listTimeout, refreshTimeout = was[0], was[1], was[2], was[3]
+		accountsTimeout, keptTimeout, listTimeout, refreshLookTimeout, refreshTimeout = was[0], was[1], was[2], was[3], was[4]
 	})
 }
 
@@ -409,12 +409,51 @@ func TestGatewayCallsEndOnStall(t *testing.T) {
 // takes the gateway's 30 seconds for a card and ends before the 50
 // seconds of a tool call through Magpie.
 func TestGatewayDeadlines(t *testing.T) {
-	if refreshTimeout <= 30*time.Second || refreshTimeout >= 50*time.Second {
-		t.Errorf("refreshTimeout = %s", refreshTimeout)
+	if refreshTimeout <= 30*time.Second || refreshLookTimeout <= 0 || refreshLookTimeout+refreshTimeout >= 50*time.Second {
+		t.Errorf("refreshLookTimeout = %s, refreshTimeout = %s", refreshLookTimeout, refreshTimeout)
 	}
 	for name, d := range map[string]time.Duration{"accounts": accountsTimeout, "kept": keptTimeout, "models": listTimeout} {
 		if d <= 0 || d > 30*time.Second {
 			t.Errorf("%sTimeout = %s", name, d)
 		}
+	}
+}
+
+// The readings before a refresh have a deadline of their own: a slow one
+// does not shorten the refresh, and a failed one does not use up the
+// account's refresh.
+func TestRefreshQuotaReadsBeforeTheRefresh(t *testing.T) {
+	was := []time.Duration{refreshLookTimeout, refreshTimeout}
+	refreshLookTimeout, refreshTimeout = 400*time.Millisecond, 400*time.Millisecond
+	t.Cleanup(func() { refreshLookTimeout, refreshTimeout = was[0], was[1] })
+	failKept := true
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/magpie/accounts":
+			io.WriteString(w, accountsJSON)
+		case "GET /v1/magpie/quotas":
+			if failKept {
+				http.Error(w, "down", http.StatusBadGateway)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+			io.WriteString(w, cardsBefore)
+		case "POST /v1/magpie/quotas/refresh":
+			time.Sleep(250 * time.Millisecond)
+			io.WriteString(w, cardsAfter)
+		}
+	})
+	var hostErr *host.Error
+	if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); !errors.As(err, &hostErr) || hostErr.Code != codeGatewayUnavailable {
+		t.Fatalf("failed kept reading: err = %v", err)
+	}
+	failKept = false
+	// 250 ms of reading and 250 ms of refresh: more than either deadline
+	// alone, and no refresh limit from the failed call.
+	if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); err != nil {
+		t.Fatalf("refresh after a failed reading: %v", err)
+	}
+	if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); !errors.Is(err, ErrRefreshLimited) {
+		t.Fatalf("a sent refresh must count: err = %v", err)
 	}
 }

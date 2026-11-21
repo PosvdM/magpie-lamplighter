@@ -52,10 +52,14 @@ var (
 	accountsTimeout = 20 * time.Second
 	keptTimeout     = 20 * time.Second
 	listTimeout     = 20 * time.Second
-	// refreshTimeout covers the gateway's own 30 seconds for a quota
-	// card, which a Claude card spends running Claude Code's /usage, and
-	// stays under the 50 seconds a tool call through Magpie gets.
-	refreshTimeout = 45 * time.Second
+	// refreshLookTimeout bounds what RefreshQuota reads before its
+	// refresh: the account list and the kept reading. refreshTimeout
+	// bounds the refresh alone and covers the gateway's own 30 seconds
+	// for a quota card, which a Claude card spends running Claude Code's
+	// /usage. Together they stay under the 50 seconds a tool call through
+	// Magpie gets (engine.manualRefreshBudget).
+	refreshLookTimeout = 8 * time.Second
+	refreshTimeout     = 32 * time.Second
 )
 
 // gatewayURL is path on the gateway at h.Addr. An address on every

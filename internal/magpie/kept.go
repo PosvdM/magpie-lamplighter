@@ -338,20 +338,24 @@ var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 // be a subscription account that is switched on and has a name, since the
 // gateway refreshes every account of the provider when no name is given.
 // Those failures, and a gateway that cannot be reached, answers 5xx or
-// runs out of refreshTimeout, are a *host.Error with the codes above.
+// runs out of time, are a *host.Error with the codes above.
 //
 // The time of the account's kept reading (GET ?kept=1) is read before the
 // refresh. When the card the refresh answers is no newer reading
 // (refreshStale), it returns a *host.Error with codeRefreshStale.
 //
+// The account list and the kept reading end within refreshLookTimeout,
+// and the refresh itself within refreshTimeout, so that a slow reading
+// before it does not shorten the refresh.
+//
 // It refuses within claudeRefreshGap (Claude) or refreshGap (others) of
-// the last attempt for the same account, whatever its result. The whole
-// call ends within refreshTimeout.
+// the last refresh sent for the same account, whatever its result. A call
+// that fails before the refresh is sent does not count.
 func (h *Host) RefreshQuota(caller context.Context, pin string) error {
-	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
-	defer cancel()
+	look, cancelLook := context.WithTimeout(caller, refreshLookTimeout)
+	defer cancelLook()
 	route := http.MethodPost + " " + refreshPath
-	listed, err := h.listAccounts(ctx)
+	listed, err := h.listAccounts(look)
 	if err != nil {
 		return refreshError(caller, route, err)
 	}
@@ -373,25 +377,13 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 	case !*a.On:
 		return &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
 	}
-	gap := refreshGap
-	if a.Provider == "claude" {
-		gap = claudeRefreshGap
+	if err := h.refreshAllowed(a, false); err != nil {
+		return err
 	}
-	h.mu.Lock()
-	last := h.refreshed[a.Pin]
-	if t := now(); !last.IsZero() && t.Sub(last) < gap {
-		h.mu.Unlock()
-		return fmt.Errorf("%w：%s 在 %s 后才能再次刷新", ErrRefreshLimited, a.Pin, (gap - t.Sub(last)).Round(time.Second))
-	}
-	if h.refreshed == nil {
-		h.refreshed = map[string]time.Time{}
-	}
-	h.refreshed[a.Pin] = now()
-	h.mu.Unlock()
 	var kept struct {
 		Data *[]cardState `json:"data"`
 	}
-	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &kept); err != nil {
+	if err := h.gatewayJSON(look, http.MethodGet, keptPath, &kept); err != nil {
 		return refreshError(caller, route, err)
 	}
 	if kept.Data == nil {
@@ -401,6 +393,13 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 	if card, ok := cardOf(*kept.Data, a); ok {
 		before = card.at()
 	}
+	cancelLook()
+	// Checked again: another call may have sent a refresh meanwhile.
+	if err := h.refreshAllowed(a, true); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
+	defer cancel()
 	query := url.Values{"provider": {a.Provider}, "user": {a.User}}
 	var resp struct {
 		Data *[]cardState `json:"data"`
@@ -415,6 +414,30 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 	if reason := refreshStale(card, found, before); reason != "" {
 		return &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
 	}
+	return nil
+}
+
+// refreshAllowed returns ErrRefreshLimited when a refresh of a was sent
+// within its gap (claudeRefreshGap or refreshGap). With send, an allowed
+// refresh is recorded as sent now.
+func (h *Host) refreshAllowed(a listedAccount, send bool) error {
+	gap := refreshGap
+	if a.Provider == "claude" {
+		gap = claudeRefreshGap
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	last := h.refreshed[a.Pin]
+	if t := now(); !last.IsZero() && t.Sub(last) < gap {
+		return fmt.Errorf("%w：%s 在 %s 后才能再次刷新", ErrRefreshLimited, a.Pin, (gap - t.Sub(last)).Round(time.Second))
+	}
+	if !send {
+		return nil
+	}
+	if h.refreshed == nil {
+		h.refreshed = map[string]time.Time{}
+	}
+	h.refreshed[a.Pin] = now()
 	return nil
 }
 

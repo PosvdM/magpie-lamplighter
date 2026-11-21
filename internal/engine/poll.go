@@ -347,8 +347,11 @@ func (e *Engine) shouldSkipActive(cfg config.Config, cred *Cred, slot, now time.
 // manualRefreshBudget bounds the quota refreshes that Magpie runs for
 // expired credentials during one manual refresh, all of them together. A
 // tool call through Magpie waits at most about 50 seconds for the whole
-// refresh; Magpie's gateway itself waits at most 30 seconds for one quota.
-const manualRefreshBudget = 35 * time.Second
+// refresh. One RefreshQuota of package magpie takes at most 8 seconds for
+// its readings before the refresh and 32 for the refresh, in which
+// Magpie's gateway waits at most 30 seconds for one quota; the budget
+// leaves one call all of that.
+const manualRefreshBudget = 42 * time.Second
 
 // poll runs one round of active queries. slot is the aligned time this round
 // belongs to. onlyAuth limits the round to one credential. force disables the
