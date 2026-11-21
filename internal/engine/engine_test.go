@@ -60,6 +60,13 @@ func (f *fakeHost) Credential(_ context.Context, account host.Account) (host.Cre
 	return credentialFromFile(raw), nil
 }
 
+// ConfirmIdentity implements host.IdentityChecker with Credential, as
+// magpie.Host confirms an agy-cli account from the files Credential reads.
+func (f *fakeHost) ConfirmIdentity(ctx context.Context, account host.Account) (string, error) {
+	cred, err := f.Credential(ctx, account)
+	return cred.Fingerprint, err
+}
+
 func (f *fakeHost) KeptQuotas(context.Context) ([]host.KeptQuota, error) { return f.kept, nil }
 
 func (f *fakeHost) RefreshQuota(context.Context, string) error { return nil }

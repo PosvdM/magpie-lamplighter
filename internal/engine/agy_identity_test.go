@@ -216,6 +216,22 @@ func TestAgyIdentityConfirmedBeforeEachCandidate(t *testing.T) {
 		if !errors.Is(err, host.ErrIdentity) || len(h.executed) != 1 || h.executed[0].Model != "gemini-3.8-flash-high" {
 			t.Fatalf("manual=%v: err=%v executed=%+v", manual, err, h.executed)
 		}
+		// The first candidate went out; only the second was not sent.
+		shown := []string{err.Error()}
+		for _, ev := range e.events {
+			shown = append(shown, ev.Detail, ev.Message)
+		}
+		if !manual {
+			shown = append(shown, e.state.Target(chosen.group.Key).LastError)
+		}
+		for _, s := range shown {
+			if strings.Contains(s, errIdentityUnsent) {
+				t.Fatalf("manual=%v: %q says no request was sent", manual, s)
+			}
+		}
+		if !strings.Contains(err.Error(), "第 2 个候选模型未发送") {
+			t.Fatalf("manual=%v: err = %v", manual, err)
+		}
 		if manual {
 			continue
 		}

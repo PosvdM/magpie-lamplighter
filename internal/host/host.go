@@ -192,9 +192,9 @@ type Host interface {
 // IdentityChecker is implemented by a Host that can confirm, from local
 // files alone, whose sign-in the gateway will send an account's requests
 // with. Ignition of an agy-cli account calls it before every request, as
-// agy can sign in to another Google account at any time; without it the
-// engine reads Credential instead. Every error means the account is not
-// confirmed, and no request is sent.
+// agy can sign in to another Google account at any time; without it no
+// agy-cli account is confirmed, and none is ignited. Every error means the
+// account is not confirmed, and no request is sent.
 type IdentityChecker interface {
 	// ConfirmIdentity returns the fingerprint of the account's sign-in
 	// (as in Credential) once the sign-in is confirmed to be the

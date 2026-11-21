@@ -96,6 +96,14 @@ func (identityError) Is(target error) bool { return target == host.ErrIdentity }
 // 账号" signs in in a home of its own, whose file Lamplighter reads.
 var errAgyKeyring error = identityError("这个 Antigravity 账号是 agy 自己登录的账号，凭证在系统钥匙串中，Lamplighter 不读取钥匙串，无法确认 agy 当前登录的账号；在 Magpie 中用“添加另一个 Google 账号”重新添加该账号后即可查询额度和点火")
 
+// notFound is a file that does not exist, with a text of its own; it
+// wraps fs.ErrNotExist.
+type notFound string
+
+func (e notFound) Error() string { return string(e) }
+
+func (notFound) Is(target error) bool { return target == fs.ErrNotExist }
+
 // googleToken is an access token renewed in memory.
 type googleToken struct {
 	access  string
@@ -127,7 +135,7 @@ func (h *Host) agyTokenFile(l savedLogin) (agyFile, error) {
 	var auth map[string]json.RawMessage
 	if err := h.readJSONFile("plugin-auth.json", &auth); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return agyFile{}, errors.New("Magpie 配置目录中没有 plugin-auth.json")
+			return agyFile{}, notFound("Magpie 配置目录中没有 plugin-auth.json")
 		}
 		return agyFile{}, err
 	}
@@ -278,7 +286,8 @@ func parseAgyStored(b []byte) (agyStored, error) {
 		return agyStored{}, fmt.Errorf("%w: token without expiry", host.ErrFormat)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, *s.Token.Expiry); err != nil {
-		return agyStored{}, fmt.Errorf("%w: expiry %q is not RFC 3339", host.ErrFormat, *s.Token.Expiry)
+		// The value is left out: the file is a credential.
+		return agyStored{}, fmt.Errorf("%w: token expiry is not RFC 3339", host.ErrFormat)
 	}
 	return s, nil
 }
@@ -294,7 +303,7 @@ func (h *Host) agySignIn(l savedLogin) (agyStored, error) {
 	b, err := os.ReadFile(file.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return agyStored{}, errors.New("找不到 agy 的凭证文件，账号可能已在 Magpie 中退出登录")
+			return agyStored{}, notFound("找不到 agy 的凭证文件，账号可能已在 Magpie 中退出登录")
 		}
 		return agyStored{}, err
 	}

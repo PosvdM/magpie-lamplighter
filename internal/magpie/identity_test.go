@@ -3,6 +3,7 @@ package magpie
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +72,19 @@ func TestConfirmIdentityReadsNoProxy(t *testing.T) {
 	// Codex and Claude requests use the account's own credential.
 	if fp, err := h.ConfirmIdentity(context.Background(), host.Account{Pin: "codex/1a2b3c4d5e6f7a8b", Provider: "codex"}); err != nil || fp != "" {
 		t.Errorf("Codex: %q, %v", fp, err)
+	}
+}
+
+// A token file whose expiry is not a time is a format error that does not
+// quote the value: the file is a credential.
+func TestAgyBadExpiryIsNotQuoted(t *testing.T) {
+	const value = "ya29.not-a-time"
+	h, _ := agyFixture(t, `{"token":{"access_token":"ya29.live","refresh_token":"1//refresh","expiry":"`+value+`"},"auth_method":"consumer","id_token_email":"c@example.com"}`)
+	_, confirmErr := h.ConfirmIdentity(context.Background(), agyAccount)
+	_, credErr := h.Credential(context.Background(), agyAccount)
+	for _, err := range []error{confirmErr, credErr} {
+		if !errors.Is(err, host.ErrFormat) || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), "ya29") {
+			t.Fatalf("err = %v", err)
+		}
 	}
 }

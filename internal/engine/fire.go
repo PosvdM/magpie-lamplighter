@@ -417,7 +417,9 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// The fingerprint of the credential the request goes out with; a
 	// rejection waits for another one. When it cannot be read, a rejection
 	// keeps it unknown: the file read after the request may already hold a
-	// new login the request did not use. See noteFingerprint.
+	// new login the request did not use. See noteFingerprint. For an
+	// agy-cli account it is the sign-in confirmed before the last request
+	// that went out (sentResponse.fingerprint).
 	//
 	// The gateway sends an agy-cli account's request with whichever Google
 	// account its agy is signed in to. The account is confirmed before
@@ -444,6 +446,11 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 			base.start = resp.sentAt
 		}
 		err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+	}
+	if resp.confirmed {
+		// The sign-in confirmed right before the last request that went
+		// out, which agy may have changed since the first confirmation.
+		fingerprint = resp.fingerprint
 	}
 	if errors.Is(err, host.ErrIdentity) {
 		// An unconfirmed sign-in has no fingerprint to wait on; the first
@@ -573,14 +580,17 @@ func (e *Engine) group(key string) (GroupView, bool) {
 // execute sends the ignition request with the newest candidate model. It
 // tries the next candidate when Magpie refuses a model for the pinned
 // account, and once per ignition when the provider refuses a model. The
-// response carries when the returned candidate was sent.
+// response carries when the returned candidate was sent, and for an
+// agy-cli account the sign-in confirmed before the last request that went
+// out, also with an error.
 //
 // Each request of an automatic ignition passes admit, which checks that
 // the target still qualifies; otherwise the requests not sent yet are
 // dropped with errIgnitionWithdrawn. Each request of an agy-cli account
 // confirms the account right before it is sent (confirmIdentity): agy can
 // sign in to another account while the model list is read or a candidate
-// is refused.
+// is refused. An account not confirmed before a later candidate returns
+// an error that names that candidate, as the ones before it went out.
 //
 // A model list that fails because the engine stops or ctx ends returns
 // context.Canceled.
@@ -593,7 +603,7 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 
 	available, err := e.lister.List(ctx, e.host.Models)
 	if err != nil && (ctx.Err() != nil || e.stopping()) {
-		// The gateway's error does not tell that the stop cut it short.
+		// The host's error need not tell that the stop cut it short.
 		return "", empty, context.Canceled
 	}
 	e.noteModels(available, err)
@@ -626,6 +636,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 
 	var lastErr, refusedErr error
 	refused := ""
+	// sent is the sign-in of the last request that went out, for the
+	// returns after the loop.
+	var sent sentResponse
 	for i, model := range candidates {
 		if ctx.Err() != nil || e.stopping() {
 			return model, empty, context.Canceled
@@ -634,8 +647,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		if err != nil {
 			return "", empty, err
 		}
+		fingerprint := ""
 		if identityChecked(t.cred) {
-			if _, err := e.confirmIdentity(ctx, t.cred); err != nil {
+			if fingerprint, err = e.confirmIdentity(ctx, t.cred, i+1); err != nil {
 				return model, empty, err
 			}
 		}
@@ -645,6 +659,8 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 			Model:    model,
 			Body:     body,
 		}, ignitionOutputWindow)
+		resp.confirmed, resp.fingerprint = identityChecked(t.cred), fingerprint
+		sent = sentResponse{confirmed: resp.confirmed, fingerprint: fingerprint}
 		if err == nil {
 			if refused != "" {
 				e.noteRefused(t, refused, model)
@@ -677,9 +693,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		return model, resp, err
 	}
 	if refused != "" {
-		return "", empty, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
+		return "", sent, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
 	}
-	return "", empty, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
+	return "", sent, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
 }
 
 // refusedFor is how long a model the provider refused for a quota group is

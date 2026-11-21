@@ -3,6 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -141,40 +144,101 @@ func identityChecked(cred *Cred) bool {
 	return strings.EqualFold(cred.HostProvider, agyCLI)
 }
 
-// errIdentityUnsent prefixes an ignition refused for host.ErrIdentity.
+// errIdentityUnsent prefixes an ignition refused for host.ErrIdentity
+// before any of its requests was sent.
 const errIdentityUnsent = "没有发送点火请求"
+
+// errNoIdentityChecker is why an agy-cli account is not confirmed by a
+// host that does not implement host.IdentityChecker: Credential alone
+// cannot tell that the gateway will use the account's own sign-in.
+var errNoIdentityChecker = errors.New("the host cannot confirm the sign-in of an agy-cli account")
 
 // identityUnconfirmed is an ignition request not sent because the
 // account could not be confirmed. It wraps host.ErrIdentity and the
-// host's error.
-type identityUnconfirmed struct{ err error }
+// host's error, but its text gives only identityReason.
+type identityUnconfirmed struct {
+	err error
+	// candidate is the number of the candidate model that was not sent,
+	// from 1; 0 or 1 means that the ignition sent no request.
+	candidate int
+}
 
 func (u identityUnconfirmed) Error() string {
-	if errors.Is(u.err, host.ErrIdentity) {
-		return errIdentityUnsent + "：" + u.err.Error()
+	unsent := errIdentityUnsent
+	if u.candidate > 1 {
+		unsent = fmt.Sprintf("第 %d 个候选模型未发送", u.candidate)
 	}
-	return errIdentityUnsent + "：无法确认账号身份：" + u.err.Error()
+	return unsent + "：" + identityReason(u.err)
 }
 
 func (u identityUnconfirmed) Unwrap() []error { return []error{host.ErrIdentity, u.err} }
 
-// confirmIdentity confirms that the gateway sends cred's requests with
-// cred's own sign-in, and returns the sign-in's fingerprint. It asks a
-// host.IdentityChecker, which reads local files alone, else reads the
-// credential. Any error means the account is not confirmed: it is
-// returned as identityUnconfirmed, and no request may be sent.
-func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred) (string, error) {
-	var fingerprint string
-	var err error
-	if checker, ok := e.host.(host.IdentityChecker); ok {
-		fingerprint, err = checker.ConfirmIdentity(ctx, hostAccount(cred))
-	} else {
-		var credential host.Credential
-		credential, err = e.host.Credential(ctx, hostAccount(cred))
-		fingerprint = credential.Fingerprint
+// identityReason is why the account of an ignition was not confirmed, as
+// events, logs and API answers show it. A host.ErrIdentity error gives the
+// host's own reason, which names the other account by a masked email
+// (redactDetail masks any other). The host's other errors can quote the
+// fields of a credential file, so they are told by kind alone.
+func identityReason(err error) string {
+	const unconfirmed = "无法确认账号身份："
+	switch {
+	case errors.Is(err, errNoIdentityChecker):
+		return unconfirmed + "宿主不支持核对 agy 账号的身份"
+	case errors.Is(err, host.ErrIdentity):
+		return redactDetail(err.Error())
+	case errors.Is(err, host.ErrFormat):
+		return unconfirmed + "凭证文件格式不对"
+	case errors.Is(err, fs.ErrNotExist):
+		return unconfirmed + "找不到凭证文件"
 	}
+	return unconfirmed + "读取凭证失败"
+}
+
+// detailLimit bounds the text redactDetail keeps.
+const detailLimit = 200
+
+var (
+	detailEmail  = regexp.MustCompile(`[^\s@"'<>()\[\],;:（）：，；“”]+@[^\s@"'<>()\[\],;:（）：，；“”]+`)
+	detailQuoted = regexp.MustCompile(`"[^"]*"`)
+	detailSecret = regexp.MustCompile(`[A-Za-z0-9_\-./+=]{32,}`)
+)
+
+// redactDetail is the text of a host error, fit to show or log: one line,
+// emails masked (maskEmail), quoted values and long token-like strings
+// left out, at most detailLimit characters.
+func redactDetail(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = detailEmail.ReplaceAllStringFunc(s, maskEmail)
+	s = detailQuoted.ReplaceAllString(s, `"…"`)
+	s = detailSecret.ReplaceAllString(s, "…")
+	if r := []rune(s); len(r) > detailLimit {
+		s = string(r[:detailLimit]) + "…"
+	}
+	return s
+}
+
+// unconfirmed is identityUnconfirmed for err, the error of confirming cred
+// before the candidate-th candidate model (0 before the model list). The
+// host's error is logged at debug level, redacted (redactDetail).
+func (e *Engine) unconfirmed(cred *Cred, candidate int, err error) error {
+	e.logf("debug", "%s：无法确认账号身份：%s", accountLabel(cred), redactDetail(err.Error()))
+	return identityUnconfirmed{err: err, candidate: candidate}
+}
+
+// confirmIdentity confirms that the gateway sends cred's requests with
+// cred's own sign-in, and returns the sign-in's fingerprint, before the
+// candidate-th candidate model (0 before the model list). Only a
+// host.IdentityChecker can confirm it, from local files alone; a host
+// without one confirms no agy-cli account. Any error means the account is
+// not confirmed: it is returned as identityUnconfirmed, and no request may
+// be sent.
+func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred, candidate int) (string, error) {
+	checker, ok := e.host.(host.IdentityChecker)
+	if !ok {
+		return "", e.unconfirmed(cred, candidate, errNoIdentityChecker)
+	}
+	fingerprint, err := checker.ConfirmIdentity(ctx, hostAccount(cred))
 	if err != nil {
-		return "", identityUnconfirmed{err}
+		return "", e.unconfirmed(cred, candidate, err)
 	}
 	return fingerprint, nil
 }
@@ -186,11 +250,11 @@ func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred) (string, error
 // host cannot confirm the account of the credential (host.ErrIdentity).
 func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
 	if identityChecked(cred) {
-		return e.confirmIdentity(ctx, cred)
+		return e.confirmIdentity(ctx, cred, 0)
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if errors.Is(err, host.ErrIdentity) {
-		return "", identityUnconfirmed{err}
+		return "", e.unconfirmed(cred, 0, err)
 	}
 	if err != nil {
 		return "", nil
