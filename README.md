@@ -272,7 +272,7 @@ Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重�
 | `critical_threshold` | `10` | 第三档提醒阈值 |
 | `recovery_notify` | 5 小时 `after_exhausted`，7 天 `all` | 额度恢复时通知，见下文 |
 | `reset_reminder` | 5 小时 `off`，7 天 `has_remaining` | 重置前提醒，见下文 |
-| `timezone` | 空 | 显示时间和点火时段使用的时区，IANA 名称，如 `Asia/Shanghai`；为空时使用程序所在系统的时区（Magpie 的 Docker 镜像为 UTC）。保存时校验，无效的名称不保存；手动写入无效的名称时，插件启动时记一条警告，使用系统的时区 |
+| `timezone` | 空 | 显示时间和点火时段使用的时区，IANA 名称，如 `Asia/Shanghai`；为空时使用程序所在系统的时区（Magpie 的 Docker 镜像为 UTC）。要跟随系统的时区时留空，`Local` 视为无效的名称。保存时校验，无效的名称不保存；手动写入无效的名称时，插件启动时记一条警告，按留空处理 |
 | `timezone_offset_hours` | 空 | 固定的 UTC 偏移，例如 `8`；只在 `timezone` 为空时使用 |
 | `poll_interval_seconds` | `300` | 主动查询间隔，最小 60 |
 | `request_timeout_seconds` | `20` | 额度查询、通知等 HTTP 请求的超时，5～120；不限制点火 |

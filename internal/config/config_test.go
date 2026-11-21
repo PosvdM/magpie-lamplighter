@@ -186,6 +186,9 @@ func TestCheck(t *testing.T) {
 		{"timezone: ' '\n", nil},
 		{"timezone: Mars/Olympus\n", ErrTimezone},
 		{"timezone: ../../etc/passwd\n", ErrTimezone},
+		// time.LoadLocation takes "Local" as the process time zone, which
+		// an empty timezone already means.
+		{"timezone: Local\n", ErrTimezone},
 	} {
 		cfg, err := Parse([]byte(tc.raw))
 		if err != nil {
@@ -263,5 +266,43 @@ func TestOpenKeepsCheckedSettings(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "timezone") || strings.Contains(logged.String(), "Mars") {
 		t.Fatalf("warning %q", logged.String())
+	}
+}
+
+// A hand-written "Local" is an invalid timezone: Open warns, and Location
+// falls back to timezone_offset_hours, then the process time zone.
+func TestOpenTreatsLocalTimezoneAsInvalid(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	for _, tc := range []struct {
+		file   string
+		offset int
+	}{
+		{`{"timezone":"Local","timezone_offset_hours":8}`, 8 * 3600},
+		{`{"timezone":"Local"}`, -1},
+	} {
+		logged.Reset()
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, cfg, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(logged.String(), "timezone") {
+			t.Fatalf("%s: no warning: %q", tc.file, logged.String())
+		}
+		loc := cfg.Location()
+		if tc.offset < 0 {
+			if loc != time.Local {
+				t.Fatalf("%s: location %v", tc.file, loc)
+			}
+			continue
+		}
+		if _, offset := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).In(loc).Zone(); offset != tc.offset || loc == time.Local {
+			t.Fatalf("%s: location %v offset %d", tc.file, loc, offset)
+		}
 	}
 }

@@ -376,7 +376,7 @@ func (c *Config) normalize() {
 var ErrSameKeys = errors.New("admin_key 与 mcp_key 不能相同")
 
 // ErrTimezone is the error of a timezone that is not an IANA time zone
-// name known to time.LoadLocation.
+// name known to time.LoadLocation, or is "Local"; see loadTimezone.
 var ErrTimezone = errors.New("timezone 不是有效的 IANA 时区名")
 
 // SameKeys reports whether admin_key and mcp_key are the same non-empty
@@ -384,13 +384,24 @@ var ErrTimezone = errors.New("timezone 不是有效的 IANA 时区名")
 func (c Config) SameKeys() bool { return c.AdminKey != "" && c.AdminKey == c.MCPKey }
 
 // TimezoneValid reports whether timezone is empty or a time zone name that
-// time.LoadLocation accepts.
+// loadTimezone accepts.
 func (c Config) TimezoneValid() bool {
 	if c.Timezone == "" {
 		return true
 	}
-	_, err := time.LoadLocation(c.Timezone)
+	_, err := loadTimezone(c.Timezone)
 	return err == nil
+}
+
+// loadTimezone loads the IANA time zone name. It refuses "Local", which
+// time.LoadLocation takes as the time zone of the process: an empty
+// timezone already means that, and a saved "Local" would follow the
+// process to another machine while looking like a fixed choice.
+func loadTimezone(name string) (*time.Location, error) {
+	if name == "Local" {
+		return nil, ErrTimezone
+	}
+	return time.LoadLocation(name)
 }
 
 // Check returns the reason a configuration must not be saved: ErrSameKeys
@@ -411,7 +422,7 @@ func (c Config) Check() error {
 // process.
 func (c Config) Location() *time.Location {
 	if c.Timezone != "" {
-		if loc, err := time.LoadLocation(c.Timezone); err == nil {
+		if loc, err := loadTimezone(c.Timezone); err == nil {
 			return loc
 		}
 	}
