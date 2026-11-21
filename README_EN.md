@@ -1,14 +1,14 @@
 <p align="center"><img src="./assets/logo.png" alt="" width="128"></p>
 
-# Lamplighter
+# Magpie-Lamplighter
 
 [中文](./README.md)
 
 > When he lights his street lamp, it is as if he brought one more star to life, or one flower. — *The Little Prince*
 >
-> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
+> The lamplighter's planet turns once a minute, so every minute he lights his lamp and puts it out again, never missing a turn. Magpie-Lamplighter does the same on schedule: each time a 5-hour quota window resets, it lights the next one.
 
-Lamplighter is a plugin for [Magpie](https://github.com/yetone/magpie), published on npm as `magpie-lamplighter`. It monitors the quota of the ChatGPT (Codex), Claude and Antigravity subscription accounts in Magpie, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and after each 5-hour quota window resets it sends one minimal request through Magpie so that the next window starts right away. Coding agents can read the quota over MCP.
+Magpie-Lamplighter (Lamplighter for short below) is a plugin for [Magpie](https://github.com/yetone/magpie), published on npm as `magpie-lamplighter` and shown in Magpie as **Magpie-Lamplighter**. It monitors the quota of the ChatGPT (Codex), Claude and Antigravity subscription accounts in Magpie, sends alerts through [Bark](https://github.com/Finb/Bark) or a generic webhook, and after each 5-hour quota window resets it sends one minimal request through Magpie so that the next window starts right away. Coding agents can read the quota over MCP.
 
 The technical documents are in Chinese: [architecture](./docs/architecture.md) and [development](./docs/development.md).
 
@@ -32,7 +32,7 @@ The technical documents are in Chinese: [architecture](./docs/architecture.md) a
 | Claude | Magpie's Claude accounts | 5-hour, 7-day, plus separately counted quotas such as Fable | Supported, 5-hour window only |
 | Antigravity | Accounts of the agy-cli plugin (`@magpie-community/opencode-agy-cli-auth`) | Gemini, Claude / GPT and other quota groups | Off by default; once on, Gemini only by default |
 
-Accounts without a 5-hour window (such as ChatGPT Pro) are monitored for their other windows and are not ignited. API keys in Magpie have no quota windows and are not shown.
+Lamplighter monitors only the subscription accounts of the services `codex`, `claude` and `agy-cli` in Magpie. Magpie's built-in Antigravity accounts (service `antigravity`) have no credential Lamplighter can read and are not monitored; to monitor Antigravity, add the accounts through the agy-cli plugin. Accounts without a 5-hour window (such as ChatGPT Pro) are monitored for their other windows and are not ignited. API keys in Magpie have no quota windows and are not shown.
 
 ### Account names
 
@@ -85,7 +85,7 @@ After installation, a **Magpie-Lamplighter** page appears in the **Plugins** gro
 
 A new installation does not ignite. Before turning ignition on:
 
-1. Set the time zone in the Settings view. The ignition hours and the times on the page and in notifications follow it.
+1. Set the time zone under **Time zone** in the Settings view and click **Save**. The ignition hours and the times on the page and in notifications follow it. Until a time zone is saved, the field shows the browser's time zone, which is not saved by itself.
 2. Turn off Magpie's own warm-up; see [Conflict with Magpie's warm-up](#conflict-with-magpies-warm-up).
 3. Tick **Enable ignition** under **Ignition** in the Settings view.
 
@@ -142,7 +142,7 @@ The public listener lets other devices reach Lamplighter in a browser or over MC
 | `mcp_enabled` | `false` | Serve `/mcp` on the public listener; see [MCP](#mcp) |
 | `mcp_key` | empty | MCP key; when `mcp_enabled` is turned on without one, the page generates one |
 
-With both the page and MCP off, nothing listens. The two keys do not stand in for each other: the admin key cannot reach `/mcp`, and the MCP key cannot reach the page and API.
+With both the page and MCP off, nothing listens. The two keys do not stand in for each other: the admin key cannot reach `/mcp`, and the MCP key cannot reach the page and API. The two keys must differ: the page refuses to save equal keys, and when equal keys are written into `config.json` by hand, the public listener serves neither the page and API nor `/mcp`, and the top of the page shows why.
 
 The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. Page preferences such as blurring accounts are also kept per browser.
 
@@ -203,7 +203,7 @@ The eye buttons in the page header, the card area header and the detail chart he
 
 The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
 
-The Settings view has **Accounts**, **Notification channels**, **Alert rules**, **Ignition**, **Services** and **Advanced**. Switches and checkboxes save on click; text and numbers save when the field loses focus or on Enter. The result is shown to the right of the section title: **Saved; waiting to take effect**, then **In effect** once the plugin confirms, or **Not confirmed in effect** after 15 seconds. When a save fails, the title shows the field and the reason, the field is outlined in red and the draft is kept. Under **Accounts** you can set names and weights and drag the handles to reorder accounts (saved as `account_order`); Esc cancels a drag. **Send test** under **Notification channels** sends to every configured channel once the settings are in effect and shows each result.
+The Settings view has **Accounts**, **Notification channels**, **Alert rules**, **Time zone**, **Ignition**, **Services** and **Advanced**. Switches and checkboxes save on click; text and numbers save when the field loses focus or on Enter. The result is shown to the right of the section title: **Saved; waiting to take effect**, then **In effect** once the plugin confirms, or **Not confirmed in effect** after 15 seconds. When a save fails, the title shows the field and the reason, the field is outlined in red and the draft is kept. Under **Accounts** you can set names and weights and drag the handles to reorder accounts (saved as `account_order`); Esc cancels a drag. **Send test** under **Notification channels** sends to every configured channel once the settings are in effect and shows each result.
 
 ## How quota is read
 
@@ -211,7 +211,7 @@ The Settings view has **Accounts**, **Notification channels**, **Alert rules**, 
 
 **Magpie's quota records**: Magpie records each account's quota while it forwards requests, and the plugin reads them every 60 seconds without sending anything to the vendor. Codex and Claude have such records; Antigravity is only queried actively. When an account has had a new reading within 60 seconds before a scheduled query, that round skips the account; one account is skipped for at most 30 minutes in a row.
 
-**Credentials**: the plugin reads each account's token from Magpie's configuration directory and uses it only in memory. Claude and Codex tokens are read and never refreshed: these services replace the refresh token on every refresh, so a refresh by the plugin would invalidate the token held by Magpie or the proxied CLI and sign the account out. While such a token has expired and Magpie has not refreshed it yet, the plugin does not query the vendor and uses Magpie's latest recorded reading instead; a manual refresh (the page's refresh buttons or MCP's `refresh_quotas`) first asks Magpie to read that account's quota again. Antigravity tokens are refreshed by the plugin in memory and never written back. The rules are in [凭证](./docs/architecture.md#凭证) and [额度记录](./docs/architecture.md#额度记录) (Chinese).
+**Credentials**: the plugin reads each account's token from Magpie's configuration directory and uses it only in memory. Claude and Codex tokens are read and never refreshed: these services replace the refresh token on every refresh, so a refresh by the plugin would invalidate the token held by Magpie or the proxied CLI and sign the account out. While such a token has expired and Magpie has not refreshed it yet, the plugin does not query the vendor and uses Magpie's latest recorded reading instead; a manual refresh (the page's refresh buttons or MCP's `refresh_quotas`) first asks Magpie to read that account's quota again. When the refresh of one account fails, the page and `refresh_quotas` give the reason, such as the account being switched off in Magpie, Magpie not having the account, or the Magpie gateway being unavailable; `refresh_quotas` does not pass on upstream error texts, and for other errors points to `list_quotas` for each account's state. Antigravity tokens are refreshed by the plugin in memory and never written back. The rules are in [凭证](./docs/architecture.md#凭证) and [额度记录](./docs/architecture.md#额度记录) (Chinese).
 
 **Network egress**: active queries use the same egress as Magpie's requests for the same account: the proxy Magpie sets for that account or service, then Magpie's global proxy, then the system proxy Magpie uses, and a direct connection when there is none. When the proxy cannot be parsed, the plugin skips the query instead of connecting directly. See [网络出口](./docs/architecture.md#网络出口) (Chinese).
 
@@ -274,7 +274,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `critical_threshold` | `10` | Third alert threshold |
 | `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Notify when the quota recovers; see below |
 | `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Remind before a reset; see below |
-| `timezone` | empty | Time zone for displayed times and the ignition hours, such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image) |
+| `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means the time zone of the system the program runs on (UTC in Magpie's Docker image). Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup, and the system's time zone is used |
 | `timezone_offset_hours` | empty | A fixed UTC offset such as `8`; used only when `timezone` is empty |
 | `poll_interval_seconds` | `300` | Active query interval, at least 60 |
 | `request_timeout_seconds` | `20` | Timeout of quota queries, notifications and other HTTP requests, 5 to 120; does not limit ignition |
@@ -401,7 +401,7 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 | --- | --- |
 | `list_quotas(provider?, account?, model?)` | Current windows, each account's plan and weight, weighted remaining, the account that runs out first, reset and projected run-out times, hourly use, 7-day even-pace budget, data source and freshness, invalid credentials, suspended accounts and the next ignition time |
 | `get_quota_history(provider?, account?, window?, range?)` | Quota history, including windows that have disappeared; at most 200 points per series and 2000 per call |
-| `refresh_quotas(account?)` | Active query; at most once every 60 seconds overall, returning the seconds to wait when called too soon |
+| `refresh_quotas(account?)` | Active query; at most once every 60 seconds overall, returning the seconds to wait when called too soon; on failure returns `ok: false` and the reason |
 | `get_quota_events(since?, limit?)` | Recent resets, exhaustion, ignition successes and failures, invalid credentials, suspended accounts, rate limits and restored credentials; `since` is an RFC 3339 time with time zone, `limit` an integer from 1 to 100 |
 
 Account identifiers in tool results use the account name, with emails in it masked; without a name they are `***` plus the last two characters of the email user name, such as `***rk`. Identifiers that are equal after masking get `#1`, `#2` suffixes. Tools never return full emails, whatever the page's blur switch says. The `account` argument takes a returned identifier, the base identifier before the suffix, the original account name or the full email, all matched exactly; `refresh_quotas` needs a single match.
@@ -469,7 +469,7 @@ Under **Notification channels** in the Settings view, enter the `url` above in *
 
 These are the default ports of CPA and of the CPA edition of Lamplighter. When those run on the same machine as Magpie, change `port` or `public_listen`. When Magpie runs in Docker, in a network namespace of its own, they do not conflict.
 
-The internal listener serves Magpie only, needs no key and accepts only requests whose Host is a loopback address.
+The internal listener serves Magpie only, needs no key and accepts only requests whose Host is a loopback address; API requests from a browser must come from Lamplighter's own page. The plugin starts the program with `-listen 127.0.0.1:<port>`. When the program is run directly, `-listen` must be a loopback address; with any other address the program exits with an error. Use [Public access](#public-access) from other machines.
 
 ## Known limitations
 
@@ -477,13 +477,12 @@ The internal listener serves Magpie only, needs no key and accepts only requests
 - On macOS and Windows, the credential of the first Antigravity account that agy signed in to by itself is in the system keychain. Lamplighter does not read it and shows an error; add the account in Magpie once more.
 - When an Antigravity credential's `auth_method` is neither empty nor `consumer` (a personal Google account), the quota query shows an error.
 - When Magpie's `MAGPIE_ADDR` is a LAN address, the gateway requires a gateway key and Lamplighter cannot reach it.
-- The internal listener accepts only loopback access; bound to another address, it answers 403 to other machines. Use [Public access](#public-access) from outside.
 
 ## Security and risk
 
 - The plugin reads the tokens Magpie keeps only in memory, to query quotas, and never writes them to logs or disk.
 - `bark_url`, `webhook`, `admin_key` and `mcp_key` are stored in plain text in `config.json` (mode 600), readable by anyone who can reach the internal listener or holds the admin key.
-- The internal listener needs no key, so any program on the same machine (in the same container for Docker) can reach it.
+- The internal listener needs no key, so any program on the same machine (in the same container for Docker) can reach it; other web pages in a browser cannot call its API.
 - Each service has its own restrictions on third-party tools using subscription accounts. Using accounts through Magpie, sending scheduled ignition requests and querying quota may all put an account at risk; judge for yourself.
 
 ## Development

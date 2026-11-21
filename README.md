@@ -1,14 +1,14 @@
 <p align="center"><img src="./assets/logo.png" alt="" width="128"></p>
 
-# Lamplighter
+# Magpie-Lamplighter
 
 [English](./README_EN.md)
 
 > 当他点燃路灯时，就像他又创造了一颗星星，或者一朵花——《小王子》
 >
-> 点灯人的星球每分钟转一圈，他就每分钟点一次灯、熄一次灯，从不误点。Lamplighter 做的也是按时点灯：每个 5 小时额度窗口一重置，就点亮下一个窗口。
+> 点灯人的星球每分钟转一圈，他就每分钟点一次灯、熄一次灯，从不误点。Magpie-Lamplighter 做的也是按时点灯：每个 5 小时额度窗口一重置，就点亮下一个窗口。
 
-Lamplighter（点灯人）是 [Magpie](https://github.com/yetone/magpie) 的插件，npm 包名为 `magpie-lamplighter`。它监控 Magpie 中 ChatGPT（Codex）、Claude 和 Antigravity 订阅账号的额度，通过 [Bark](https://github.com/Finb/Bark) 或通用 webhook 推送提醒，并在 5 小时额度窗口重置后经 Magpie 发送一个极小的请求，让下一个窗口立即开始计时。编码 Agent 可以通过 MCP 查询额度。
+Magpie-Lamplighter（点灯人，下文简称 Lamplighter）是 [Magpie](https://github.com/yetone/magpie) 的插件，npm 包名为 `magpie-lamplighter`，在 Magpie 中显示为 **Magpie-Lamplighter**。它监控 Magpie 中 ChatGPT（Codex）、Claude 和 Antigravity 订阅账号的额度，通过 [Bark](https://github.com/Finb/Bark) 或通用 webhook 推送提醒，并在 5 小时额度窗口重置后经 Magpie 发送一个极小的请求，让下一个窗口立即开始计时。编码 Agent 可以通过 MCP 查询额度。
 
 ![管理页面：各账号额度和自动点火计划](./docs/images/overview.png)
 
@@ -30,7 +30,7 @@ Lamplighter（点灯人）是 [Magpie](https://github.com/yetone/magpie) 的插�
 | Claude | Magpie 的 Claude 账号 | 5 小时、7 天，以及 Fable 等单独计算的额度 | 支持，只点 5 小时窗口 |
 | Antigravity | agy-cli 插件（`@magpie-community/opencode-agy-cli-auth`）的账号 | Gemini、Claude / GPT 等额度组 | 默认不点；开启后默认只点 Gemini |
 
-没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。Magpie 中的 API key 没有额度窗口，不显示。
+Lamplighter 只监控 Magpie 中服务为 `codex`、`claude` 和 `agy-cli` 的订阅账号。Magpie 自带的 Antigravity 账号（服务为 `antigravity`）读不到凭证，不监控；需要监控 Antigravity 时，经 agy-cli 插件添加账号。没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。Magpie 中的 API key 没有额度窗口，不显示。
 
 ### 账号名称
 
@@ -83,7 +83,7 @@ Magpie 读不到社区插件列表时，这条命令会报错，可以改用 `ma
 
 新安装的插件不自动点火。开启前依次完成：
 
-1. 在“设置”视图中设置时区。点火时段和页面、通知中的时间都按这个时区计算。
+1. 在“设置”视图的“时区”区设置时区，点“保存”。点火时段和页面、通知中的时间都按这个时区计算。没有保存过时区时，输入框中预填浏览器的时区，但不会自动保存。
 2. 关闭 Magpie 自带的预热，见[与 Magpie 预热的冲突](#与-magpie-预热的冲突)。
 3. 在“设置”视图的“自动点火”区勾选“启用自动点火”。
 
@@ -140,7 +140,7 @@ Lamplighter 原先是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI
 | `mcp_enabled` | `false` | 在对外监听上提供 `/mcp`，见 [MCP](#mcp) |
 | `mcp_key` | 空 | MCP 专用密钥；开启 `mcp_enabled` 时没有密钥，页面会生成一个 |
 
-页面和 MCP 都关闭时不监听。两把密钥互不通用：管理密钥不能访问 `/mcp`，MCP 密钥不能访问页面和接口。
+页面和 MCP 都关闭时不监听。两把密钥互不通用：管理密钥不能访问 `/mcp`，MCP 密钥不能访问页面和接口。两把密钥不能相同，保存相同的密钥时页面报错；手动编辑 `config.json` 写入相同的密钥时，对外监听不提供页面、接口和 `/mcp`，页面顶部显示原因。
 
 经对外地址第一次打开页面时，页面提示“需要管理密钥”，输入后保存在当前浏览器中。打码开关等页面选项也按浏览器分别保存。
 
@@ -201,7 +201,7 @@ quotas.example.com {
 
 账号卡片、卡片区标题栏和曲线详情标题栏的相机按钮，分别将单张卡片、全部卡片和详情图复制为 PNG 图片。截图保留当前主题和打码状态，不包含操作按钮。在 Magpie 中，图片交给 Magpie 写入剪贴板；单独在浏览器中打开时，需要浏览器支持图片剪贴板，并在 HTTPS 或 localhost 等安全上下文中获得剪贴板权限。
 
-“设置”视图依次为“账号”“通知渠道”“提醒规则”“自动点火”“服务”和“高级”。开关和勾选框点击后自动保存，文本和数字在离开输入框或按回车时自动保存，保存结果显示在区块标题右侧。保存后显示“已保存，等待生效”，插件确认后显示“已生效”，15 秒内未确认则显示“未确认生效”。保存失败时，标题显示字段名和原因，失败的控件标红，输入草稿保留。“账号”区可以修改名称和权重，并通过拖动手柄调整账号顺序（保存为 `account_order`），拖动时按 Esc 取消。“通知渠道”中的“测试推送”在设置生效后向所有已配置的渠道发送，并逐个显示结果。
+“设置”视图依次为“账号”“通知渠道”“提醒规则”“时区”“自动点火”“服务”和“高级”。开关和勾选框点击后自动保存，文本和数字在离开输入框或按回车时自动保存，保存结果显示在区块标题右侧。保存后显示“已保存，等待生效”，插件确认后显示“已生效”，15 秒内未确认则显示“未确认生效”。保存失败时，标题显示字段名和原因，失败的控件标红，输入草稿保留。“账号”区可以修改名称和权重，并通过拖动手柄调整账号顺序（保存为 `account_order`），拖动时按 Esc 取消。“通知渠道”中的“测试推送”在设置生效后向所有已配置的渠道发送，并逐个显示结果。
 
 ## 额度获取
 
@@ -209,7 +209,7 @@ quotas.example.com {
 
 **Magpie 的额度记录**：Magpie 转发请求时会记下各账号的额度，插件每 60 秒读取一次，不额外向厂商发请求。Codex 和 Claude 有这类数据，Antigravity 只能主动查询。某个账号在整点前 60 秒内刚有过新读数时，这一轮跳过对它的主动查询；同一账号最多连续跳过 30 分钟，到时一定主动查询一次。
 
-**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
+**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度。刷新单个账号失败时，页面和 `refresh_quotas` 给出原因，例如账号在 Magpie 中已关闭、Magpie 中找不到这个账号或 Magpie 网关不可用；`refresh_quotas` 不返回上游的错误原文，其他错误提示用 `list_quotas` 查看各账号的状态。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
 
 **网络出口**：主动查询和 Magpie 对同一账号的请求使用同一个出口：Magpie 中为该账号或该服务设置的代理，其次是 Magpie 的全局代理，再次是 Magpie 使用的系统代理，都没有时直连。代理无法解析时，插件跳过这次查询，不改用直连。见[网络出口](./docs/architecture.md#网络出口)。
 
@@ -272,7 +272,7 @@ Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重�
 | `critical_threshold` | `10` | 第三档提醒阈值 |
 | `recovery_notify` | 5 小时 `after_exhausted`，7 天 `all` | 额度恢复时通知，见下文 |
 | `reset_reminder` | 5 小时 `off`，7 天 `has_remaining` | 重置前提醒，见下文 |
-| `timezone` | 空 | 显示时间和点火时段使用的时区，如 `Asia/Shanghai`；为空时使用程序所在系统的时区（Magpie 的 Docker 镜像为 UTC） |
+| `timezone` | 空 | 显示时间和点火时段使用的时区，IANA 名称，如 `Asia/Shanghai`；为空时使用程序所在系统的时区（Magpie 的 Docker 镜像为 UTC）。保存时校验，无效的名称不保存；手动写入无效的名称时，插件启动时记一条警告，使用系统的时区 |
 | `timezone_offset_hours` | 空 | 固定的 UTC 偏移，例如 `8`；只在 `timezone` 为空时使用 |
 | `poll_interval_seconds` | `300` | 主动查询间隔，最小 60 |
 | `request_timeout_seconds` | `20` | 额度查询、通知等 HTTP 请求的超时，5～120；不限制点火 |
@@ -399,7 +399,7 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 | --- | --- |
 | `list_quotas(provider?, account?, model?)` | 当前窗口、各账号套餐和权重、加权剩余、最早耗尽账号、重置和预计耗尽时间、每小时消耗、7 天匀速预算、数据来源与新鲜度、凭证失效、账号停用及下次点火时间 |
 | `get_quota_history(provider?, account?, window?, range?)` | 历史额度，包括已消失的窗口；每个系列最多 200 点，单次最多 2000 点 |
-| `refresh_quotas(account?)` | 主动查询；全局每 60 秒最多一次，超限返回等待秒数 |
+| `refresh_quotas(account?)` | 主动查询；全局每 60 秒最多一次，超限返回等待秒数；失败时返回 `ok: false` 和原因 |
 | `get_quota_events(since?, limit?)` | 最近的重置、耗尽、点火成功和失败，以及凭证失效、账号停用、限流和凭证恢复；`since` 为带时区的 RFC 3339 时间，`limit` 为 1–100 的整数 |
 
 工具返回的账号标识优先使用账号名称，其中的邮箱打码；没有名称时使用 `***` 加邮箱用户名的最后两个字符，例如 `***rk`。打码后相同的标识加上 `#1`、`#2` 等后缀。工具不返回完整邮箱，这一规则与页面的打码开关无关。`account` 参数接受返回的完整标识、加后缀前的基础标识、原始账号名称或完整邮箱，均为精确匹配；`refresh_quotas` 要求只匹配一个账号。
@@ -467,7 +467,7 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 
 这两个端口与 CPA 和 CPA 版 Lamplighter 的默认端口相同。它们与 Magpie 在同一台机器上运行时，修改 `port` 或 `public_listen`。Magpie 运行在 Docker 中、与它们不在同一个网络命名空间时不冲突。
 
-内部监听只供 Magpie 使用，不需要密钥，只接受 Host 为回环地址的请求。
+内部监听只供 Magpie 使用，不需要密钥，只接受 Host 为回环地址的请求；浏览器发来的接口请求必须来自 Lamplighter 自己的页面。插件以 `-listen 127.0.0.1:<port>` 启动程序。直接运行程序时，`-listen` 只能是回环地址，填写其他地址时程序报错退出。从其他机器访问请使用[对外访问](#对外访问)。
 
 ## 已知限制
 
@@ -475,13 +475,12 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 - macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中，Lamplighter 不读取，会显示错误。在 Magpie 中再添加一次该账号即可。
 - Antigravity 账号的凭证中 `auth_method` 不为空、也不是 `consumer`（个人 Google 账号）时，查询额度会显示错误。
 - Magpie 的 `MAGPIE_ADDR` 设为局域网地址时，网关要求网关密钥，Lamplighter 无法访问网关。
-- 内部监听只接受回环地址的访问，把它绑定到其他地址后从其他机器访问会得到 403。从外部访问请使用[对外访问](#对外访问)。
 
 ## 安全与风险
 
 - 插件只在内存中读取 Magpie 保存的 token，用于查询额度，不写入日志或磁盘。
 - `bark_url`、`webhook`、`admin_key` 和 `mcp_key` 以明文保存在 `config.json` 中（文件权限 600），能访问内部监听或持有管理密钥的人都可以读取。
-- 内部监听不需要密钥，同一台机器（Docker 部署时为同一个容器）上的程序都可以访问。
+- 内部监听不需要密钥，同一台机器（Docker 部署时为同一个容器）上的程序都可以访问；浏览器中的其他网页不能调用它的接口。
 - 各服务对第三方工具使用订阅账号有不同限制。通过 Magpie 使用账号、定时发送点火请求和查询额度，都可能带来账号风险，请自行判断。
 
 ## 开发
