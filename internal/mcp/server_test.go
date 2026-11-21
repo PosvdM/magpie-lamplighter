@@ -151,11 +151,11 @@ func TestListenerReconfigureAndClose(t *testing.T) {
 	addr := reserve.Addr().String()
 	s := New(&fakeBackend{}, "test")
 	defer s.Close()
-	s.Configure(true, addr, "")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: ""})
 	if state := s.State(); state.Running || state.Error == "" || !state.Enabled {
 		t.Fatalf("missing key %+v", state)
 	}
-	s.Configure(true, addr, "first")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: "first"})
 	if state := s.State(); state.Running || state.Error == "" {
 		t.Fatalf("bind failure %+v", state)
 	}
@@ -180,7 +180,7 @@ func TestListenerReconfigureAndClose(t *testing.T) {
 	s.mu.Lock()
 	listener := s.http
 	s.mu.Unlock()
-	s.Configure(true, addr, "second")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: "second"})
 	s.mu.Lock()
 	kept := s.http == listener && s.state.Running
 	s.mu.Unlock()
@@ -193,7 +193,7 @@ func TestListenerReconfigureAndClose(t *testing.T) {
 	if code, _ := post(t, client, "http://"+addr+"/mcp", "POST", body, "second", "", ""); code != 200 {
 		t.Fatal(code)
 	}
-	s.Configure(false, addr, "second")
+	s.Configure(Config{Listen: addr, MCPEnabled: false, MCPKey: "second"})
 	if state := s.State(); state.Running || state.Error != "" {
 		t.Fatalf("disable %+v", state)
 	}
@@ -202,14 +202,14 @@ func TestListenerReconfigureAndClose(t *testing.T) {
 		t.Fatalf("disabled listener retained port: %v", err)
 	}
 	rebound.Close()
-	s.Configure(true, addr, "second")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: "second"})
 	s.Close()
 	rebound, err = net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("closed listener retained port: %v", err)
 	}
 	rebound.Close()
-	s.Configure(true, addr, "third")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: "third"})
 	if s.State().Running {
 		t.Fatal("closed server restarted")
 	}
@@ -236,7 +236,7 @@ func TestCloseCancelsAndDrainsActiveRequests(t *testing.T) {
 	backend := &blockingBackend{started: make(chan struct{}), finished: make(chan struct{})}
 	s := New(backend, "test")
 	defer s.Close()
-	s.Configure(true, addr, "key")
+	s.Configure(Config{Listen: addr, MCPEnabled: true, MCPKey: "key"})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

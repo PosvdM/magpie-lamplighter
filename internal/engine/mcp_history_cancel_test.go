@@ -73,7 +73,7 @@ func TestMCPRealHistoryCloseCancelsScanning(t *testing.T) {
 			server := mcp.New(backend, "test")
 			defer server.Close()
 			address := freeMCPAddress(t)
-			server.Configure(true, address, "key")
+			server.Configure(mcp.Config{Listen: address, MCPEnabled: true, MCPKey: "key"})
 			if !server.State().Running {
 				t.Fatal(server.State())
 			}

@@ -190,7 +190,7 @@ func TestLifecycleCancelsQueriesAndBatch(t *testing.T) {
 					return nil, ctx.Err()
 				}), "test")
 				defer s.Close()
-				s.Configure(true, "127.0.0.1:0", "key")
+				s.Configure(Config{Listen: "127.0.0.1:0", MCPEnabled: true, MCPKey: "key"})
 				if !s.State().Running {
 					t.Fatalf("listener failed: %+v", s.State())
 				}
@@ -205,9 +205,9 @@ func TestLifecycleCancelsQueriesAndBatch(t *testing.T) {
 					case "close":
 						s.Close()
 					case "disable":
-						s.Configure(false, "127.0.0.1:0", "key")
+						s.Configure(Config{Listen: "127.0.0.1:0", MCPEnabled: false, MCPKey: "key"})
 					case "reconfigure":
-						s.Configure(true, "127.0.0.1:0", "replacement")
+						s.Configure(Config{Listen: "127.0.0.1:0", MCPEnabled: true, MCPKey: "replacement"})
 					}
 					close(changed)
 				}()

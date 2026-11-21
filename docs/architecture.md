@@ -7,11 +7,11 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 | 路径 | 职责 |
 | --- | --- |
 | `main.go` | 程序入口：打开数据目录和配置，启动引擎和内部监听，收到 SIGINT 或 SIGTERM 时退出 |
-| `internal/server` | 内部监听的 HTTP 接口：页面、状态和操作接口、配置读写、插件宿主的 tool 调用；把配置交给引擎和 MCP 监听 |
+| `internal/server` | HTTP 路由：页面、状态和操作接口、配置读写、插件宿主的 tool 调用；把配置交给引擎和对外监听 |
 | `internal/host` | Lamplighter 与 Magpie 之间的接口 `host.Host` 及其数据类型，见“与 Magpie 的接口” |
 | `internal/magpie` | `host.Host` 的实现：网关请求、Magpie 文件的读取 |
 | `internal/engine` | 后台循环：主动查询、被动数据、点火、通知、历史和状态页数据；`mcp.go` 提供模型可读 DTO 和额度预测 |
-| `internal/mcp` | 对外 HTTP 监听器、MCP Streamable HTTP 协议、Bearer 鉴权和 Origin 校验 |
+| `internal/mcp` | 对外监听：页面和接口的 `admin_key` 鉴权，`/mcp` 的 MCP Streamable HTTP 协议、`mcp_key` 鉴权和 Origin 校验 |
 | `internal/config` | 配置解析、默认值和取值范围；配置文件的读写（`Store`）和数据目录 |
 | `internal/providers` | 每个服务一个文件：额度请求和解析、响应头解析、点火请求、候选模型、默认设置；注册表，见下文“服务” |
 | `internal/quota` | 额度窗口和上游请求的类型，窗口种类判断，时间解析 |
@@ -26,7 +26,7 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 
 ## 进程和数据目录
 
-`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
+`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥，地址不是回环地址时 `main.go` 记录一条警告。需要从外部访问时使用对外监听，见“HTTP 接口”。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
 - `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。
 - `state.json`、`history/`、`instance.lock`：见下文“数据”。
@@ -51,12 +51,17 @@ Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，�
 
 ## HTTP 接口
 
-内部监听（`internal/server`）的路由：
+Lamplighter 有两个监听，使用同一套路由（`server.Server.Handler`）：
+
+- 内部监听：`-listen` 的地址，只绑定回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。
+- 对外监听：配置中的 `public_listen`（默认 `127.0.0.1:8318`），供服务器前面的域名或反向代理使用，页面和接口要求 `admin_key`，见下文“对外监听”。
+
+路由：
 
 | 方法和路径 | 作用 |
 | --- | --- |
 | `GET /` | 管理页面 |
-| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
+| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置（`admin_key_set`、`mcp_key_set`）；`public` 和 `mcp` 是对外监听的状态，见下文“对外监听”。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
 | `GET /api/history?range=…&window=5h\|7d` | 额度历史和点火事件，参数和返回格式见下文“额度变化图表” |
 | `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号 |
 | `POST /api/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
@@ -67,7 +72,30 @@ Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，�
 | `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析，然后整体写入 `config.json` 并应用。返回保存后的原文 |
 | `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
-`config` 中的 `public_listen`、`web_enabled`、`admin_key`、`mcp_enabled`、`mcp_key` 设置对外监听：页面和接口需要 `admin_key`，`/mcp` 需要 `mcp_key`。`account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
+`account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
+
+### 对外监听
+
+对外监听由 `mcp.Server` 持有（自己的 `net.Listen` 和 `http.Server`）。`server.New` 用 `mcp.Server.SetWeb` 把上述路由交给它，`server.Server.apply` 每次应用配置时调用 `mcp.Server.Configure`。监听上提供两部分，各自按配置开启：
+
+| 部分 | 开启条件 | 鉴权 |
+| --- | --- | --- |
+| 页面和接口（`/mcp` 以外的路径） | `web_enabled` 为真且 `admin_key` 非空 | `Authorization: Bearer <admin_key>` |
+| `/mcp`，见“MCP” | `mcp_enabled` 为真且 `mcp_key` 非空 | `Authorization: Bearer <mcp_key>`，以及 Origin 校验 |
+
+- 两部分都没有开启时不监听，端口释放。`admin_key` 不校验格式，非空即可；设置页生成的密钥为 `lladm_` 加 32 字节随机数的 base64url 编码。
+- `GET /`（以及 `HEAD /`）不要求密钥：页面本身不含数据，浏览器打开页面时也带不上请求头。页面请求接口收到 401 后让用户输入管理密钥，见“管理页面”。其他路径（包括不存在的路径）缺少密钥或密钥错误时返回 401 和 `WWW-Authenticate: Bearer`，不暴露有哪些路由；带对密钥后，不存在的路由返回 404。页面和接口没有开启时，`/mcp` 以外的路径都返回 404；`/mcp` 没有开启时返回 404。
+- 两把密钥只开放各自的部分：`admin_key` 不能访问 `/mcp`，`mcp_key` 不能访问页面和接口。比较方法相同：对 `Bearer <密钥>` 和请求的 `Authorization` 头各求 SHA-256，再常数时间比较，不泄露密钥长度和前缀。
+- 页面和接口不做 Origin 校验，也不返回 CORS 头：密钥在请求头中，其他网站的页面无法让浏览器带上它。
+- **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。绑定失败时记录错误，每 2 秒重试。
+- **关闭**：`server.Server.Shutdown` 先在 `server.Server.mu` 内标记停止，然后释放这把锁，再关闭对外监听（取消并等待其中的请求），最后停止引擎。对外的接口请求读取状态时要取这把锁，持锁等待会死锁。停止后的实例不再应用配置，也不重新监听。
+- **超时**：读请求头 5 秒、读请求 15 秒、写响应 190 秒、空闲连接 30 秒，请求头最多 16 KiB，页面、接口和 `/mcp` 共用。插件宿主的 tool 调用走内部监听，经对外接口调用 `POST /api/tools/{name}` 同样最长 50 秒。
+
+状态接口中的对外监听状态：
+
+- `public`：`listen`（`public_listen`）、`running`（正在监听）、`error`（绑定或运行的错误，没有时为空字符串）、`web`（页面和接口正在提供）、`mcp`（`/mcp` 正在提供）。两部分都没有开启时 `running`、`web`、`mcp` 都为假。
+- `mcp`：`enabled`（`mcp_enabled`）、`listen`、`running`（监听正在运行）、`error`、`path`（固定为 `/mcp`）。`error` 在开启 MCP 但 `mcp_key` 为空时为 `MCP key is empty`，开启 MCP 时为监听的错误，关闭 MCP 时为空。
+- `status.config` 不含 `admin_key` 和 `mcp_key`，以 `admin_key_set`、`mcp_key_set` 表示是否已设置；`GET /api/config` 返回原值供设置页填表。
 
 ## 管理页面
 
@@ -143,13 +171,13 @@ MCP 设置读取 `status.mcp` 显示监听状态；开启时没有有效密钥�
 
 ## MCP
 
-MCP 使用自己的 `net.Listen` 和 `http.Server`，监听 `public_listen`（默认 `127.0.0.1:8318`），路径固定为 `/mcp`，用 `mcp_key` 鉴权。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
+MCP 在对外监听的 `/mcp` 上提供，`mcp_enabled` 为真且 `mcp_key` 非空时开启；监听、重新绑定、关闭和状态字段见“HTTP 接口”的“对外监听”。连接及 HTTPS 代理示例见 [README](../README.md#mcp)。
 
-`plugin.Plugin` 持有 `mcp.Server` 和生命周期互斥锁。注册及重新配置成功时根据 `mcp_enabled`、`mcp_listen`、`mcp_key` 应用监听配置，先关闭旧监听器再绑定新地址。监听正在运行、开关和地址都不变而只换了非空密钥时，`mcp.Server.Configure` 只替换密钥并取消用旧密钥进入的请求，不关闭监听：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让换密钥后的第一个请求失败。处理请求时在 `mu` 内读取密钥，`Configure` 返回后的请求都按新密钥校验；配置无法解析时保留有效配置。空密钥阻止启动。绑定失败记录状态并每 2 秒重试，以便热重载中先注册的新实例在旧实例释放端口后接管。`plugin.quiesce`、`plugin.shutdown` 和 C ABI shutdown 均关闭监听器、取消连接并等待 HTTP 工具调用退出，再停止引擎；停止的实例不重启。监听状态由插件填入管理响应的 `mcp`：`enabled`、`listen`、`running`、`error`、`path`。`status.config` 清除 `mcp_key`，以 `mcp_key_set` 表示是否设置密钥；配置执行确认使用顶层 `config_applied_token`，不能通过布尔值确认密钥轮换。宿主的配置 GET/PATCH 保留原值。
+`server.Server.apply` 先把配置交给引擎（`engine.Configure`），再调用 `mcp.Server.Configure`，最后调用 `engine.MCPConfigured`。所以顶层 `config_applied_token` 表示对外监听也已按这份配置执行；绑定失败并记录错误也算执行完成。监听是否可用读取 `status.public` 和 `status.mcp`；这些布尔值不能确认密钥已经更换，确认更换看 `config_applied_token`。配置无法解析时不调用 `Configure`，对外监听保持原来的设置。
 
 ### 协议与鉴权
 
-服务采用无会话状态的 Streamable HTTP，支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`。请求版本为 `2025-03-26` 或 `2025-06-18` 时原样协商，不支持时建议 `2025-06-18`；后续 `MCP-Protocol-Version` 若存在必须受支持。POST 请求只返回 `application/json`，不建立 SSE；通知返回 202 且无正文，GET 返回 405。`2025-03-26` 接受最多 50 项的 JSON-RPC 批次，`2025-06-18` 拒绝批次。请求体最多 1 MiB，读取和写入有超时限制。每个服务实例最多同时执行 4 次工具调用，批处理内的每次调用也占用同一组名额；名额不足立即返回 JSON-RPC `-32000` 忙碌错误，调用方可稍后重试，不进入等待队列。`list_quotas`、`get_quota_history` 和 `get_quota_events` 的调用超时为 10 秒，`refresh_quotas` 为 180 秒。关闭、停用或替换监听器会显式取消已登记请求，关闭服务等待取消后的处理退出；历史扫描和预测计算沿用调用 context，在循环中检查取消。
+服务采用无会话状态的 Streamable HTTP，支持 `initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`。请求版本为 `2025-03-26` 或 `2025-06-18` 时原样协商，不支持时建议 `2025-06-18`；后续 `MCP-Protocol-Version` 若存在必须受支持。POST 请求只返回 `application/json`，不建立 SSE；通知返回 202 且无正文，GET 返回 405。`2025-03-26` 接受最多 50 项的 JSON-RPC 批次，`2025-06-18` 拒绝批次。请求体最多 1 MiB，读取和写入有超时限制。每个服务实例最多同时执行 4 次工具调用，批处理内的每次调用也占用同一组名额；名额不足立即返回 JSON-RPC `-32000` 忙碌错误，调用方可稍后重试，不进入等待队列。`list_quotas`、`get_quota_history` 和 `get_quota_events` 的调用超时为 10 秒，`refresh_quotas` 为 180 秒。关闭监听、关闭 `/mcp` 或更换 `mcp_key` 会取消已登记的 MCP 请求，`mcp.Server.Close` 还会等待取消后的处理退出；历史扫描和预测计算沿用调用 context，在循环中检查取消。
 
 每次请求验证 `Authorization: Bearer <mcp_key>`，先对双方求 SHA-256，再常量时间比较，避免泄露密钥长度和前缀。出现 `Origin` 时只接受 http/https 的 `localhost` 或回环 IP，不解析任意主机名，拒绝其他来源和多个 Origin。代理不能把外部 Origin 改写成本机来源。鉴权及 HTTP 传输错误使用对应状态码；JSON-RPC 解析、请求、参数和方法错误使用标准错误码，工具执行错误使用 `isError` 结果。
 

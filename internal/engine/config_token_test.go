@@ -120,7 +120,7 @@ func TestMCPOnlyConfigAdvancesTokenAndRotatesAuthentication(t *testing.T) {
 	cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey, cfg.ConfigToken = true, freeMCPAddress(t), "old-key", "old"
 	configure := func() {
 		rev := e.Configure(cfg, nil)
-		server.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
+		server.Configure(mcp.Config{Listen: cfg.PublicListen, MCPEnabled: cfg.MCPEnabled, MCPKey: cfg.MCPKey})
 		e.MCPConfigured(rev)
 	}
 	configure()
