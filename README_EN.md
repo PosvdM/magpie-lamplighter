@@ -201,7 +201,7 @@ Authentication and listener details are in [对外监听](./docs/architecture.md
 
 How the chart is computed is in [页面功能](./docs/architecture.md#页面功能) (Chinese).
 
-The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts**, and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
+The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
 
 The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
 

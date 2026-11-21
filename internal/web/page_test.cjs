@@ -1586,9 +1586,9 @@ test("a quota group of an account with several names its service apart from the 
     group_order: ["GPT", "Claude", "Gemini", "Claude / GPT"],
   };
   const providerTitle = (id) => titles[id] || id;
-  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "fitName", "graphemes", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
     status, providerTitle, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
-    gapLimit: () => 900, pooled: () => [],
+    gapLimit: () => 900, pooled: () => [], graphemeSegmenter: undefined,
   });
   vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
   assert.deepEqual(plain(ctx.sharedGroups(status.accounts)), { "antigravity:4:gemini": "antigravity", "antigravity:4:cg": "antigravity" });
@@ -1964,7 +1964,7 @@ test("a Claude account with several groups never shows Claude · Claude", () => 
 });
 
 test("a label without a length limit is cut with few measurements", () => {
-  const ctx = context(["fitName"]);
+  const ctx = context(["fitName", "graphemes"], { graphemeSegmenter: undefined });
   let calls = 0;
   const chars = (text) => { calls++; return Array.from(text).length; };
   const long = "Antigravity · " + "Model ".repeat(2000) + "end";
@@ -1975,10 +1975,102 @@ test("a label without a length limit is cut with few measurements", () => {
   assert.ok(calls <= 2 + Math.ceil(Math.log2(long.length)) + 1, String(calls));
   // Too narrow even for the service: the short form and one character.
   assert.equal(ctx.fitName(long, "Antigravity · ", 2, "AG · ", chars), "AG · M…");
-  // A width that is not monotonic, as kerning can make it: the candidate is
-  // checked and shortened until it fits.
-  const bumpy = (text) => Array.from(text).length + (/Mod…$/.test(text) ? 5 : 0);
-  assert.equal(ctx.fitName("Model Model", "", 6, "", bumpy), "Mo…");
+});
+
+test("a cut name keeps each letter with its accent and each emoji whole", () => {
+  const ctx = context(["fitName", "graphemes"], { graphemeSegmenter: undefined });
+  // Widths by graphemes, as a reader counts them.
+  const seen = (text) => Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)).length;
+  const accent = "Cafe\u0301 Cafe\u0301 Cafe\u0301", coder = "👩‍💻👩‍💻👩‍💻👩‍💻 team";
+  assert.deepEqual([...ctx.graphemes("e\u0301👩‍💻x")], ["e\u0301", "👩‍💻", "x"]);
+  for (let room = 2; room < 12; room++) {
+    const cut = ctx.fitName(accent, "", room, "", seen);
+    assert.ok(!/e…/.test(cut), cut);
+    assert.ok(seen(cut) <= room, cut);
+  }
+  assert.equal(ctx.fitName(accent, "", 5, "", seen), "Cafe\u0301…");
+  assert.equal(ctx.fitName(coder, "", 3, "", seen), "👩‍💻👩‍💻…");
+  for (let room = 2; room < 10; room++) {
+    const cut = ctx.fitName(coder, "", room, "", seen);
+    // Never a part of the emoji, such as 👩 alone or a dangling joiner.
+    for (const g of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(cut)) assert.ok(["👩‍💻", " ", "t", "e", "a", "m", "…"].includes(g.segment), cut);
+  }
+  // Widths that grow with each code point, as the estimate without a
+  // canvas does: a cut by code points would drop the accent ("Cafe…") or
+  // keep 👩 without the rest of the emoji.
+  const points = (text) => Array.from(text).length;
+  assert.equal(ctx.fitName(accent, "", 5, "", points), "Caf…");
+  assert.equal(ctx.fitName(coder, "", 4, "", points), "👩‍💻…");
+  assert.equal(ctx.fitName(coder, "", 3, "", points), "👩‍💻…");
+  // The short form of the service counts in graphemes too.
+  assert.equal(ctx.fitName("Café · Claude", "Café · ", 9, "Cafe\u0301 · ", seen), "Cafe\u0301 · C…");
+  assert.equal(ctx.fitName("Café · Claude", "Café · ", 10, "Cafe\u0301 · ", seen), "Cafe\u0301 · Cl…");
+  // Without Intl.Segmenter: code points.
+  const old = context(["graphemes"], { Intl: {}, graphemeSegmenter: undefined });
+  assert.deepEqual([...old.graphemes("e\u0301👩‍💻")], ["e", "\u0301", "👩", "\u200d", "💻"]);
+});
+
+test("masking blurs the suffix of an account and leaves its service readable", () => {
+  const win = (remaining) => [{ id: "five-hour", kind: "5h", short: "5h", remaining, reset: "" }];
+  const status = {
+    accounts: [
+      { auth_index: "1", provider: "claude", title: "Claude#rk", email: "ann.rk@example.com", name: "claude-ann.json", groups: [
+        { key: "claude:1:main", label: "Claude#rk", source_label: "Claude", windows: win(40) },
+        { key: "claude:1:fable", label: "Fable#rk", source_label: "Fable", windows: win(70) },
+      ] },
+      { auth_index: "2", provider: "claude", title: "Claude#am", email: "bo.am@example.com", groups: [
+        { key: "claude:2:main", label: "Claude#am", source_label: "Claude", windows: win(60) },
+      ] },
+    ],
+    events: [{ label: "Claude#old" }],
+    group_order: ["Claude", "Fable"],
+  };
+  const element = (tag, attrs = {}, children = []) => ({ tag, ...attrs, children });
+  const ctx = context(["accountSecrets", "hasSecret", "maskedNodes", "sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName",
+    "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime", "renderChartTable"], {
+    status, SENSITIVE: "account-sensitive", el: element, document: { createTextNode: (text) => ({ text }) },
+    providerList: () => [{ id: "claude", title: "Claude" }, { id: "codex", title: "GPT" }], providerTitle: (id) => ({ claude: "Claude" })[id] || id,
+    rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5, gapLimit: () => 900, pooled: () => [],
+    clear: () => {}, pct: String, fmtCountdown: String, translate: (k) => k,
+  });
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
+  const now = 1795280000;
+  const series = (group, label, source, auth, value) => ({ group, label, source_label: source, provider: "claude", auth_index: auth,
+    window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  ctx.history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), events: [], series: [
+    series("claude:1:main", "Claude#rk", "Claude", "1", 40), series("claude:1:fable", "Fable#rk", "Fable", "1", 70),
+    series("claude:2:main", "Claude#am", "Claude", "2", 60),
+    // A series of a group no current account has: named by its group key.
+    series("claude:9:main", "Claude#gone", "Claude", "9", 10),
+  ] };
+  // The parts as [text, sensitive].
+  const parts = (nodes) => plain(nodes.map((n) => [n.text, n.class === "account-sensitive"]));
+  const secrets = ctx.accountSecrets();
+  assert.ok(secrets.includes("#rk") && secrets.includes("#am") && secrets.includes("#old"), secrets.join(" "));
+  assert.ok(!secrets.includes("Claude#rk") && !secrets.includes("Fable#rk"));
+  assert.ok(secrets.includes("ann.rk@example.com") && secrets.includes("claude-ann.json"));
+  // The orphan series counts as a whole, whatever it looks like.
+  assert.ok(secrets.includes("Claude#gone") && secrets.includes("claude:9:main"));
+  assert.deepEqual(parts(ctx.maskedNodes("Claude#rk")), [["Claude", false], ["#rk", true]]);
+  assert.deepEqual(parts(ctx.maskedNodes("Claude · Fable#rk")), [["Claude · Fable", false], ["#rk", true]]);
+  assert.deepEqual(parts(ctx.maskedNodes("Claude#old")), [["Claude", false], ["#old", true]]);
+  assert.deepEqual(parts(ctx.maskedNodes("Claude#gone")), [["Claude#gone", true]]);
+  assert.deepEqual(parts(ctx.maskedNodes("ann.rk@example.com")), [["ann.rk@example.com", true]]);
+  assert.equal(ctx.hasSecret("Claude#rk"), true);
+  assert.equal(ctx.hasSecret("Claude · Fable"), false);
+  // The chart's table with the real maskedNodes: the service shows, the
+  // suffix is blurred, and the row of the gone account is blurred whole.
+  const rows = ctx.chartRows();
+  const cells = [];
+  ctx.$ = () => ({ appendChild: (tr) => cells.push(tr.children[0]) });
+  ctx.renderChartTable(rows);
+  const byName = Object.fromEntries(cells.map((td) => [td.text || td.children.map((n) => n.text).join(""), td.class ? [[td.text, true]] : parts(td.children)]));
+  assert.deepEqual(byName["Claude#rk"], [["Claude", false], ["#rk", true]]);
+  assert.deepEqual(byName["Claude#am"], [["Claude", false], ["#am", true]]);
+  assert.deepEqual(byName["Claude · Fable#rk"], [["Claude · Fable", false], ["#rk", true]]);
+  assert.deepEqual(byName["Claude#gone"], [["Claude#gone", true]]);
+  // The detail heading masks the same way as the table.
+  assert.match(source, /row\.orphan \? \[el\("span", \{ class: SENSITIVE, text: row\.name \}\)\] : maskedNodes\(row\.name\)/);
 });
 
 test("a redraw reads the font once and sets the canvas font only when it changes", () => {

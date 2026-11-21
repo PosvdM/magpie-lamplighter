@@ -847,22 +847,28 @@
   // The names that tell accounts apart: titles, emails, credential file
   // names and group labels of the current accounts, and the labels of
   // events and history series, which keep the names of renamed and deleted
-  // accounts; without the provider and group names they share. Longest
-  // first, so an email wins over a part of it.
+  // accounts; without the provider and group names they share. A name made
+  // of a shared name and the suffix of an account, such as "Claude#rk" or
+  // "Claude / GPT#main", counts only by its suffix ("#rk"), so masking
+  // blurs the suffix and leaves the service readable, as in "Claude#rk" of
+  // a Claude account with several quota groups in the chart's table and
+  // the detail heading. Longest first, so an email wins over a part of it.
   function accountSecrets() {
     var common = {}, found = {};
     providerList().forEach(function (p) { common[p.title] = true; common[p.id] = true; });
     var accounts = (status && status.accounts) || [];
     accounts.forEach(function (a) { (a.groups || []).forEach(function (g) { common[g.source_label] = true; }); });
+    var add = function (name, whole) {
+      name = typeof name === "string" ? name.trim() : "";
+      var at = name.indexOf("#");
+      if (!whole && at > 0 && common[name.slice(0, at)]) name = name.slice(at);
+      if (name.length >= 2 && !common[name]) found[name] = true;
+    };
     accounts.forEach(function (a) {
-      var names = [a.title, a.email, a.name];
-      (a.groups || []).forEach(function (g) { names.push(g.label); });
-      names.forEach(function (name) {
-        name = typeof name === "string" ? name.trim() : "";
-        if (name.length >= 2 && !common[name]) found[name] = true;
-      });
+      [a.title, a.email, a.name].forEach(function (name) { add(name); });
+      (a.groups || []).forEach(function (g) { add(g.label); });
     });
-    var past = [];
+    var past = [], orphan = [];
     ((status && status.events) || []).concat((history && history.events) || []).forEach(function (ev) { past.push(ev.label); });
     // A series of a quota group no current account has lost its metadata:
     // the history names it by the internal group key, which identifies the
@@ -870,13 +876,14 @@
     var groups = {};
     accounts.forEach(function (a) { (a.groups || []).forEach(function (g) { groups[g.key] = true; }); });
     ((history && history.series) || []).forEach(function (s) {
-      if (s.label !== s.source_label) past.push(s.label);
-      if (!groups[s.group]) past.push(s.label, s.source_label, s.group);
+      if (groups[s.group]) {
+        if (s.label !== s.source_label) past.push(s.label);
+      } else {
+        orphan.push(s.label, s.source_label, s.group);
+      }
     });
-    past.forEach(function (name) {
-      name = typeof name === "string" ? name.trim() : "";
-      if (name.length >= 2 && !common[name]) found[name] = true;
-    });
+    past.forEach(function (name) { add(name); });
+    orphan.forEach(function (name) { add(name, true); });
     return Object.keys(found).sort(function (a, b) { return b.length - a.length; });
   }
 
@@ -2308,17 +2315,20 @@
   // of an Antigravity account never reads as a Claude account.
   //
   // Group labels have no length limit (Antigravity keeps an unknown one as
-  // it is), so the longest prefix that fits is found by binary search: a
-  // label of n characters takes about log2(n) measurements, not n.
+  // it is), so the cut is found by binary search: a label of n characters
+  // takes about log2(n) measurements, not n. The search takes a longer
+  // prefix to be at least as wide as a shorter one, as it is in real fonts.
+  // Cuts fall between graphemes, so a letter with its accent or an emoji of
+  // several code points stays whole.
   function fitName(name, prefix, room, short, width) {
     if (width(name) <= room) return name;
     var keep = 1;
     if (prefix && short && name.indexOf(prefix) === 0) {
       name = short + name.slice(prefix.length);
       if (width(name) <= room) return name;
-      keep = Array.from(short).length + 1;
+      keep = graphemes(short).length + 1;
     }
-    var chars = Array.from(name);
+    var chars = graphemes(name);
     var cut = function (n) { return chars.slice(0, n).join("") + "…"; };
     // The longest n in [keep, length - 1] whose cut fits; keep characters
     // stay even when they do not.
@@ -2328,10 +2338,23 @@
       if (width(cut(mid)) <= room) lo = mid;
       else hi = mid - 1;
     }
-    // Kerning can make a longer text narrower, so the candidate is measured
-    // once more, and shortened in the rare case it does not fit.
+    // The candidate is measured once more to confirm that it fits, and
+    // shortened if it does not.
     while (lo > keep && width(cut(lo)) > room) lo--;
     return cut(lo);
+  }
+
+  // The graphemes of text, as the reader sees its characters: by
+  // Intl.Segmenter, or by code points where the browser has none.
+  var graphemeSegmenter;
+  function graphemes(text) {
+    if (graphemeSegmenter === undefined) {
+      try {
+        graphemeSegmenter = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+      } catch (err) { graphemeSegmenter = null; }
+    }
+    if (!graphemeSegmenter) return Array.from(text);
+    return Array.from(graphemeSegmenter.segment(text), function (part) { return part.segment; });
   }
 
   // A function (text, size, weight) giving the width of text in the body
