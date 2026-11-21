@@ -259,11 +259,13 @@ func TestMCPRefreshFailureIsSanitized(t *testing.T) {
 		cmd := <-e.cmdCh
 		cmd.reply <- commandReply{err: errors.New("secret token /private/auth.json")}
 	}()
-	_, err := b.refresh(context.Background(), nil)
-	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "/private") {
-		t.Fatalf("refresh error %v", err)
-	}
 	value, err := b.refresh(context.Background(), nil)
+	result, _ := value.(map[string]any)
+	text, _ := result["error"].(string)
+	if err != nil || result["ok"] != false || text == "" || strings.Contains(text, "secret") || strings.Contains(text, "/private") {
+		t.Fatalf("refresh result %#v, %v", value, err)
+	}
+	value, err = b.refresh(context.Background(), nil)
 	if err != nil || value.(map[string]any)["retry_after_seconds"] != 60 {
 		t.Fatalf("failed refresh must consume the limit: %#v, %v", value, err)
 	}

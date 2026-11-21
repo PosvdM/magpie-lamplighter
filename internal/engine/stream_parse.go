@@ -37,6 +37,33 @@ var streamErrorCodes = map[string]int{
 // retry your request)". Only this anchored marker is read from a message.
 var magpieRetryStatus = regexp.MustCompile(`\(([0-9]{3}): you can retry your request\)\s*$`)
 
+// genericStreamCodes are the types and codes Magpie's encoders write when
+// the upstream error named none (internal/gateway: the Claude and Chat
+// encoders' api_error, the Responses encoder's server_error). They tell
+// nothing about the status, but mark an error Magpie wrote; an error
+// without either is not read for words.
+var genericStreamCodes = map[string]bool{"": true, "api_error": true, "server_error": true}
+
+// magpiePassingWords are the words for which Magpie's saysPassing leaves out
+// the status suffix, because the message already says the error passes
+// (passingSaid). Only these decide a status, and only for an error with a
+// generic code; the message itself is dropped. Other passing words, such
+// as "timed out" or "server error", keep the generic code's 500.
+var magpiePassingWords = []struct {
+	pattern *regexp.Regexp
+	status  int
+}{
+	{regexp.MustCompile(`(?i)\b429\b|rate.?limit|too many requests`), 429},
+	{regexp.MustCompile(`(?i)overloaded`), 529},
+}
+
+// magpieHeldOpening matches the opening of Magpie's cappedError: every
+// account that could take the request is held at a cap set in Magpie, or
+// set not to spend beyond its allowance. It is Magpie's own answer, no
+// rate limit of the vendor; a vendor's "usage limit reached|<unix>" does
+// not match.
+var magpieHeldOpening = regexp.MustCompile(`^(?:X-Magpie-Account: )?(usage cap reached|spend cap reached|usage limit reached): every (?:account|key) `)
+
 // streamAppealURL allowlists the appeal forms of suspended accounts kept from
 // a stream error, such as Google's https://forms.gle/... link.
 var streamAppealURL = regexp.MustCompile(`^https://(?:forms\.gle/[A-Za-z0-9]{1,64}|support\.google\.com/[A-Za-z0-9/_-]{1,128})$`)
@@ -101,12 +128,33 @@ func streamError(v map[string]any) error {
 			}
 		}
 	}
+	rawMessage := str(detail["message"])
 	if status == 0 {
-		if match := magpieRetryStatus.FindStringSubmatch(str(detail["message"])); match != nil {
+		if match := magpieRetryStatus.FindStringSubmatch(rawMessage); match != nil {
 			status = allowedStreamStatus(match[1])
 		}
 	}
 	explicit := status
+	if held := magpieHeldOpening.FindStringSubmatch(rawMessage); held != nil {
+		// Worded like the pinned refusal before the headers, so that
+		// ignite.PinHeld and failure.Diagnose treat both alike.
+		if status == 0 {
+			status = 429
+		}
+		return &host.Error{Method: "model stream", Code: "magpie_account_held", Status: status,
+			Message: "ignition provider stream error: X-Magpie-Account: " + held[1] + ": every account is held by Magpie"}
+	}
+	// A status read from Magpie's passing words; see magpiePassingWords.
+	worded := 0
+	code, typ := str(detail["code"]), str(detail["type"])
+	if status == 0 && genericStreamCodes[code] && genericStreamCodes[typ] && code+typ != "" {
+		for _, words := range magpiePassingWords {
+			if words.pattern.MatchString(rawMessage) {
+				status, worded = words.status, words.status
+				break
+			}
+		}
+	}
 	for _, key := range []string{"code", "type"} {
 		if status == 0 {
 			status = streamErrorCodes[str(detail[key])]
@@ -134,8 +182,11 @@ func streamError(v map[string]any) error {
 		}
 	}
 	message := "ignition provider stream error"
-	phrase := failure.SuspendedPhrase(str(detail["message"]))
-	if phrase != "" && (explicit == 0 || explicit == 400 || explicit == 401 || explicit == 403) {
+	// A phrase alone cannot tell a suspension from a rate limit or a
+	// passing error that mentions the account: those stay ordinary
+	// failures.
+	phrase := failure.SuspendedPhrase(rawMessage)
+	if phrase != "" && worded == 0 && (explicit == 0 || explicit == 400 || explicit == 401 || explicit == 403) {
 		message += ": " + phrase
 	} else {
 		phrase = ""
@@ -143,7 +194,7 @@ func streamError(v map[string]any) error {
 	switch {
 	case len(identifiers) == 0 && phrase == "":
 		appeal = ""
-	case explicit == 0:
+	case explicit == 0 && worded == 0:
 		// Without an explicit status, a suspension is sorted like
 		// Google's 403 rather than by its type: OpenAI sends
 		// account_deactivated as invalid_request_error, which would read
@@ -156,11 +207,11 @@ func streamError(v map[string]any) error {
 			identifiers = append(identifiers, value)
 		}
 	}
-	code := "provider_stream_error"
+	errCode := "provider_stream_error"
 	if len(identifiers) > 0 {
-		code = strings.Join(identifiers, "/")
+		errCode = strings.Join(identifiers, "/")
 	}
-	return &host.Error{Method: "model stream", Code: code, Status: status, Message: message, AppealURL: appeal}
+	return &host.Error{Method: "model stream", Code: errCode, Status: status, Message: message, AppealURL: appeal}
 }
 
 // streamCapture parses the gateway's SSE body without retaining raw responses or

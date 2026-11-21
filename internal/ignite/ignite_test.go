@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/failure"
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
@@ -220,5 +221,52 @@ func TestLongCooldownIsNotWaitedOut(t *testing.T) {
 	}
 	if wait, ok := CooldownWait(restError(now.Add(90*time.Second).Format(time.RFC3339)), now); !ok || wait != 90*time.Second {
 		t.Fatalf("a rest with a zone offset: %v %v", wait, ok)
+	}
+}
+
+// Magpie's held pinned accounts in the words of pinTo and cappedError
+// (internal/gateway fallback.go), as the gateway answers before the
+// headers: the whole fixed wording counts, not a phrase found anywhere.
+func TestPinHeld(t *testing.T) {
+	pinned := func(message string) error {
+		return &host.Error{Code: "gateway_http_error", Status: 429, Message: `{"error":{"message":"X-Magpie-Account: ` + message + `","type":"rate_limit_error"}}`}
+	}
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{restError("2026-10-04T14:00:17Z"), true},
+		{pinned(`usage cap reached: every account that serves \"x\" is held at the usage cap set on it in magpie — a; no other account is tried in its place`), true},
+		{pinned(`spend cap reached: every key that serves \"x\" has spent the spend cap set on it in magpie — a; no other account is tried in its place`), true},
+		{pinned(`usage limit reached: every account that serves \"x\" is held by magpie — a; no other account is tried in its place`), true},
+		{pinned(`usage limit reached: every account that serves \"x\" has used up its allowance and is set in magpie not to spend credits — a`), true},
+		// A vendor's own usage limit, and the phrases out of place.
+		{&host.Error{Code: "gateway_http_error", Status: 429, Message: `{"error":{"message":"Claude AI usage limit reached|1790000000","type":"rate_limit_error"}}`}, false},
+		{pinned(`a's plan doesn't list x; usage cap reached`), false},
+		{pinned(`a rests until later`), false},
+		{errors.New("usage cap reached: every account"), false},
+		{nil, false},
+	}
+	for _, c := range cases {
+		if got := PinHeld(c.err); got != c.want {
+			t.Errorf("%v: got %v want %v", c.err, got, c.want)
+		}
+		if c.want && (Classify(c.err) != Transient || failure.Diagnose(c.err).Reason != "") {
+			t.Errorf("%v: a held account must be retried and is no rate limit", c.err)
+		}
+	}
+}
+
+func TestInWindow(t *testing.T) {
+	s := schedule()
+	for _, c := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{local(6, 59), false}, {local(7, 0), true}, {local(22, 30), true}, {local(22, 31), false},
+	} {
+		if got := s.InWindow(c.at); got != c.want {
+			t.Errorf("%v: got %v want %v", c.at, got, c.want)
+		}
 	}
 }

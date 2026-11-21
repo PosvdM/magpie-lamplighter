@@ -728,7 +728,7 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	select {
 	case result := <-cmd.reply:
 		if result.err != nil {
-			return nil, errors.New("Quota refresh failed; read list_quotas for per-account state")
+			return map[string]any{"ok": false, "error": refreshReason(result.err)}, nil
 		}
 		return map[string]any{"ok": true, "as_of": describeTime(e.now(), e.now())}, nil
 	case <-ctx.Done():
@@ -737,6 +737,19 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 		return nil, errors.New("Quota engine stopped")
 	}
 }
+
+// refreshReason is the error of a failed refresh as refresh_quotas gives
+// it: the reason when Magpie could not refresh (refreshFailure), otherwise
+// a pointer to list_quotas. Other error texts can carry provider responses
+// and account names, so they are not passed on.
+func refreshReason(err error) string {
+	var failure *refreshFailure
+	if errors.As(err, &failure) {
+		return "Magpie 刷新额度失败：" + failure.reason
+	}
+	return "额度刷新失败，各账号的状态见 list_quotas"
+}
+
 func (b *MCPBackend) events(ctx context.Context, args map[string]string) (any, error) {
 	since := time.Time{}
 	if args["since"] != "" {

@@ -70,6 +70,13 @@ func epoch(t time.Time) float64 {
 	return float64(t.UnixNano()) / 1e9
 }
 
+// InWindow reports whether now lies within the daily ignition hours, from
+// start_hour to end_hour plus end_grace_minutes.
+func (s Schedule) InWindow(now time.Time) bool {
+	localNow, start, end := s.bounds(now)
+	return !localNow.Before(start) && !localNow.After(end)
+}
+
 // HeldUntil returns the end of the post-success hold or of the retry delay,
 // or the zero time when the target is not held.
 func (s Schedule) HeldUntil(ts *store.TargetState, now time.Time) time.Time {
@@ -202,13 +209,22 @@ const maxCooldownWait = 10 * time.Minute
 //   - 429 "X-Magpie-Account: <account> rests until <RFC 3339> (<why>); no
 //     other account is tried in its place": Magpie rests an account after
 //     a rate limit, a used-up quota or a refusal until the vendor's reset.
-//   - 429 with "usage cap reached" or "spend cap reached": a cap the user
-//     set on the account in Magpie.
+//   - 429 "X-Magpie-Account: usage cap reached: ...", "spend cap
+//     reached: ..." or "usage limit reached: every account ...": a cap the
+//     user set on the account in Magpie, or an account Magpie holds as set
+//     not to spend beyond its allowance (cappedError).
 //   - 400 "<account>'s plan doesn't list <model>" and 404 "no account
 //     <name> serves this model": the account does not serve the model.
 const pinMarker = "x-magpie-account:"
 
 var restUntilPattern = regexp.MustCompile(`rests until (\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2}))`)
+
+// pinHeldPattern matches Magpie's whole fixed wording of a held pinned
+// account: the header's name, then either a rest with its RFC 3339 time or
+// one of cappedError's openings right after it. A vendor's own "usage limit
+// reached", such as Claude Code's "usage limit reached|<unix>", is a real
+// limit and does not match.
+var pinHeldPattern = regexp.MustCompile(`x-magpie-account: (?:[^\n]*? rests until \d{4}-\d{2}-\d{2}t|usage cap reached: |spend cap reached: |usage limit reached: every account )`)
 
 // PinHeld reports whether err is Magpie holding the pinned account back
 // without asking the vendor: a rest or a cap. It is no answer of the
@@ -217,9 +233,7 @@ func PinHeld(err error) bool {
 	if err == nil {
 		return false
 	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, pinMarker) &&
-		(strings.Contains(text, "rests until") || strings.Contains(text, "cap reached"))
+	return pinHeldPattern.MatchString(strings.ToLower(err.Error()))
 }
 
 // pinUnserved reports whether Magpie refused the model for the pinned

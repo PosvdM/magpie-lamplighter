@@ -112,7 +112,7 @@ Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gem
 
 被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
 
-**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再读一次额度记录（`refreshKept`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。一次手动刷新中的所有 `RefreshQuota` 共用 35 秒的期限（`manualRefreshBudget`）：经 Magpie 调用的 tool 最多等约 50 秒，网关等一张额度卡最多 30 秒。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
+**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再读一次额度记录（`refreshKept`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。`RefreshQuota` 返回 `Code` 为 `account_off`、`account_not_found` 或 `gateway_unavailable` 的 `host.Error` 时，原因写成固定的短句（“账号在 Magpie 中已关闭”“Magpie 中找不到这个账号”“Magpie 网关不可用”，`refreshReasons`），不带 Magpie 的原文。只刷新一个账号时，`engine.manualPoll` 把这个账号的错误交回调用方：`POST /api/refresh` 返回 `ok: false` 和错误文字；MCP 的 `refresh_quotas` 返回 `ok: false` 和 `error`，只在错误是 `refreshFailure`（上述三种原因，以及账号已不在凭证列表中）时写明原因，其他错误的文字可能带上游响应或账号名，只提示查看 `list_quotas`。账号在刷新时已不在凭证列表中（在 Magpie 中关闭、删除，或服务未开启监控）时返回 `errRefreshAccountGone`。刷新全部账号时只报告凭证列表读取失败，各账号的错误在状态中。一次手动刷新中的所有 `RefreshQuota` 共用 35 秒的期限（`manualRefreshBudget`）：经 Magpie 调用的 tool 最多等约 50 秒，网关等一张额度卡最多 30 秒。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
 
 ## HTTP 接口
 
@@ -301,7 +301,7 @@ MCP 在对外监听的 `/mcp` 上提供，`mcp_enabled` 为真且 `mcp_key` 非�
 
 - `list_quotas` 仅返回当前窗口，按服务及额度组汇总；每个账号带 `credential_invalid`（已确认的凭证失效，或最近一次查询为认证失败）和 `account_suspended`（已确认的账号停用），取自状态接口账号的 `credential_problem`；每个窗口的合计只计入拥有该窗口的账号，权重依次取 `account_weights`、套餐默认权重、1。给出每个窗口最先预计耗尽的账号。5 小时速度采用当前周期累计最低读数的分段最小二乘拟合，最大偏差 2 个百分点，最多 256 个输入点；7 天速度采用本周期累计使用量除以周期已过时间。缺失周期或样本时预测为空；超过 15 分钟或 3 个查询间隔（取较长者）未更新时标记过旧并停止预测。7 天匀速剩余为距重置占整个周期的比例，每日匀速预算为 `100/7`，同时给出实剩、差值和剩余每天可用量。滑动占位观测通过受锁保护的副本提供；不能确认窗口是否开始时返回空值。
 - `get_quota_history` 与 `list_quotas` 使用可取消的流式历史查询，扫描时先按所选账号、服务和窗口筛选，再按时间桶只保留最后一个样本；`list_quotas` 只读取当前窗口的样本，避免退役系列占用预算。此过程不全量保留原始记录。桶长度至少为管理历史的分段长度和所选范围的 1/2000（按秒取整，最少 1 秒）中的较大者；聚合中间结果最多 20000 个桶，超限返回工具错误。结果排序和预测计算只处理有界集合。`get_quota_history` 保留消失的窗口，按服务、账号、窗口筛选后每个系列最多 200 点、单次最多 2000 点，采样保留首尾，返回格式不含管理历史的 `resets`。已删除账号的历史使用匿名的 `retired account` 标识。
-- `refresh_quotas` 与 `POST /api/refresh` 一样交给引擎命令队列执行手动刷新（凭证已过期的账号先让 Magpie 刷新额度，见“额度记录”），全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。`/mcp` 上等待上限 180 秒，经 Magpie 的 tool 调用最长 50 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
+- `refresh_quotas` 与 `POST /api/refresh` 一样交给引擎命令队列执行手动刷新（凭证已过期的账号先让 Magpie 刷新额度，见“额度记录”），全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。刷新失败时返回 `ok: false` 和 `error`（不设工具错误），原因的写法见“额度记录”。`/mcp` 上等待上限 180 秒，经 Magpie 的 tool 调用最长 50 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
 - `get_quota_events` 从最近保留的最多 200 条引擎事件中筛选重置、耗尽、点火成功/失败和凭证问题（`credential_invalid`、`credential_restored`），支持 `since` 和最多 100 条的 `limit`。事件带 `reason`（`auth`、`suspended`、`rate_limited`，只输出这三个取值），凭证事件还带 `source`（`ignite`、`query`）；账号还没有额度组时，凭证事件的 `group` 为空。重置和耗尽事件独立于通知渠道记录，窗口消失或首次返回不产生事件。
 
 Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到完整的模型到账号的路由，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。
@@ -318,7 +318,7 @@ Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到�
 | `Headers` | 解析模型请求的响应头；为空表示响应头里没有额度，被动跳过对该服务不生效 |
 | `Ignition` | 点火协议、请求体、候选模型、模型提示、可勾选的额度组；为空表示不点火，设置页显示“不支持点火” |
 
-`providers.Lookup` 按服务名或别名查找（忽略大小写，`_` 视同 `-`）。凭证列表中的服务名换成 `ID` 存进 `Cred.Provider`，原始写法存进 `Cred.HostProvider`。配置中用别名写的服务键在解析时换成 `ID`。
+`providers.Lookup` 按服务名或别名查找（忽略大小写，`_` 视同 `-`）。凭证列表中的服务名换成 `ID` 存进 `Cred.Provider`，原始写法存进 `Cred.HostProvider`。`loadCreds` 只接收 Magpie 服务 ID 为 `codex`、`claude`、`agy-cli` 的账号（`hostProviders`），其他账号只记 debug 日志：`internal/magpie` 只能读取这三种账号的凭证，Magpie 自带的 `antigravity` 账号虽然也对应 Antigravity，但读不到凭证。配置中用别名写的服务键在解析时换成 `ID`。
 
 **窗口种类**：`quota.Window.Period` 是窗口长度，由各服务从接口数据填入：Codex 的 `limit_window_seconds` 和 `Window-Minutes`，Claude 的字段名，Antigravity 的 `window`。`quota.Kind` 先看周期（与 5 小时或 7 天相差 5% 以内），没有周期时按 ID 和标签判断。5 小时和 7 天窗口使用固定的 ID 和标签（`five-hour`、`seven-day`），其他长度的窗口带自己的 ID，标签为 `quota.PeriodLabel` 给出的长度，例如 `30d`。点火、图表和通知都按种类处理，所以没有当前 5 小时窗口的账号（例如 ChatGPT Pro）不点火；图表仍可显示所选范围内保留的 5 小时历史窗口。
 
@@ -427,9 +427,11 @@ Antigravity 的响应头里没有额度。
 4. 重置时间在未来：`reset + grace_seconds`；不在当天时段内时等到第二天。
 5. 重置时间已过或未知：立即（受冷却和重试时间限制）。
 
+自动点火在每个请求（包括换下一个候选模型）发出前都重新读取配置（`engine.mayIgnite`）：`ignition.enabled` 仍开启，额度组仍是点火目标（`ignitionTarget`：有 5 小时窗口，服务开启点火，额度组被选中），当前仍在每天的点火时段内（`ignite.Schedule.InWindow`）。不满足时放弃这一轮中尚未发送的请求（`errIgnitionWithdrawn`），只记一条 info 日志，不计失败。一轮点火可能因候选模型和确认持续数分钟，用户在这期间关闭点火时，后续目标和候选模型都不再发送。手动点火（`POST /api/ignite`）不受这项检查和 `ignition.enabled` 影响，按精确的额度组 key 查找目标。
+
 同一额度组中有 5 小时以外的窗口用完（剩余 ≤ 0.01%）且尚未到重置时间时，定时点火跳过这个额度组，不尝试、不计失败、不推送；引擎在该窗口的重置时间醒来，由下一次查询确认额度是否恢复。页面在点火状态中显示被哪个窗口挡住（`blocked_window`、`blocked_until`）。手动点火不受此限制。
 
-**滑动占位**：有些服务在窗口尚未开始时返回“当前时间加 5 小时”的重置时间，并且每次查询都向后移动。`ignite.Observe` 用连续两次主动观测判断：重置时间距当前约 5 小时（误差 120 秒），且两次观测间的移动量接近经过的时间（误差为经过时间的 2%，在 3 到 10 秒之间）。被动数据来自真实请求，请求本身会开始窗口，所以被动观测永远不是滑动占位。看到固定的未来重置时间会清空失败状态。
+**滑动占位**：有些服务在窗口尚未开始时返回“当前时间加 5 小时”的重置时间，并且每次查询都向后移动。`ignite.Observe` 用连续两次观测判断：重置时间距当前约 5 小时（误差 120 秒），且两次观测间的移动量接近经过的时间（误差为经过时间的 2%，在 3 到 10 秒之间）。点火响应头中的读数来自真实请求，请求本身会开始窗口，所以这种观测永远不是滑动占位。Magpie 的额度记录（`kept=1`）可能来自 Magpie 自己的额度查询，不说明窗口已经开始，所以与主动查询一样判断，观测时刻取读数的读取时间（`applyGroupsFrom` 的 `requested` 为假）。看到固定的未来重置时间会清空失败状态。
 
 ### 请求
 
@@ -469,7 +471,13 @@ Claude 账号的请求在 Magpie 中由本机的 Claude Code 转发（Magpie 文
 
 每次点火从发出请求到读完正文最长 2 分钟（`ignitionStreamTimeout`）：网关等待较慢的启动（如 Claude Code）时持续发送 keepalive，流可能长时间没有输出，不加限制会挡住后台循环。超时、调用 context 取消和插件停止都会取消请求，也包括还在等待响应头的请求；超时记为 `timeout`，返回 `errIgnitionTimeout`，按临时错误重试。
 
-流内错误统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。网关在发出 200 和响应头之后才遇到错误时，只能把它写成流中的错误事件（Magpie `streamError`）：Chat 为 `{"error":{"message","type","code"}}`，Claude 为 `error` 事件，Responses 为 `response.failed`（代码默认为 `server_error`，过载为 `server_is_overloaded`）。解析时只保留白名单内的 HTTP 状态码和协议 `code`/`type`，不从自由文本 message 中猜测分类，唯一的例外是网关附加的固定后缀：状态码为 408、429 或 5xx 时，网关在 message 末尾加上 `(429: you can retry your request)`（`saysPassing`），解析器只读取锚定在末尾的这个后缀。已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404、`server_is_overloaded` 对应 529；显式状态码优先。宿主字符串错误（`StreamChunk.Error`）只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，`HTTP NNN: {...}` 时同时解析后面的 JSON。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法时，只在 `Message` 后附上这条固定说法；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
+流内错误统一转为 `host.Error`，交给 `ignite.Classify`、`ignite.ModelRejected` 和既有失败保护处理。网关在发出 200 和响应头之后才遇到错误时，只能把它写成流中的错误事件（Magpie `streamError`）：Chat 为 `{"error":{"message","type","code"}}`，Claude 为 `error` 事件，Responses 为 `response.failed`（代码默认为 `server_error`，过载为 `server_is_overloaded`）。上游错误带有类型时，网关原样写进 `type`/`code`（`saidError`）；没有时 Claude 和 Chat 写 `api_error`，Responses 写 `server_error`，都不带状态码。解析时只保留白名单内的 HTTP 状态码和协议 `code`/`type`，message 只在以下固定情况中使用，用完即丢弃：
+
+- **重试后缀**：状态码为 408、429 或 5xx 时，网关在 message 末尾加上 `(429: you can retry your request)`（`saysPassing`），解析器只读取锚定在末尾的这个后缀。
+- **重试说法**：message 已含 `saysPassing` 认得的说法（`passingSaid`）时，网关不加后缀。`type`/`code` 只有上述默认值（且至少有一个）时，解析器按 `magpiePassingWords` 读出状态码：独立的 `429`、`rate limit`、`too many requests` 为 429，`overloaded` 为 529；其他说法（如 `timed out`）沿用默认值的 500。没有 `type`/`code` 的错误不是 Magpie 编码器写的，不读 message。
+- **Magpie 的限额**：message 以 `cappedError` 的开头（`usage cap reached: every account `、`spend cap reached: every key `、`usage limit reached: every account `，可带 `X-Magpie-Account: ` 前缀）开始时，是 Magpie 按用户设置扣住了账号，不是厂商限流。解析结果的 `Code` 为 `magpie_account_held`，`Message` 为与锁定账号本地回答相同的固定说法，没有状态码时按 429，由 `ignite.PinHeld` 和 `failure.Diagnose` 按“失败分类和保护”处理。厂商自己的 `usage limit reached|<时间>` 不是这个开头，按限流处理。
+
+已知协议标识可补足状态码，例如 `rate_limit_exceeded` / `rate_limit_error` / `usage_limit_reached` 对应 429、`authentication_error` 对应 401、`model_not_found` 对应 404、`server_is_overloaded` 对应 529；显式状态码优先，上游的具体类型优先于 message 中的说法。宿主字符串错误（`StreamChunk.Error`）只解析 JSON 错误对象或开头的 `HTTP NNN` / `status NNN`，`HTTP NNN: {...}` 时同时解析后面的 JSON。账号停用另按固定白名单保留：`code`、`type`、`status`、`reason` 和 Google `details[].reason` 中的停用代码（`failure.SuspendedCode`，如 `TOS_VIOLATION`、`account_deactivated`）写进 `host.Error.Code`；message 含 `failure.SuspendedPhrase` 中的说法、且状态码为空或 400/401/403、也不是从重试说法读出的时，只在 `Message` 后附上这条固定说法；说法与限流或重试说法同时出现时无法判断是否停用，按普通失败处理；`details[].metadata.appeal_url` 只保留 `https://forms.gle/…` 和 `https://support.google.com/…` 形式的地址，放在 `host.Error.AppealURL`。没有显式状态码的停用按 403 处理，不按 `invalid_request_error` 补成 400，以免被当成模型被拒。未知标识、原始 message 和原始错误载荷均丢弃。流内 401/403/429 不换模型，按下文“失败分类和保护”处理；400/404 沿用每次点火至多一次的模型 fallback。
 
 ### 调用日志
 
@@ -504,10 +512,16 @@ Magpie 为同一服务的所有账号列出相同的模型，所以列表里的�
 
 ### 确认
 
-点火请求返回 2xx，且流正常结束或被 2 秒计时主动关闭后，插件确认 5 小时窗口在请求之后观测到了固定的未来重置时间。收到正文或 usage 本身不能确认成功：
+点火请求返回 2xx，且流正常结束或被 2 秒计时主动关闭后，插件确认 5 小时窗口有在请求之后读取的固定未来重置时间。收到正文或 usage 本身不能确认成功。`engine.confirmed` 按以下条件判断：
+
+- 窗口读数的读取时间（`WindowView.ReadAt`）不早于点火开始的时刻。应用读数的时刻（`ObservedAt`）不能代替它：Magpie 在点火前记下的读数可能在点火后才被读到，例如凭证过期时确认阶段改读额度记录（`keptFallback`）。
+- 重置时间在未来，且不是滑动占位（额度记录中的读数不能单凭来源确认窗口已开始，见“时间”的“滑动占位”）。
+- 点火前的窗口已结束或是滑动占位时，`ignitionBase` 记下它的重置时间；读数的重置时间与它相同时仍是旧窗口，不算确认。点火前窗口已在运行时（手动点火）不比较。
+
+确认的途径：
 
 1. 响应头里带额度时立即确认：Claude 的 `anthropic-ratelimit-unified-5h-*` 由网关写回（见“请求”）。
-2. 否则按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次；等待期间继续处理排队的被动数据。网关不把 Codex 的 `x-codex-*` 响应头转发给客户端（Magpie v0.1.4634 实测，响应头只有 `x-magpie-model`、`x-magpie-provider` 等），Antigravity 的响应头里没有额度，这两种服务只靠这一步确认。
+2. 否则按 5、10、15、30、15 秒的间隔检查，每次检查前主动查询该凭证一次；等待期间继续处理排队的被动数据。网关不把 Codex 的 `x-codex-*` 响应头转发给客户端（Magpie v0.1.4634 实测，响应头只有 `x-magpie-model`、`x-magpie-provider` 等），Antigravity 的响应头里没有额度，这两种服务只靠主动查询确认。
 
 全部检查都没有确认时，返回 `ErrNotConfirmed`。
 
@@ -525,7 +539,7 @@ Magpie 自带的预热（内置插件“Warm-up and check-in”的设置，由 M
 
 预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 匹配，`codexWarmAtOf` 按账号的 `User` 匹配（没有时用 `Email`），所以同一邮箱的个人账号和 Team 席位各自对应自己的设置。
 
-状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了这类预热的账号 pin，按字符串排序，没有时为空数组（不为 `null`）。Lamplighter 会点火的账号是：`ignition.enabled` 开启，且账号至少有一个额度组是点火目标（`groupIgnitable`：服务的 `ignite` 开启，`groups` 为空或包含该额度组的名称）。`ignition.enabled` 关闭时不读取设置，直接为空数组；还没有查询到额度组的账号不列出。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
+状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了这类预热的账号 pin，按字符串排序，没有时为空数组（不为 `null`）。Lamplighter 会点火的账号与自动点火的判定相同：`ignition.enabled` 开启，且账号至少有一个额度组是点火目标（`ignitionTarget`：额度组有 5 小时窗口，服务的 `ignite` 开启，`groups` 为空或包含该额度组的名称）。只有周窗口的账号（如 ChatGPT Pro）不点火，也就不列出。`ignition.enabled` 关闭时不读取设置，直接为空数组；还没有查询到额度组的账号不列出。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
 
 ### 失败分类和保护
 
@@ -536,11 +550,11 @@ Magpie 对带 `X-Magpie-Account` 的请求，在账号不能接受时自己回�
 | 状态码 | message | 含义 |
 | --- | --- | --- |
 | 429 | `<账号> rests until <RFC 3339 时间> (<原因>); no other account is tried in its place` | 账号在 Magpie 中休息：Magpie 在限流、额度用完或被拒之后让账号休息到厂商的重置时间 |
-| 429 | 含 `usage cap reached` 或 `spend cap reached` | 用户在 Magpie 中给账号设置的上限 |
+| 429 | `usage cap reached: …`、`spend cap reached: …` 或 `usage limit reached: every account …`（`cappedError`） | 用户在 Magpie 中给账号设置的上限，或账号额度用完且设置为不额外付费 |
 | 400 | `<账号>'s plan doesn't list <模型>` | 账号的套餐不含该模型 |
 | 404 | `no account "<pin>" serves this model; …` | 没有这个账号，或它不提供该模型 |
 
-前两种由 `ignite.PinHeld` 识别，后两种使模型不可用。
+前两种由 `ignite.PinHeld` 识别，它只认 `X-Magpie-Account: ` 之后的完整固定说法：休息必须带 RFC 3339 时间，上限必须紧跟在前缀之后。后两种使模型不可用。网关在发出响应头之后才扣住账号时，`cappedError` 写进流中的错误事件，解析时换成同样的固定说法，见“流式执行与取消”。
 
 以下调度和保护规则用于自动点火。`ignite.Classify`：
 

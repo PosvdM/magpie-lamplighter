@@ -146,7 +146,7 @@ func standardHost(c *clock) *fakeHost {
 			{ID: "codex-b.json", AuthIndex: "2", Name: "codex-b.json", Provider: "codex", Email: "bob.team@example.net"},
 			{ID: "codex-c.json", AuthIndex: "5", Name: "codex-c.json", Provider: "codex", Disabled: true},
 			{ID: "claude.json", AuthIndex: "3", Name: "claude.json", Provider: "claude", Email: "me@example.com"},
-			{ID: "ag.json", AuthIndex: "4", Name: "ag.json", Provider: "antigravity"},
+			{ID: "ag.json", AuthIndex: "4", Name: "ag.json", Provider: "agy-cli"},
 		},
 		files: map[string]string{
 			"1": `{"access_token":"t1","account_id":"acc1"}`,
@@ -210,7 +210,7 @@ func TestNotesNameAccounts(t *testing.T) {
 		{ID: "codex-a.json", AuthIndex: "1", Name: "codex-a.json", Provider: "codex", Email: "alice.work@example.com", Note: " 主力号 "},
 		{ID: "codex-b.json", AuthIndex: "2", Name: "codex-b.json", Provider: "codex", Email: "bob.team@example.net"},
 		{ID: "claude.json", AuthIndex: "3", Name: "claude.json", Provider: "claude", Email: "me@example.com", Note: "工作\n2026-09 购入"},
-		{ID: "ag.json", AuthIndex: "4", Name: "ag.json", Provider: "antigravity", Note: "a very long account name for testing"},
+		{ID: "ag.json", AuthIndex: "4", Name: "ag.json", Provider: "agy-cli", Note: "a very long account name for testing"},
 	}
 	creds, err := e.loadCreds(context.Background(), e.config())
 	if err != nil {
@@ -437,11 +437,11 @@ func TestIgnitionFallsBackWhenProviderRefusesNewestModel(t *testing.T) {
 		}
 	}
 	c.add(23 * time.Hour)
-	if model, _, err := e.execute(ctx, cfg, target); err != nil || model != "claude-3-5-haiku-20241022" || len(h.executed) != 3 {
+	if model, _, err := e.execute(ctx, cfg, target, false); err != nil || model != "claude-3-5-haiku-20241022" || len(h.executed) != 3 {
 		t.Fatalf("a refused model is skipped for a day: %s %v %+v", model, err, h.executed)
 	}
 	c.add(time.Hour)
-	if model, _, err := e.execute(ctx, cfg, target); err != nil || model != "claude-haiku-4-5-20251001" {
+	if model, _, err := e.execute(ctx, cfg, target, false); err != nil || model != "claude-haiku-4-5-20251001" {
 		t.Fatalf("a refused model is tried again after a day: %s %v", model, err)
 	}
 }

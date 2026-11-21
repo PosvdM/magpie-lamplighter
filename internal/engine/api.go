@@ -185,16 +185,7 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 	var results []ChannelResult
 	switch cmd.kind {
 	case "refresh":
-		e.manualPoll(ctx, cfg, cmd.arg)
-		e.mu.Lock()
-		if cmd.arg != "" {
-			if text, ok := e.pollErrs[cmd.arg]; ok {
-				err = errors.New(text)
-			}
-		} else if text, ok := e.pollErrs[""]; ok {
-			err = errors.New(text)
-		}
-		e.mu.Unlock()
+		err = e.manualPoll(ctx, cfg, cmd.arg)
 	case "ignite":
 		err = errNoTarget
 		for _, t := range e.collectTargets(cfg) {
@@ -405,8 +396,9 @@ type warmupReader interface {
 
 // magpieWarmup returns the pins of the accounts that both Lamplighter and
 // Magpie's warm-up ignite: ignition is on and a quota group of the account
-// is an ignition target (groupIgnitable), and Magpie's warm-up starts its
-// 5-hour window. The setting is read on every call: the user can change it
+// is an ignition target by the rule of automatic ignition (ignitionTarget:
+// a 5-hour window, groupIgnitable), and Magpie's warm-up starts its 5-hour
+// window. The setting is read on every call: the user can change it
 // in Magpie at any time. An unreadable setting gives an empty list.
 func (e *Engine) magpieWarmup() []string {
 	reader, ok := e.host.(warmupReader)
@@ -418,7 +410,7 @@ func (e *Engine) magpieWarmup() []string {
 	ignited := map[string]bool{}
 	if cfg.Ignition.Enabled {
 		for _, group := range e.groups {
-			if e.creds[group.AuthIndex] != nil && groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+			if e.creds[group.AuthIndex] != nil && ignitionTarget(cfg, group) {
 				ignited[group.AuthIndex] = true
 			}
 		}
