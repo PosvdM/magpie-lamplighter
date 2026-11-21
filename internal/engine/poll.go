@@ -307,13 +307,15 @@ func (e *Engine) loadCreds(ctx context.Context, cfg config.Config) ([]*Cred, err
 var hostProviders = map[string]bool{"codex": true, "claude": true, "agy-cli": true}
 
 // accountNote returns the name of account: account_names, else Magpie's
-// label when it is neither empty nor the email.
+// label when the user named the account in Magpie. A label Magpie fills in
+// itself, the email or the user ("a@b.com · Team"), is no name: it would
+// show the full email in place of the masked label.
 func accountNote(cfg config.Config, account host.Account) string {
 	if name := cfg.AccountNames[account.Pin]; name != "" {
 		return name
 	}
 	label := strings.TrimSpace(account.Label)
-	if label == "" || strings.EqualFold(label, strings.TrimSpace(account.Email)) {
+	if label == "" || strings.EqualFold(label, strings.TrimSpace(account.Email)) || strings.EqualFold(label, strings.TrimSpace(account.User)) {
 		return ""
 	}
 	return label

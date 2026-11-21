@@ -21,7 +21,7 @@ test("the default port is main.go's -listen default and the page service's", () 
 
 test("the page and its icon are in the page's folder, inside the package", () => {
   const page = pkg.magpie.page
-  assert.equal(page.title, "Magpie-Lamplighter")
+  assert.equal(page.title, "Lamplighter")
   assert.ok(page.file.endsWith(".html"))
   assert.ok(fs.statSync(path.join(root, page.file)).isFile())
   assert.equal(path.dirname(page.icon), path.dirname(page.file))

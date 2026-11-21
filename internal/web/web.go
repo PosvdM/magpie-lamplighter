@@ -5,6 +5,7 @@ package web
 import (
 	"bytes"
 	_ "embed"
+	"encoding/base64"
 	"html"
 	"strings"
 	"sync"
@@ -17,15 +18,22 @@ var (
 	pageCSS string
 	//go:embed page.js
 	pageJS string
+	// logo.png is assets/logo.png at 64 × 64 pixels, twice the size the
+	// page shows it at.
+	//go:embed logo.png
+	logoPNG []byte
 
 	pageOnce  sync.Once
 	pageBytes []byte
 )
 
-// Page returns the management page with its CSS and JavaScript inlined.
+// Page returns the management page with its logo, CSS and JavaScript
+// inlined. The logo is a data: URI, so the page loads nothing from the
+// network and needs no route of its own.
 func Page() []byte {
 	pageOnce.Do(func() {
-		page := strings.Replace(pageHTML, "/*CSS*/", pageCSS, 1)
+		page := strings.Replace(pageHTML, "/*LOGO*/", "data:image/png;base64,"+base64.StdEncoding.EncodeToString(logoPNG), 1)
+		page = strings.Replace(page, "/*CSS*/", pageCSS, 1)
 		page = strings.Replace(page, "/*JS*/", pageJS, 1)
 		pageBytes = []byte(page)
 	})

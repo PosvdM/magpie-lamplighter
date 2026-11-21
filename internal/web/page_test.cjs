@@ -691,13 +691,15 @@ function pageVar(name) {
 }
 
 const EVENT_FUNCTIONS = ["groupLabel", "retryText", "cutText", "errorSummary", "notifyKind", "eventWindow", "sameSubject",
-  "eventSeconds", "eventRows", "notifyTitle", "eventView", "eventParts", "eventMasked", "pushMarks", "parseTime"];
+  "eventSeconds", "eventRows", "notifyTitle", "eventView", "eventParts", "eventMasked", "pushMarks", "parseTime",
+  "sharedGroups", "servicePrefix", "groupTitle"];
 
 // Elements and text nodes as plain objects; translate shows the key and
 // its arguments.
 function eventContext(globals = {}) {
   const ctx = context(EVENT_FUNCTIONS, {
     status: { accounts: [] }, masked: false, SENSITIVE: "account-sensitive",
+    providerTitle: (id) => ({ antigravity: "Antigravity", claude: "Claude", codex: "GPT" })[id] || id,
     translate: (key, ...args) => args.length ? key + "(" + args.join("|") + ")" : key,
     fmtDateTime: (t) => t ? t.toISOString().slice(5, 16) : "—",
     pct: (v) => v == null || isNaN(v) ? "—" : Math.round(v) + "%",
@@ -1118,8 +1120,8 @@ test("the theme and language follow Magpie, else the browser", () => {
 test("the page speaks Magpie's bridge protocol to its parent only", async () => {
   const posted = [], calls = { theme: 0, language: 0, refresh: 0 };
   const parent = { postMessage: (msg, target) => posted.push([plain(msg), target]) };
-  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible"], {
-    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 },
+  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible", "themeTokens"], {
+    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 }, MAGPIE_TOKENS: ["bg"],
     status: null, history: null, renderChart: () => {},
     applyTheme: () => calls.theme++, applyLanguage: () => calls.language++,
     loadStatus: () => { calls.refresh++; return Promise.resolve(); }, refreshHistory: () => {},
@@ -1132,7 +1134,7 @@ test("the page speaks Magpie's bridge protocol to its parent only", async () => 
   ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 1, result: { dark: true, lang: "zh", tokens: {}, visible: true } } });
   assert.deepEqual(plain(await hello), { dark: true, lang: "zh", tokens: {}, visible: true });
   ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "theme", data: { dark: false, lang: "en", tokens: { bg: "#fff" } } } });
-  assert.deepEqual(plain(ctx.magpie.theme), { dark: false, lang: "en" });
+  assert.deepEqual(plain(ctx.magpie.theme), { dark: false, lang: "en", tokens: { bg: "#fff" } });
   assert.equal(calls.theme, 1);
   assert.equal(calls.language, 1);
   ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: false } } });
@@ -1146,6 +1148,47 @@ test("the page speaks Magpie's bridge protocol to its parent only", async () => 
   await assert.rejects(copy, /16 MB/);
   // The page never reports errors to Magpie, which would replace it.
   assert.doesNotMatch(source, /method: "error"|magpieCall\("error"/);
+});
+
+test("Magpie's theme tokens become --magpie-<token> variables on the root", () => {
+  const ctx = context(["themeTokens", "applyTokens"]);
+  vm.runInContext(pageVar("MAGPIE_TOKENS"), ctx);
+  assert.deepEqual([...ctx.MAGPIE_TOKENS], ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"]);
+  // Only the known keys with string values are taken.
+  const tokens = ctx.themeTokens({ bg: " #1a1a1e ", "fg-2": "#b9b9c1", accent: 5, red: "", font: '"SF Pro Text", sans-serif', "x; color": "red", line: null });
+  assert.deepEqual(plain(tokens), { bg: "#1a1a1e", "fg-2": "#b9b9c1", font: '"SF Pro Text", sans-serif' });
+  assert.deepEqual(plain(ctx.themeTokens(null)), {});
+  assert.deepEqual(plain(ctx.themeTokens("bg")), {});
+  const props = {};
+  const style = { setProperty: (k, v) => { props[k] = v; }, removeProperty: (k) => { delete props[k]; } };
+  ctx.applyTokens(style, tokens);
+  assert.deepEqual(props, { "--magpie-bg": "#1a1a1e", "--magpie-fg-2": "#b9b9c1", "--magpie-font": '"SF Pro Text", sans-serif' });
+  // A token missing from a later theme falls back to page.css.
+  ctx.applyTokens(style, { bg: "#f4f4f6" });
+  assert.deepEqual(props, { "--magpie-bg": "#f4f4f6" });
+  ctx.applyTokens(style, null);
+  assert.deepEqual(props, {});
+});
+
+test("page.css takes its colors and fonts from Magpie's tokens, with Magpie's defaults", () => {
+  const css = fs.readFileSync(path.join(__dirname, "page.css"), "utf8");
+  for (const token of ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"]) {
+    assert.match(css, new RegExp("var\\(--magpie-" + token + ", "), token);
+  }
+  // Magpie's default light and dark values are the fallbacks.
+  assert.match(css, /--bg: var\(--magpie-bg, #f4f4f6\)/);
+  assert.match(css, /--bg: var\(--magpie-bg, #1a1a1e\)/);
+  assert.doesNotMatch(css, /Management Center|CPA/);
+  // The quota levels keep colors of their own, full apart from high.
+  const level = (name) => css.match(new RegExp("--quota-" + name + "-color: (#[0-9a-f]{6})"))[1];
+  assert.notEqual(level("full"), level("high"));
+  assert.equal(new Set(["full", "high", "medium", "low", "empty"].map(level)).size, 5);
+});
+
+test("a screenshot keeps the root's Magpie tokens", () => {
+  assert.match(source, /var rootStyle = root\.getAttribute\("style"\)/);
+  const ctx = context(["xmlAttr"]);
+  assert.equal(ctx.xmlAttr('--magpie-font: "A&B", <x>'), "--magpie-font: &quot;A&amp;B&quot;, &lt;x>");
 });
 
 test("opened on its own the page asks nothing of a parent", async () => {
@@ -1453,4 +1496,153 @@ test("no text refers to CPA settings the Magpie plugin does not have", () => {
   for (const text of [source, html]) {
     assert.doesNotMatch(text, /ignition_models_hint|no_models_key|API key|模型列表 API|管理中心|Management (key|Center)|CLIProxy|lock_error/i);
   }
+});
+
+test("without a configured time zone times show in the browser's", () => {
+  const translate = (key, ...args) => key + "(" + args.join("|") + ")";
+  const ctx = context(["zoneSet", "offsetSeconds", "shifted", "pad", "fmtDateTime", "utcText", "timezoneText"], { translate, status: null });
+  // 15:55 UTC; the browser is 8 hours ahead of UTC at that time.
+  const at = Date.UTC(2026, 10, 21, 15, 55);
+  const t = { getTime: () => at, getTimezoneOffset: () => -480 };
+  for (const status of [{ timezone: "Local", utc_offset_seconds: 0 }, { timezone: "", utc_offset_seconds: 0 }, null]) {
+    ctx.status = status;
+    assert.equal(ctx.zoneSet(status), false);
+    assert.equal(ctx.fmtDateTime(t), "11/21 23:55", JSON.stringify(status));
+  }
+  ctx.status = { timezone: "Local", utc_offset_seconds: 0 };
+  assert.equal(ctx.timezoneText(), "tz_note_unset(UTC+0)");
+  // A configured time zone wins over the browser's.
+  ctx.status = { timezone: "UTC", utc_offset_seconds: 0 };
+  assert.equal(ctx.zoneSet(ctx.status), true);
+  assert.equal(ctx.fmtDateTime(t), "11/21 15:55");
+  ctx.status = { timezone: "America/St_Johns", utc_offset_seconds: -12600 };
+  assert.equal(ctx.fmtDateTime(t), "11/21 12:25");
+  assert.equal(ctx.timezoneText(), "tz_note(America/St_Johns (UTC-3.5)|tz_config())");
+  ctx.status = { timezone: "UTC+8", utc_offset_seconds: 28800 };
+  assert.equal(ctx.timezoneText(), "tz_note(UTC+8|tz_config())");
+  // The quota view says when no time zone is set and leads to the setting.
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  assert.match(html, /<div id="view-quota">\s*<div id="zone-notice" class="notice notice-info" hidden><\/div>/);
+  assert.match(source, /box\.hidden = zoneSet\(status\);/);
+  assert.match(source, /showView\("settings", true\);/);
+});
+
+test("a quota group of an account with several names its service apart from the card", () => {
+  const titles = { antigravity: "Antigravity", claude: "Claude", codex: "GPT" };
+  const status = {
+    accounts: [
+      { auth_index: "1", provider: "codex", email: "a@example.com", groups: [{ key: "codex:1:gpt", label: "GPT", source_label: "GPT", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 50, reset: "" }] }] },
+      { auth_index: "3", provider: "claude", email: "c@example.com", groups: [{ key: "claude:3:claude", label: "Claude", source_label: "Claude", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 40, reset: "" }] }] },
+      { auth_index: "4", provider: "antigravity", groups: [
+        { key: "antigravity:4:gemini", label: "Gemini", source_label: "Gemini", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 100, reset: "" }] },
+        { key: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 65, reset: "" }] },
+      ] },
+    ],
+    group_order: ["GPT", "Claude", "Gemini", "Claude / GPT"],
+  };
+  const providerTitle = (id) => titles[id] || id;
+  const ctx = context(["sharedGroups", "servicePrefix", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+    status, providerTitle, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
+    gapLimit: () => 900, pooled: () => [],
+  });
+  assert.deepEqual(plain(ctx.sharedGroups(status.accounts)), { "antigravity:4:gemini": "antigravity", "antigravity:4:cg": "antigravity" });
+  assert.equal(ctx.groupTitle("antigravity:4:cg", "Claude / GPT"), "Antigravity · Claude / GPT");
+  assert.equal(ctx.groupTitle("claude:3:claude", "Claude"), "Claude");
+  assert.equal(ctx.groupTitle("gone:9:x", "X"), "X");
+  assert.equal(ctx.groupTitle("antigravity:4:cg", ""), "");
+
+  const now = 1795280000;
+  const series = (s, value) => ({ ...s, window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  ctx.history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), series: [
+    series({ group: "codex:1:gpt", label: "GPT", source_label: "GPT", provider: "codex", auth_index: "1" }, 50),
+    series({ group: "claude:3:claude", label: "Claude", source_label: "Claude", provider: "claude", auth_index: "3" }, 40),
+    series({ group: "antigravity:4:gemini", label: "Gemini", source_label: "Gemini", provider: "antigravity", auth_index: "4" }, 100),
+    series({ group: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", provider: "antigravity", auth_index: "4" }, 65),
+  ] };
+  const rows = ctx.chartRows();
+  assert.deepEqual(plain(rows.map((r) => r.name)), ["GPT", "Claude", "Antigravity · Gemini", "Antigravity · Claude / GPT"]);
+  // Pooled rows of several Antigravity accounts name the service too.
+  status.accounts.push({ auth_index: "5", provider: "antigravity", groups: [
+    { key: "antigravity:5:gemini", label: "Gemini#b", source_label: "Gemini", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 30, reset: "" }] },
+    { key: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 20, reset: "" }] },
+  ] });
+  ctx.history.series.push(series({ group: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", provider: "antigravity", auth_index: "5" }, 20));
+  const pooled = ctx.chartRows().filter((r) => r.children);
+  assert.deepEqual(plain(pooled.map((r) => r.name)), ["Antigravity · Gemini", "Antigravity · Claude / GPT"]);
+  assert.deepEqual(plain(pooled[1].children.map((c) => c.name)), ["Antigravity · Claude / GPT", "Antigravity · Claude / GPT#b"]);
+
+  // A narrow label column shortens the service before the group label.
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 19), "Ant… · Claude / GPT");
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 17), "A… · Claude / GPT");
+  assert.equal(ctx.fitName("Antigravity · Gemini", "Antigravity · ", 15), "Antig… · Gemini");
+  // Too narrow for a part of the service as well: the group label alone.
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 15), "Claude / GPT");
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 8), "Claude …");
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 30), "Antigravity · Claude / GPT");
+  assert.equal(ctx.fitName("alice.long.name@example.com", "", 10), "alice.lon…");
+
+  // Events and the ignition table name it the same way.
+  const events = eventContext({ status, providerTitle });
+  const ev = event("ignite_ok", 0, { group: "antigravity:4:cg", label: "Claude / GPT", params: {} });
+  assert.equal(events.eventParts(ev).label, "Antigravity · Claude / GPT");
+  assert.equal(events.eventMasked(ev).label[0].text, "Antigravity · Claude / GPT");
+  assert.match(source, /title = groupTitle\(t\.key, t\.label\)/);
+});
+
+test("time axis labels thin out to fit a narrow chart", () => {
+  const ctx = context(["chartTicks", "offsetSeconds", "zoneSet", "unixDate", "fmtDay", "fmtClock", "shifted", "pad"], { status: { timezone: "UTC", utc_offset_seconds: 0 } });
+  vm.runInContext("var CHAR_W = 6.6;" + pageVar("TICK_STEPS") + pageVar("TICK_LABEL_W"), ctx);
+  const to = Date.UTC(2026, 10, 21, 12) / 1000;
+  const geometry = (plotW, days) => ({ from: to - days * 86400, to, plotW });
+  const spacing = (g) => { const t = ctx.chartTicks(g); return { gap: g.plotW * (t.list[1] - t.list[0]) / (g.to - g.from), labels: t.list.map(t.label) }; };
+  // Wide: one tick a day over 8 days.
+  const wide = spacing(geometry(900, 8));
+  assert.equal(wide.labels.length, 8);
+  // The narrowest overview (480 px, 248 px of plot): every other day.
+  const narrow = spacing(geometry(248, 8));
+  assert.ok(narrow.gap >= 5 * 6.6 + 10, String(narrow.gap));
+  assert.ok(narrow.labels.length <= 4 && narrow.labels.length >= 3, narrow.labels.join(" "));
+  // Hours thin out the same way.
+  const hours = spacing(geometry(248, 1));
+  assert.ok(hours.gap >= 5 * 6.6 + 10);
+  assert.ok(hours.labels.every((l) => /^\d\d:00$/.test(l)), hours.labels.join(" "));
+});
+
+test("the threshold label of the detail chart keeps at most one decimal", () => {
+  const ctx = context(["axisPercent"]);
+  assert.equal(ctx.axisPercent(20), "20%");
+  assert.equal(ctx.axisPercent(12.5), "12.5%");
+  assert.equal(ctx.axisPercent(12.345), "12.3%");
+  assert.equal(ctx.axisPercent(33.333333), "33.3%");
+  assert.match(source, /fill: cssVar\("--viz-failure"\) \}, axisPercent\(low\)\)/);
+});
+
+test("links to other sites open outside the sandbox and show their address inside it", () => {
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  assert.doesNotMatch(html + source, /target="_blank"|target: "_blank"|raw\.githubusercontent|ghfast/);
+  // The name is no link until page.js makes it one outside the sandbox.
+  assert.match(html, /<a class="home" id="home"><img class="logo" src="\/\*LOGO\*\/"/);
+  const made = [];
+  const node = () => { const n = { attrs: {}, listeners: {}, setAttribute: (k, v) => { n.attrs[k] = v; }, addEventListener: (k, f) => { n.listeners[k] = f; } }; made.push(n); return n; };
+  const shown = [];
+  const ctx = context(["outsideLink", "setupHome"], { el: node, SANDBOXED: false, showAddress: (text, url) => shown.push([text, url]) });
+  const home = node();
+  ctx.$ = () => home;
+  ctx.REPO_URL = "https://github.com/PosvdM/magpie-lamplighter";
+  const open = ctx.outsideLink({}, "https://example.com/appeal", "copy");
+  assert.equal(open.attrs.target, "_blank");
+  assert.equal(open.attrs.href, "https://example.com/appeal");
+  ctx.setupHome();
+  assert.equal(home.attrs.href, ctx.REPO_URL);
+  ctx.SANDBOXED = true;
+  const boxed = ctx.outsideLink({}, "https://example.com/appeal", "copy");
+  assert.equal(boxed.attrs.target, undefined);
+  let prevented = false;
+  boxed.listeners.click({ preventDefault: () => { prevented = true; } });
+  assert.ok(prevented);
+  assert.deepEqual(shown, [["copy", "https://example.com/appeal"]]);
+  const plainHome = node();
+  ctx.$ = () => plainHome;
+  ctx.setupHome();
+  assert.deepEqual(plainHome.attrs, {});
 });

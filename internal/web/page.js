@@ -106,7 +106,7 @@
   }
 
   function magpieTheme(theme) {
-    magpie.theme = theme && typeof theme === "object" ? { dark: theme.dark, lang: theme.lang } : null;
+    magpie.theme = theme && typeof theme === "object" ? { dark: theme.dark, lang: theme.lang, tokens: themeTokens(theme.tokens) } : null;
     applyTheme();
     applyLanguage();
     if (status && history) renderChart();
@@ -140,11 +140,36 @@
     return browserDark ? "dark" : "light";
   }
 
+  // The colors and fonts of Magpie's theme (pluginpages.js sends them as
+  // tokens), which page.css takes as --magpie-<token> variables. Only these
+  // keys with string values are taken; a token missing from a later theme
+  // is removed, so page.css falls back to its own value.
+  var MAGPIE_TOKENS = ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"];
+
+  function themeTokens(tokens) {
+    var out = {};
+    if (!tokens || typeof tokens !== "object") return out;
+    MAGPIE_TOKENS.forEach(function (name) {
+      var value = tokens[name];
+      if (typeof value === "string" && value.trim()) out[name] = value.trim();
+    });
+    return out;
+  }
+
+  function applyTokens(style, tokens) {
+    MAGPIE_TOKENS.forEach(function (name) {
+      if (tokens && tokens[name]) style.setProperty("--magpie-" + name, tokens[name]);
+      else style.removeProperty("--magpie-" + name);
+    });
+  }
+
   function applyTheme() {
     var dark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
     var theme = pageTheme(magpie.theme, dark);
     if (theme === "light") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);
+    applyTokens(document.documentElement.style, magpie.theme && magpie.theme.tokens);
+    colorCache = {};
   }
 
   // ---- Language ----
@@ -156,6 +181,8 @@
     zh: {
       app_sub: "点灯人", repo_hint: "在 GitHub 上查看",
       update_hint: "有新版本 v{0}，可在 Magpie 的插件页面更新",
+      link_release: "。复制下面的地址，可在浏览器中查看发布说明：",
+      link_appeal: "复制下面的地址，在浏览器中打开以提出申诉：",
       key_title: "需要管理密钥",
       key_hint: "通过对外地址访问时需要 Lamplighter 的管理密钥（设置中的 admin_key），密钥保存在当前浏览器中。",
       key_placeholder: "Lamplighter 管理密钥",
@@ -284,8 +311,11 @@
       quota_reset: "额度重置",
       loading: "加载中…", no_history: "这个范围内还没有额度数据。",
       history_failed: "读取历史失败：{0}",
-      tz_config: "配置中指定", tz_server: "跟随服务器",
+      tz_config: "配置中指定",
       tz_note: "通知和页面中的时间使用 {0}，{1}。",
+      tz_note_unset: "尚未设置时区：点火和通知使用服务器的时区 {0}，页面中的时间按浏览器的时区显示。",
+      zone_notice: "尚未设置时区。页面中的时间按浏览器的时区显示，点火时段和通知中的时间按服务器的时区（{0}）计算。",
+      zone_notice_go: "设置时区",
       save_failed: "保存失败：{0}",
       load_failed: "加载失败：{0}",
       refreshed_all: "已刷新全部额度", test_sent: "测试通知已发送",
@@ -328,6 +358,8 @@
     en: {
       app_sub: "", repo_hint: "View on GitHub",
       update_hint: "v{0} is available; update it on the Plugins page of Magpie",
+      link_release: ". Copy this address to read the release notes in a browser:",
+      link_appeal: "Copy this address and open it in a browser to appeal:",
       key_title: "Admin key required",
       key_hint: "Access through the public address needs the Lamplighter admin key (admin_key in the settings). The key is kept in this browser.",
       key_placeholder: "Lamplighter admin key",
@@ -456,8 +488,11 @@
       quota_reset: "quota reset",
       loading: "Loading…", no_history: "No quota data in this range yet.",
       history_failed: "Could not read the history: {0}",
-      tz_config: "set in the config", tz_server: "following the server",
+      tz_config: "set in the config",
       tz_note: "Notifications and this page show times in {0}, {1}.",
+      tz_note_unset: "No time zone is set: ignition and notifications use the server's time zone, {0}, and this page shows times in the browser's time zone.",
+      zone_notice: "No time zone is set. This page shows times in the browser's time zone; the ignition hours and the times in notifications use the server's ({0}).",
+      zone_notice_go: "Set time zone",
       save_failed: "Could not save: {0}",
       load_failed: "Could not load: {0}",
       refreshed_all: "Refreshed all quota", test_sent: "Test notification sent",
@@ -640,10 +675,19 @@
     toastTimer = setTimeout(function () { node.hidden = true; }, 5000);
   }
 
-  // Times are shown in the plugin's time zone, like notifications.
-  function offsetSeconds() {
-    var value = status ? Number(status.utc_offset_seconds) : NaN;
-    return isFinite(value) ? value : -new Date().getTimezoneOffset() * 60;
+  // The status names a time zone only when the config sets one; without
+  // one it says "Local", the time zone of the plugin's process, which is
+  // UTC in Magpie's Docker image.
+  function zoneSet(st) {
+    return !!(st && st.timezone && st.timezone !== "Local");
+  }
+
+  // Times are shown in the configured time zone, like notifications. Without
+  // one they are shown in the browser's, at the offset of time t (now when
+  // t is not given), and a notice says so.
+  function offsetSeconds(t) {
+    var value = zoneSet(status) ? Number(status.utc_offset_seconds) : NaN;
+    return isFinite(value) ? value : -(t || new Date()).getTimezoneOffset() * 60;
   }
 
   function parseTime(value) {
@@ -655,7 +699,7 @@
 
   function pad(n) { return (n < 10 ? "0" : "") + n; }
 
-  function shifted(t) { return new Date(t.getTime() + offsetSeconds() * 1000); }
+  function shifted(t) { return new Date(t.getTime() + offsetSeconds(t) * 1000); }
 
   function fmtDateTime(t) {
     if (!t) return "—";
@@ -929,8 +973,12 @@
     var scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
     var css = Array.prototype.map.call(document.querySelectorAll("style"), function (s) { return s.textContent; }).join("\n");
     var root = document.documentElement, theme = root.getAttribute("data-theme");
+    // The root's style holds Magpie's tokens (applyTokens); the image's root
+    // takes them too, so it has the page's colors.
+    var rootStyle = root.getAttribute("style") || "";
     var markup = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + w * scale + "\" height=\"" + h * scale + "\" viewBox=\"0 0 " + w + " " + h + "\"" +
-      (theme ? " data-theme=\"" + theme + "\"" : "") + " class=\"" + root.className + "\" lang=\"" + root.lang + "\">" +
+      (theme ? " data-theme=\"" + theme + "\"" : "") + (rootStyle ? " style=\"" + xmlAttr(rootStyle) + "\"" : "") +
+      " class=\"" + root.className + "\" lang=\"" + root.lang + "\">" +
       "<style><![CDATA[" + css.split("]]>").join("]]]]><![CDATA[>") + "]]></style>" +
       "<foreignObject x=\"0\" y=\"0\" width=\"" + w + "\" height=\"" + h + "\">" + new XMLSerializer().serializeToString(frame) + "</foreignObject></svg>";
     return new Promise(function (resolve, reject) {
@@ -947,6 +995,10 @@
       img.onerror = function () { reject(new Error("image")); };
       img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(markup);
     });
+  }
+
+  function xmlAttr(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   }
 
   // Writes the PNG to the clipboard within the click, which the browser
@@ -1013,13 +1065,84 @@
     var icon = svg("svg", { viewBox: "0 0 16 16", width: 14, height: 14, "aria-hidden": "true" });
     icon.appendChild(svg("circle", { cx: 8, cy: 8, r: 7.25 }));
     icon.appendChild(svg("path", { d: "M8 11.5V4.5M5 7.5l3-3 3 3" }));
-    var link = el("a", { class: "update", href: status.release_url, target: "_blank", rel: "noopener", title: hint, "aria-label": hint });
+    var link = outsideLink({ class: "update", title: hint, "aria-label": hint }, status.release_url, hint + translate("link_release"));
     link.appendChild(icon);
     return link;
   }
 
+  // ---- Links ----
+
+  var REPO_URL = "https://github.com/PosvdM/magpie-lamplighter";
+
+  // Magpie's sandbox lets the page open no window, and its bridge has no
+  // way to open a link, so a link to another site opens in a new tab only
+  // outside the sandbox. In the sandbox a click shows the address in the
+  // toast, selected for copying, after text.
+  function outsideLink(attrs, url, text) {
+    var link = el("a", attrs);
+    link.setAttribute("href", url);
+    if (!SANDBOXED) {
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+      return link;
+    }
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      showAddress(text, url);
+    });
+    return link;
+  }
+
+  // The logo and the name link to the repository only where the link can
+  // open; in the sandbox they show as plain text.
+  function setupHome() {
+    if (SANDBOXED) return;
+    var home = $("home");
+    home.setAttribute("href", REPO_URL);
+    home.setAttribute("target", "_blank");
+    home.setAttribute("rel", "noopener");
+    home.setAttribute("data-i18n-title", "repo_hint");
+  }
+
+  // The toast with text and the address in a read-only field, selected.
+  // It stays while the field has the focus.
+  function showAddress(text, url) {
+    var node = $("toast");
+    clear(node);
+    var field = el("input", { class: "toast-address", type: "text", readonly: true, spellcheck: "false", "aria-label": text, value: url });
+    node.appendChild(el("div", { text: text }));
+    node.appendChild(field);
+    node.hidden = false;
+    clearTimeout(toastTimer);
+    var hide = function (ms) {
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { node.hidden = true; }, ms);
+    };
+    field.addEventListener("focus", function () { clearTimeout(toastTimer); });
+    field.addEventListener("blur", function () { hide(3000); });
+    field.focus();
+    field.select();
+  }
+
   function notice(text) {
     return el("div", { class: "notice" }, [el("span", { class: "notice-icon", text: "!" }), el("span", {}, maskedNodes(text))]);
+  }
+
+  // At the top of the quota view while no time zone is set, with a button
+  // to the time zone setting.
+  function renderZoneNotice() {
+    var box = $("zone-notice");
+    clear(box);
+    box.hidden = zoneSet(status);
+    if (box.hidden) return;
+    box.appendChild(el("span", { class: "notice-icon", text: "i" }));
+    box.appendChild(el("span", { class: "notice-text", text: translate("zone_notice", utcText(status)) }));
+    box.appendChild(el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("zone_notice_go"), onclick: function () {
+      showView("settings", true);
+      var input = $("settings").elements.timezone;
+      input.scrollIntoView({ block: "center" });
+      input.focus({ preventScroll: true });
+    } }));
   }
 
   // The accounts Magpie warms up (status.magpie_warmup, a list of pins), by
@@ -1049,6 +1172,7 @@
     } else if (status.mcp && status.mcp.enabled && !status.mcp.running && status.mcp.error) box.appendChild(notice(translate("mcp_error", status.mcp.error)));
     var warmup = warmupNames(status.magpie_warmup, status.accounts, rawConfig.account_names, providerTitle);
     if (warmup.length) box.appendChild(notice(translate("warmup_notice", warmup.join(lang === "zh" ? "、" : ", "))));
+    renderZoneNotice();
     // No channel is how notifications are turned off, so it is a hint in the
     // settings rather than a notice.
     $("notify-off").hidden = !(status.config && !status.config.bark_url && !(status.config.webhook && status.config.webhook.url));
@@ -1400,16 +1524,16 @@
       return;
     }
     status.targets.forEach(function (t) {
-      var st = targetStatus(t);
+      var st = targetStatus(t), title = groupTitle(t.key, t.label);
       var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), onclick: function () {
-        if (!confirmed(button, translate("ignite_confirm", t.label))) return;
-        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", t.label));
+        if (!confirmed(button, translate("ignite_confirm", title))) return;
+        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", title));
       } });
       var next = parseTime(t.next_due), reset = parseTime(t.reset), last = parseTime(t.last_success);
       var statusCell = el("td", {}, [badge(st.kind, st.text)]);
       if (st.title) statusCell.appendChild(el("div", { class: "cell-note" }, maskedNodes(st.title)));
       body.appendChild(el("tr", {}, [
-        el("td", { class: "strong" }, maskedNodes(t.label)),
+        el("td", { class: "strong" }, maskedNodes(title)),
         el("td", { class: "mono", text: next ? fmtDateTimeDay(next) : "—" }),
         el("td", { class: "mono", text: reset ? fmtDateTimeDay(reset) : "—" }),
         el("td", { class: "mono", text: last ? fmtDateTime(last) : "—" }),
@@ -1464,6 +1588,31 @@
       (a.groups || []).forEach(function (g) { if (g.key === key) label = g.label; });
     });
     return label;
+  }
+
+  // The quota groups of the accounts with more than one, by group key, with
+  // the provider of the account. Their labels, such as "Claude / GPT" of an
+  // Antigravity account, name models rather than the service, so the chart,
+  // its table, the ignition table and the events name the service too. A
+  // card shows the groups under the service badge and needs no such name.
+  function sharedGroups(accounts) {
+    var out = {};
+    (accounts || []).forEach(function (a) {
+      if ((a.groups || []).length > 1) a.groups.forEach(function (g) { out[g.key] = a.provider; });
+    });
+    return out;
+  }
+
+  // "Antigravity · " before the label of a group of sharedGroups.
+  function servicePrefix(provider) {
+    var title = provider ? providerTitle(provider) : "";
+    return title ? title + " · " : "";
+  }
+
+  // The label of quota group key as it shows apart from its account card.
+  function groupTitle(key, label) {
+    var provider = sharedGroups(status && status.accounts)[key];
+    return label && provider ? servicePrefix(provider) + label : label;
   }
 
   function retryText(seconds) {
@@ -1737,7 +1886,7 @@
   // The label and detail of an event, for the chart's tooltips.
   function eventParts(ev) {
     var view = eventView(ev);
-    return { label: view.label || "—", detail: view.detail };
+    return { label: groupTitle(ev.group, view.label) || "—", detail: view.detail };
   }
 
   // The label and detail of an event as nodes, with the account names
@@ -1747,7 +1896,7 @@
   // from the provider.
   function eventMasked(ev, view) {
     view = view || eventView(ev);
-    var label = view.label ? [el("span", { class: SENSITIVE, text: view.label })] : [document.createTextNode("—")];
+    var label = view.label ? [el("span", { class: SENSITIVE, text: groupTitle(ev.group, view.label) })] : [document.createTextNode("—")];
     var detail = view.whole ? [el("span", { class: SENSITIVE, text: view.detail })] : maskedNodes(view.detail, [view.label].concat(view.secrets));
     return { label: label, detail: detail };
   }
@@ -1790,7 +1939,7 @@
     built.rows.slice(0, eventsExpanded ? EVENTS_MAX : EVENTS_COLLAPSED).forEach(function (row) {
       var ev = row.event, view = eventView(ev, row.notifyKind, row.paused), nodes = eventMasked(ev, view);
       var cell = [el("span", { class: "event-text", title: masked ? null : view.tip || view.detail || null }, nodes.detail)];
-      if (view.link) cell.push(el("a", { class: "event-link", href: view.link, target: "_blank", rel: "noopener noreferrer", text: translate("ev_appeal") }));
+      if (view.link) cell.push(outsideLink({ class: "event-link", text: translate("ev_appeal") }, view.link, translate("link_appeal")));
       list.appendChild(el("div", { class: "event-row", role: "row" }, [
         el("span", { class: "event-time", role: "cell", text: fmtDateTime(parseTime(ev.time)) }),
         el("span", { class: "event-type", role: "cell" }, [badge(view.style, view.badge)]),
@@ -2016,11 +2165,25 @@
   // Samples of the row in the detail chart; hovering either chart snaps to them.
   var snapPoints = [];
 
+  // The value of a color variable of page.css for an SVG attribute. Most
+  // derive from Magpie's tokens with color-mix(), which is resolved to the
+  // color it gives through a hidden element, so the chart and its
+  // screenshots carry plain colors. applyTheme clears the cache.
+  var colorCache = {};
   function cssVar(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    if (value.indexOf("(") < 0 || /^(rgba?|hsla?)\(/.test(value)) return value;
+    if (!colorCache[value]) {
+      var probe = el("i", { hidden: true });
+      probe.style.color = value;
+      document.body.appendChild(probe);
+      colorCache[value] = getComputedStyle(probe).color || value;
+      document.body.removeChild(probe);
+    }
+    return colorCache[value];
   }
 
-  var LEVEL_VARS = { empty: "--quota-empty-color", low: "--viz-failure", medium: "--quota-medium-color", high: "--viz-success", full: "--quota-full-color" };
+  var LEVEL_VARS = { empty: "--quota-empty-color", low: "--quota-low-color", medium: "--quota-medium-color", high: "--quota-high-color", full: "--quota-full-color" };
 
   // A rect in the color of a level; an empty one is also striped.
   function levelRect(root, attrs, level) {
@@ -2036,6 +2199,21 @@
   }
 
   function pct(v) { return v == null ? "—" : Math.round(v) + "%"; }
+
+  // name cut to max characters with an ellipsis. A name that starts with
+  // the service (prefix, "Antigravity · ") loses characters of the service
+  // first, then the whole service, so the group label tells the rows apart.
+  function fitName(name, prefix, max) {
+    if (name.length <= max) return name;
+    prefix = prefix || "";
+    if (prefix && name.indexOf(prefix) === 0) {
+      var label = name.slice(prefix.length), room = max - label.length - 3;
+      if (room >= 2) return prefix.replace(/ · $/, "").slice(0, room - 1) + "… · " + label;
+      name = label;
+      if (name.length <= max) return name;
+    }
+    return name.slice(0, Math.max(1, max - 1)) + "…";
+  }
 
   function fmtDiff(d) { return d == null ? "—" : (d > 0 ? "+" : d < 0 ? "−" : "") + Math.abs(d) + "%"; }
 
@@ -2178,7 +2356,7 @@
   // first account, and labels of the same account keep the group_order of
   // the status API, so Gemini stays before Claude / GPT within Antigravity.
   function chartRows() {
-    var info = {}, accountOf = {}, emailOf = {}, current = [];
+    var info = {}, accountOf = {}, emailOf = {}, current = [], shared = sharedGroups(status.accounts);
     status.accounts.forEach(function (a, index) {
       accountOf["auth|" + a.auth_index] = index;
       emailOf[a.auth_index] = a.email || a.name;
@@ -2222,7 +2400,8 @@
       var account = accountOf["group|" + s.group];
       if (account === undefined) account = accountOf["auth|" + s.auth_index];
       if (!byLabel[id]) { byLabel[id] = []; order.push(id); }
-      byLabel[id].push({ id: s.group + "|" + s.window, name: s.label + extra, source: source,
+      var prefix = shared[s.group] ? servicePrefix(s.provider) : "";
+      byLabel[id].push({ id: s.group + "|" + s.window, name: prefix + s.label + extra, prefix: prefix, source: source,
         sub: meta ? meta.email : emailOf[s.auth_index] || s.auth_index || "", group: s.group, inactive: !meta, lastAt: lastPoint ? lastPoint[0] : null,
         points: s.points, floor: cycleFloor(s.points), resets: Array.isArray(s.resets) ? s.resets : [],
         reset: meta ? meta.reset : null, weight: meta ? meta.weight : 1, last: lastPoint ? lastPoint[1] : meta.remaining,
@@ -2267,7 +2446,8 @@
     var now = Date.now() / 1000;
     var resets = kids.map(function (k) { return k.reset; }).filter(function (t) { return t > now; });
     var weights = kids.reduce(function (sum, k) { return sum + k.weight; }, 0);
-    return { id: "group:" + id, name: kids[0].source, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
+    var prefix = kids.map(function (k) { return k.prefix; }).filter(function (p) { return p; })[0] || "";
+    return { id: "group:" + id, name: prefix + kids[0].source, prefix: prefix, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
       last: kids.reduce(function (sum, k) { return sum + k.weight * k.last; }, 0) / weights,
       reset: resets.length ? Math.min.apply(null, resets) : null, groups: kids.map(function (k) { return k.group; }) };
   }
@@ -2303,9 +2483,20 @@
       t: function (px) { return from + (px - labelW) / plotW * (to - from); } };
   }
 
+  // Tick steps of the time axis, in seconds. A step divides a day or is a
+  // whole number of days, so ticks fall on the same clock times every day.
+  var TICK_STEPS = [600, 1800, 3600, 2 * 3600, 3 * 3600, 4 * 3600, 6 * 3600, 12 * 3600, 86400, 2 * 86400, 5 * 86400, 7 * 86400, 14 * 86400];
+  // Room for a tick label ("15:00" or "11/14", five characters), with
+  // space between labels.
+  var TICK_LABEL_W = 5 * CHAR_W + 10;
+
+  // The ticks of the time axis: the step the range calls for, or a longer
+  // one where the labels would overlap in a narrow chart.
   function chartTicks(g) {
     var span = g.to - g.from;
     var step = span <= 3600 ? 600 : span <= 3 * 3600 ? 1800 : span <= 6 * 3600 ? 3600 : span <= 12 * 3600 ? 2 * 3600 : span <= 2 * 86400 ? 4 * 3600 : span <= 8 * 86400 ? 86400 : span <= 15 * 86400 ? 2 * 86400 : 5 * 86400;
+    for (var i = 0; i < TICK_STEPS.length && (TICK_STEPS[i] < step || g.plotW * TICK_STEPS[i] / span < TICK_LABEL_W); i++) {}
+    if (i < TICK_STEPS.length) step = TICK_STEPS[i];
     var offset = offsetSeconds(), list = [];
     for (var t = Math.ceil((g.from + offset) / step) * step - offset; t <= g.to; t += step) list.push(t);
     return { list: list, label: function (t) { return span <= 2 * 86400 ? fmtClock(unixDate(t)) : fmtDay(unixDate(t)); } };
@@ -2448,9 +2639,8 @@
       var lx = 4 + f.depth * 18;
       if (r.children) root.appendChild(svgText({ x: lx, y: y0 + 15, "font-size": 10, fill: cssVar("--text-tertiary") }, chartExpanded[r.id] ? "▾" : "▸"));
       var nameX = lx + (r.children ? 14 : 0);
-      var name = f.depth ? r.sub : r.name;
       var maxChars = Math.floor((g.labelW - nameX - (r.children ? 30 : 8)) / 7);
-      if (name.length > maxChars) name = name.slice(0, Math.max(1, maxChars - 1)) + "…";
+      var name = f.depth ? fitName(r.sub, "", maxChars) : fitName(r.name, r.prefix, maxChars);
       root.appendChild(svgSensitive(svgText({ x: nameX, y: y0 + 15, "font-size": f.depth ? 12 : 13, "font-weight": f.depth ? 400 : 600,
         fill: cssVar(f.depth ? "--text-secondary" : "--text-primary"), "class": "row-name" }, name), f.depth || r.orphan || hasSecret(f.depth ? r.sub : r.name)));
       if (r.children) root.appendChild(svgText({ x: nameX + name.length * 8 + 8, y: y0 + 15, "font-size": 11, fill: cssVar("--text-tertiary") }, "×" + r.children.length));
@@ -2902,7 +3092,7 @@
     var low = status.config ? Number(status.config.low_threshold) : 0;
     if (low > 0 && low < 100) {
       root.appendChild(svg("line", { x1: g.labelW, x2: g.labelW + g.plotW, y1: y(low), y2: y(low), stroke: cssVar("--viz-failure"), "stroke-opacity": 0.5, "stroke-dasharray": "4 4" }));
-      root.appendChild(svgText({ x: g.labelW - 8, y: y(low) + 4, "text-anchor": "end", "font-size": 11, fill: cssVar("--viz-failure") }, low + "%"));
+      root.appendChild(svgText({ x: g.labelW - 8, y: y(low) + 4, "text-anchor": "end", "font-size": 11, fill: cssVar("--viz-failure") }, axisPercent(low)));
     }
     // The time the projection runs out goes on the time axis, in place of the
     // tick labels it would cover.
@@ -3118,6 +3308,13 @@
       tip.hidden = false;
       placeTip(tip, box, g, t, 6);
     });
+  }
+
+  // A y-axis label of the detail chart, such as the low threshold, with at
+  // most one decimal: "12.5%" fits the SIDE_GAP pixels left of the plot
+  // beside the heading, which "12.345%" would cross into.
+  function axisPercent(v) {
+    return Math.round(v * 10) / 10 + "%";
   }
 
   // The detail chart's heading goes, as a column (.side), into the blank
@@ -3463,13 +3660,17 @@
     return providerList().filter(function (p) { return p.groups && p.groups.length; });
   }
 
+  // "UTC+8", "UTC-3.5": the offset of the plugin's time zone.
+  function utcText(st) {
+    var offset = (Number(st && st.utc_offset_seconds) || 0) / 3600;
+    return "UTC" + (offset >= 0 ? "+" : "-") + Math.abs(offset);
+  }
+
   function timezoneText() {
-    var offset = offsetSeconds() / 3600;
-    var name = status && status.timezone && status.timezone !== "Local" ? status.timezone : "";
-    var sign = offset >= 0 ? "+" : "-";
-    var utc = "UTC" + sign + Math.abs(offset);
-    var source = rawConfig.timezone || rawConfig.timezone_offset_hours !== undefined ? translate("tz_config") : translate("tz_server");
-    return translate("tz_note", name ? name + " (" + utc + ")" : utc, source);
+    if (!zoneSet(status)) return translate("tz_note_unset", utcText(status));
+    var utc = utcText(status);
+    var name = /^UTC[+-]/.test(status.timezone) ? "" : status.timezone;
+    return translate("tz_note", name ? name + " (" + utc + ")" : utc, translate("tz_config"));
   }
 
   function topKey(name) { return name.split(".")[0]; }
@@ -4543,16 +4744,7 @@
     var media = window.matchMedia("(prefers-color-scheme: dark)");
     if (media.addEventListener) media.addEventListener("change", function () { applyTheme(); if (status && history) renderChart(); });
   }
-  // A request to raw.githubusercontent.com that is dropped without a reply
-  // only fails when the browser's connection times out, so the logo also
-  // moves to the mirror when it has not loaded within 5 seconds.
-  setTimeout(function () {
-    var logo = document.querySelector("header .logo");
-    if (logo && !logo.complete && !logo.dataset.mirror) {
-      logo.dataset.mirror = "1";
-      logo.src = "https://ghfast.top/" + logo.src;
-    }
-  }, 5000);
+  setupHome();
   applyTheme();
   applyLanguage();
   magpieHello();
