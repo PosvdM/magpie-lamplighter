@@ -37,7 +37,7 @@ jobs:
       - run: go test -race ./...
       - run: node --check internal/web/page.js
       - run: node --test internal/web/page_test.cjs
-      - run: node --test npm/test/
+      - run: node --test 'npm/test/*.test.mjs'
 
   build:
     needs: test

@@ -31,7 +31,7 @@
   "scripts": {
     "build": "sh scripts/build.sh",
     "prepack": "node scripts/check-dist.mjs",
-    "test": "node --test npm/test/"
+    "test": "node --test 'npm/test/*.test.mjs'"
   },
   "magpie": {
     "page": {

@@ -13,7 +13,7 @@ go test ./...
 go test -race ./...
 node --check internal/web/page.js
 node --test internal/web/page_test.cjs
-node --test npm/test/
+node --test 'npm/test/*.test.mjs'
 ```
 
 测试使用假的 `host.Host` 和 HTTP 服务器，不会发送真实请求。`npm/test/program.test.mjs` 会编译 Go 程序（没有 Go 时跳过），由外壳启动它并调用一个 tool；程序没有版本号，不会向 GitHub 查询新版本，`MAGPIE_ADDR` 指向回环地址上一个关闭的端口。
