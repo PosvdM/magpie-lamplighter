@@ -31,6 +31,24 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 - `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。
 - `state.json`、`history/`、`instance.lock`：见下文“数据”。
 
+## 插件外壳
+
+npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `npm/`，`package.json` 的 `magpie` 字段声明页面和端口选项。包中带有 linux、darwin、windows 各 amd64 和 arm64 的程序（`dist/bin/<GOOS>-<GOARCH>/lamplighter`，构建方法见[开发](./development.md#构建)）。Magpie 用 `bun add --ignore-scripts` 安装插件，不运行安装脚本，所以程序必须随包发布，不能在安装时下载。
+
+**启动**：插件宿主（Bun）加载 `npm/index.js` 的默认导出 `{id, server}`，并以 `plugins.json` 中插件的 `options` 调用 `server`。宿主把模块导出的每个函数都当作插件函数，只有采用默认导出的写法，`lamplighter.js` 中的辅助函数才不会被当作插件函数加载。`server` 按 `process.platform` 和 `process.arch` 找到程序（缺少执行权限时补上），以 `-listen 127.0.0.1:<端口>` 启动，然后返回 tools；同一个宿主中只启动一次。端口取 `options.port`（1～65535 的整数，或这样的数字字符串），没有时为 8317，与 `main.go` 中 `-listen` 的默认值相同（`npm/test/package.test.mjs` 检查两处一致）。Magpie 的 CLI 进程（如 `magpie plugin update`）会另起一个宿主，并把 `options.port` 换成一个空闲端口，所以端口必须从选项读取。
+
+**环境变量**：程序继承宿主的环境（`childEnv`），另外：
+
+- 宿主的工作目录就是 Magpie 的配置目录（便携模式也是），环境中没有 `MAGPIE_CONFIG_DIR` 时把它设为宿主的工作目录。
+- `MAGPIE_ADDR` 原样传递。网关不要求回环地址上的请求带密钥，因此不传密钥。
+- Magpie 把宿主环境中的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY` 改名为 `MAGPIE_` 开头的同名变量（Magpie 源码 `internal/plugin/host.go` 的 `hostEnv`）。这些变量的值是 Magpie 自己的请求所用的代理（`netproxy.Env`：Magpie 中设置的代理，否则是系统代理；设为直连时没有；SOCKS5 代理已桥接为 HTTP 代理）。改名是因为 Bun 只在启动时读一次 `*_PROXY`，之后所有 fetch 都经过它，按服务设置的直连就无法生效；改名后由 `host.js` 为每个 fetch 单独选择代理，并没有禁止插件使用代理的意图。`host.js` 也按同样的方式把代理传给插件启动的程序（`proxied`），所以 `childEnv` 把 `MAGPIE_HTTPS_PROXY`、`MAGPIE_HTTP_PROXY`（缺少时用 `MAGPIE_ALL_PROXY` 代替）和 `MAGPIE_NO_PROXY` 映射回 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`；环境中已有同名变量（不区分大小写）时保留原值。Go 的代理设置不作用于回环地址，所以访问网关时不经过代理；账号自己的代理见“网络出口”。
+
+**生命周期**：`Supervisor` 让程序保持运行。程序自行退出时，先等 1 秒再重新启动；每次快速退出后等待时间加倍，最长 30 秒；程序连续运行 60 秒以上再退出时，等待时间回到 1 秒。快速退出通常是因为端口被占用：Magpie 换下内存占用过高的宿主时，新宿主开始接收调用，旧宿主及其程序要等调用结束才退出。宿主退出时（`process` 的 `exit` 事件），外壳向程序发送 SIGTERM（Windows 上直接结束进程），程序收到后正常关闭。此外，Magpie 停止宿主时会结束整个进程树（Unix 上是宿主所在的会话，Windows 上是作业对象），程序不会残留。程序的标准输入为空，标准输出和标准错误输出交给宿主，Magpie 把宿主的标准错误输出写入日志。
+
+**tools**：`npm/tools.js` 定义的工具与 `internal/mcp` 的 `toolDefinitions` 一一对应，名称、参数和说明相同（`npm/test/tools.test.mjs` 对照 `internal/mcp/server.go` 检查名称和参数）。参数以 JSON Schema 声明，Magpie 照原样列出、不做校验，所以 `toolArguments` 按 MCP 服务的规则检查：拒绝工具不接受的参数（`Unknown argument: …`），`limit` 必须是整数，其余参数必须是字符串。`execute` 把参数转成字符串对象（`limit` 写成十进制数字），发到内部监听的 `POST /api/tools/{name}`。返回 `{"result": …}` 时把结果写成 JSON 文本作为工具的回答，返回 `{"error": "…"}` 时抛出该错误，Magpie 将其作为调用失败返回。内部监听拒绝连接时（程序正在启动或重新启动），每 250 毫秒重试一次，最多等 10 秒。Magpie 的 tool 超时为 55 秒，外壳在 54 秒时放弃请求，内部监听给工具 50 秒。Magpie 以插件的短名称加工具名命名这些工具（如 `magpie-lamplighter_list_quotas`），单独提供这些工具的 MCP 地址是 `/mcp/magpie/tools/magpie-lamplighter`。
+
+**页面**：`magpie.page.file` 指向 `npm/page/index.html`，它先加载 Magpie 的 `_magpie/bridge.js`，再由 `open.js` 跳转到 Lamplighter 自己的页面：经 `magpie web` 打开时，桥接脚本提供经 Magpie 反向代理的内部监听地址 `magpie.service`（来自 `magpie.page.service` 的 `{port: 8317, option: "port"}`），页面跳转到这个地址；在 Magpie 桌面窗口中没有这个地址，页面读取插件的 `port` 选项，跳转到 `http://127.0.0.1:<端口>/`。桥接脚本 3 秒内没有响应时使用默认端口。页面的沙箱策略不允许内联脚本，所以脚本放在单独的文件中。`magpie.options` 中的 `{"port": 8317}` 是 Magpie 插件页面“Options”编辑框中显示的示例。
+
 ## 与 Magpie 的接口
 
 引擎只通过 `host.Host` 访问 Magpie，测试使用假的实现。`internal/magpie` 按下表实现它：

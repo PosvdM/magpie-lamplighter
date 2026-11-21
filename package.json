@@ -1,0 +1,50 @@
+{
+  "name": "magpie-lamplighter",
+  "version": "0.1.0",
+  "description": "Magpie plugin that monitors the quotas of Codex, Claude and Antigravity subscription accounts and starts their 5-hour windows on schedule",
+  "type": "module",
+  "main": "npm/index.js",
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "codex",
+    "claude",
+    "antigravity",
+    "quota"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/PosvdM/magpie-lamplighter#readme",
+  "bugs": {
+    "url": "https://github.com/PosvdM/magpie-lamplighter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PosvdM/magpie-lamplighter.git"
+  },
+  "files": [
+    "npm/index.js",
+    "npm/lamplighter.js",
+    "npm/tools.js",
+    "npm/page/",
+    "dist/bin/"
+  ],
+  "scripts": {
+    "build": "sh scripts/build.sh",
+    "prepack": "node scripts/check-dist.mjs",
+    "test": "node --test npm/test/"
+  },
+  "magpie": {
+    "page": {
+      "title": "Magpie-Lamplighter",
+      "file": "npm/page/index.html",
+      "icon": "npm/page/icon.png",
+      "service": {
+        "port": 8317,
+        "option": "port"
+      }
+    },
+    "options": {
+      "port": 8317
+    }
+  }
+}
