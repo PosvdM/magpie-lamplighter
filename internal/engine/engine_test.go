@@ -126,6 +126,8 @@ func newTestEngineIn(t *testing.T, h *fakeHost, c *clock, dir string) (*Engine, 
 	t.Helper()
 	cfg := config.Default()
 	cfg.Timezone = "Asia/Shanghai"
+	// The tests run with ignition on; a new installation has it off.
+	cfg.Ignition.Enabled = true
 	e := New(Options{Host: h, Version: "test", DataDir: dir, Now: c.now, Doer: h})
 	e.Configure(cfg, nil)
 	if err := e.openStores(cfg); err != nil {

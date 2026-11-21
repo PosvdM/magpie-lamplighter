@@ -30,8 +30,7 @@ import (
 
 const (
 	// startupDelay gives Magpie's gateway time to start with the host.
-	startupDelay    = 5 * time.Second
-	lockRetryPeriod = 10 * time.Second
+	startupDelay = 5 * time.Second
 	// keptInterval is how often Magpie's kept quotas are read as passive
 	// data. The read sends no request to a vendor.
 	keptInterval  = time.Minute
@@ -56,7 +55,9 @@ var confirmDelays = []time.Duration{5 * time.Second, 10 * time.Second, 15 * time
 type Options struct {
 	Host    host.Host
 	Version string
-	// DataDir holds state.json, the history and instance.lock.
+	// DataDir holds state.json and the history. The caller holds the
+	// instance lock of the directory before it creates the engine; see
+	// main.go.
 	DataDir string
 	// Doer sends the quota requests; nil uses package egress.
 	Doer quota.Doer
@@ -83,7 +84,6 @@ type Engine struct {
 	cfgErr             string
 	dataDir            string
 	running            bool
-	lockErr            string
 	creds              map[string]*Cred
 	groups             map[string]*GroupView
 	targets            []TargetView
@@ -133,7 +133,6 @@ type Engine struct {
 	probed      map[string][]time.Time
 	lastSample  map[string]sampleMark
 	pendingSamp map[string]store.Record
-	lock        *store.Lock
 	// modelsTried and modelsOK tell whether the model list was read outside
 	// an ignition and whether that worked.
 	modelsTried bool
@@ -314,7 +313,7 @@ func (e *Engine) sleep(d time.Duration) bool {
 // process and with it the page and the tools.
 func (e *Engine) supervise() {
 	defer close(e.doneCh)
-	defer e.releaseLock()
+	defer e.notRunning()
 	for !e.stopping() {
 		func() {
 			defer func() {
@@ -330,11 +329,8 @@ func (e *Engine) supervise() {
 	}
 }
 
-func (e *Engine) releaseLock() {
-	if e.lock != nil {
-		e.lock.Release()
-		e.lock = nil
-	}
+// notRunning reports the loop as stopped in the status API.
+func (e *Engine) notRunning() {
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
@@ -388,32 +384,6 @@ func (e *Engine) openStores(cfg config.Config) error {
 	}
 	e.loadRecentEvents()
 	return nil
-}
-
-func (e *Engine) acquireLock(dir string) bool {
-	for !e.stopping() {
-		lock, ok, err := store.TryLock(filepath.Join(dir, "instance.lock"))
-		if err != nil {
-			e.mu.Lock()
-			e.lockErr = err.Error()
-			e.mu.Unlock()
-			return false
-		}
-		if ok {
-			e.lock = lock
-			e.mu.Lock()
-			e.lockErr = ""
-			e.mu.Unlock()
-			return true
-		}
-		e.mu.Lock()
-		e.lockErr = "另一个 Lamplighter 实例仍在运行，等待它退出"
-		e.mu.Unlock()
-		if !e.sleep(lockRetryPeriod) {
-			return false
-		}
-	}
-	return false
 }
 
 func (e *Engine) saveState() {
@@ -493,9 +463,6 @@ func (e *Engine) run() {
 	if err := e.openStores(cfg); err != nil {
 		e.logf("error", "%v", err)
 		e.addEvent("error", "error", "", err.Error())
-		return
-	}
-	if !e.acquireLock(e.dataDir) {
 		return
 	}
 	e.mu.Lock()

@@ -3,8 +3,9 @@
 //
 // The internal listener runs on loopback and takes no key: Magpie reaches
 // it for the plugin page (magpie.page.service) and for the tools of the
-// plugin host. It refuses a Host that is not loopback and opens its API
-// to the sandboxed plugin page by a page token; see guardInternal. The
+// plugin host. It refuses a Host that is not loopback, and an API request
+// from a browser without the page token of the plugin page; see
+// guardInternal. The
 // public listener at public_listen, run by package mcp,
 // serves the same handler behind admin_key when web_enabled, and /mcp
 // behind mcp_key when mcp_enabled; see docs/architecture.md.
@@ -16,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -51,7 +53,18 @@ type Server struct {
 
 	mu      sync.Mutex
 	stopped bool
+
+	// patchMu serializes PATCH /api/config from the merge to the response,
+	// so that the configurations are applied in the order they are saved.
+	patchMu sync.Mutex
+	// patched, when set by a test, runs between saving a patch and applying
+	// it.
+	patched func()
 }
+
+// errSameKeysPublic is the public listener's error while admin_key and
+// mcp_key are the same.
+const errSameKeysPublic = "admin_key 与 mcp_key 相同，对外监听不提供页面、接口和 /mcp；请更换其中一个密钥"
 
 // New creates the server and applies cfg, the configuration read from
 // store, or parseErr when it could not be read.
@@ -67,6 +80,10 @@ func New(store *config.Store, cfg config.Config, parseErr error, e *engine.Engin
 
 // apply hands cfg to the engine and the public listener, which is rebound
 // only when its address changes or it starts or stops serving.
+//
+// PATCH /api/config refuses the same admin_key and mcp_key, but the file
+// read at startup may hold them: one key would then open both the API and
+// /mcp, so the public listener serves neither.
 func (s *Server) apply(cfg config.Config, parseErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,12 +92,18 @@ func (s *Server) apply(cfg config.Config, parseErr error) {
 	}
 	revision := s.engine.Configure(cfg, parseErr)
 	if parseErr == nil {
+		refused := ""
+		if cfg.SameKeys() {
+			refused = errSameKeysPublic
+			log.Printf("error: %v; the public listener serves neither the page and API nor /mcp", config.ErrSameKeys)
+		}
 		s.mcp.Configure(mcp.Config{
 			Listen:     cfg.PublicListen,
 			MCPEnabled: cfg.MCPEnabled,
 			MCPKey:     cfg.MCPKey,
 			WebEnabled: cfg.WebEnabled,
 			AdminKey:   cfg.AdminKey,
+			Refused:    refused,
 		})
 		s.engine.MCPConfigured(revision)
 	}
@@ -195,13 +218,12 @@ func (s *Server) routes(page []byte) http.Handler {
 		if !readJSON(w, r, &patch) {
 			return
 		}
-		cfg, err := s.store.Patch(patch)
+		raw, err := s.patchConfig(patch)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		s.apply(cfg, nil)
-		writeJSON(w, http.StatusOK, s.store.Raw())
+		writeJSON(w, http.StatusOK, raw)
 	})
 	mux.HandleFunc("POST /api/tools/{name}", func(w http.ResponseWriter, r *http.Request) {
 		var args map[string]string
@@ -218,6 +240,24 @@ func (s *Server) routes(page []byte) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"result": result})
 	})
 	return mux
+}
+
+// patchConfig saves patch, applies the result and returns the saved keys.
+// Two patches never interleave: otherwise the later one could be saved
+// last and applied first, leaving the running configuration different
+// from the file.
+func (s *Server) patchConfig(patch map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	s.patchMu.Lock()
+	defer s.patchMu.Unlock()
+	cfg, err := s.store.Patch(patch)
+	if err != nil {
+		return nil, err
+	}
+	if s.patched != nil {
+		s.patched()
+	}
+	s.apply(cfg, nil)
+	return s.store.Raw(), nil
 }
 
 func (s *Server) action(w http.ResponseWriter, err error) {

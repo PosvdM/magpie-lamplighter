@@ -43,7 +43,7 @@ v0.1 有以下限制，README 改写时写进去：
 - macOS 和 Windows 上 agy 自己登录的第一个 Antigravity 账号，凭证在系统钥匙串中，Lamplighter 不读取，返回明确的错误；在 Magpie 中再添加一次该账号即可。
 - `auth_method` 不是 `consumer`（或为空）的 Google 账号要另行查询 Cloud Code project，v0.1 返回错误。
 - `MAGPIE_ADDR` 设为局域网地址时网关要求网关密钥，v0.1 不支持。
-- `-listen` 绑定非回环地址后，从其他机器访问内部监听会得到 403；从外部访问要用对外监听（`public_listen`）。
+- `-listen` 只能是回环地址，其他地址时程序报错退出；从其他机器访问要用对外监听（`public_listen`）。
 
 ## 交付
 

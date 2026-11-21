@@ -6,6 +6,7 @@ import (
 	// Embedded so that timezone works without tzdata in the container.
 	_ "time/tzdata"
 
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -196,8 +197,10 @@ func Default() Config {
 		PassiveSkipSeconds:    60,
 		PassiveSkipMaxMinutes: 30,
 		PublicListen:          "127.0.0.1:8318",
+		// Ignition sends model requests on the user's accounts, so a new
+		// installation leaves it off until the user turns it on.
 		Ignition: Ignition{
-			Enabled:                  true,
+			Enabled:                  false,
 			StartHour:                7,
 			EndHour:                  22,
 			EndGraceMinutes:          30,
@@ -365,6 +368,42 @@ func (c *Config) normalize() {
 			delete(c.AccountWeights, name)
 		}
 	}
+}
+
+// ErrSameKeys is the error of a configuration whose admin_key and mcp_key
+// are the same non-empty key. Each key opens only its part of the public
+// listener; one key for both would open both.
+var ErrSameKeys = errors.New("admin_key 与 mcp_key 不能相同")
+
+// ErrTimezone is the error of a timezone that is not an IANA time zone
+// name known to time.LoadLocation.
+var ErrTimezone = errors.New("timezone 不是有效的 IANA 时区名")
+
+// SameKeys reports whether admin_key and mcp_key are the same non-empty
+// key. Both are trimmed by Parse.
+func (c Config) SameKeys() bool { return c.AdminKey != "" && c.AdminKey == c.MCPKey }
+
+// TimezoneValid reports whether timezone is empty or a time zone name that
+// time.LoadLocation accepts.
+func (c Config) TimezoneValid() bool {
+	if c.Timezone == "" {
+		return true
+	}
+	_, err := time.LoadLocation(c.Timezone)
+	return err == nil
+}
+
+// Check returns the reason a configuration must not be saved: ErrSameKeys
+// or ErrTimezone. The errors name the setting, never its value. A
+// configuration read at startup is used despite them; see Open.
+func (c Config) Check() error {
+	if c.SameKeys() {
+		return ErrSameKeys
+	}
+	if !c.TimezoneValid() {
+		return ErrTimezone
+	}
+	return nil
 }
 
 // Location returns the time zone used for display and the ignition window:

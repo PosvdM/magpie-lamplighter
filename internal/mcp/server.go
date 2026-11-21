@@ -58,9 +58,17 @@ type Config struct {
 	// empty key keeps it off.
 	WebEnabled bool
 	AdminKey   string
+	// Refused, when not empty, is why the configuration may not open the
+	// listener: it serves neither part, and Public and State report
+	// Refused as their error.
+	Refused string
 }
 
 const errMCPKeyEmpty = "MCP key is empty"
+
+// drainTimeout bounds how long a listener that Configure replaces serves
+// the requests it has already read. Tests shorten it.
+var drainTimeout = 5 * time.Second
 
 // Server owns the listener and all HTTP handler lifetimes.
 type Server struct {
@@ -69,6 +77,7 @@ type Server struct {
 	version    string
 	state      State  // Error unused; see State
 	listenErr  string // bind or serve error of the listener
+	refused    string // Config.Refused
 	key        string // MCP key; empty while /mcp is off
 	adminKey   string // empty while the page is off
 	web        http.Handler
@@ -76,6 +85,8 @@ type Server struct {
 	done       chan struct{}
 	handlers   sync.WaitGroup
 	serves     sync.WaitGroup
+	drains     sync.WaitGroup // replaced listeners still serving; see drainLocked
+	stopCh     chan struct{}  // closed by Close; ends the drains
 	stopped    bool
 	retry      *time.Timer
 	retries    sync.WaitGroup
@@ -91,6 +102,7 @@ func New(backend Backend, version string) *Server {
 	return &Server{
 		backend: backend, version: version,
 		state:          State{Listen: "127.0.0.1:8318", Path: "/mcp"},
+		stopCh:         make(chan struct{}),
 		requests:       make(map[context.Context]admitted),
 		toolSlots:      make(chan struct{}, 4),
 		queryTimeout:   10 * time.Second,
@@ -111,6 +123,8 @@ func (s *Server) State() State {
 	defer s.mu.Unlock()
 	state := s.state
 	switch {
+	case state.Enabled && s.refused != "":
+		state.Error = s.refused
 	case state.Enabled && s.key == "":
 		state.Error = errMCPKeyEmpty
 	case state.Enabled:
@@ -125,8 +139,12 @@ func (s *Server) Public() Public {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	running := s.state.Running
+	err := s.listenErr
+	if s.refused != "" {
+		err = s.refused
+	}
 	return Public{
-		Listen: s.state.Listen, Running: running, Error: s.listenErr,
+		Listen: s.state.Listen, Running: running, Error: err,
 		Web: running && s.adminKey != "" && s.web != nil,
 		MCP: running && s.key != "",
 	}
@@ -142,7 +160,11 @@ func (s *Server) SetWeb(h http.Handler) {
 
 // Configure closes the old listener before binding the replacement. A failed
 // bind is retried every two seconds, so that the listener comes up once an
-// older process that still holds the address has exited.
+// older process that still holds the address has exited. The old listener
+// stops accepting connections at once and keeps serving the page and API
+// requests it has read for up to drainTimeout, in the background: one of
+// them may be the PATCH /api/config that moved the listener, waiting for
+// Configure to return.
 //
 // The listener is kept while it runs on the same address and still serves
 // /mcp or the page: changing a key or turning one of the two on or off
@@ -165,6 +187,10 @@ func (s *Server) Configure(c Config) {
 	if c.WebEnabled {
 		adminKey = c.AdminKey
 	}
+	if c.Refused != "" {
+		mcpKey, adminKey = "", ""
+	}
+	s.refused = c.Refused
 	if s.state.Running && s.state.Listen == c.Listen && (mcpKey != "" || adminKey != "" && s.web != nil) {
 		if mcpKey != s.key {
 			for _, request := range s.requests {
@@ -176,7 +202,7 @@ func (s *Server) Configure(c Config) {
 		s.key, s.adminKey, s.state.Enabled = mcpKey, adminKey, c.MCPEnabled
 		return
 	}
-	s.closeLocked()
+	s.drainLocked()
 	s.state = State{Enabled: c.MCPEnabled, Listen: c.Listen, Path: "/mcp"}
 	s.key, s.adminKey, s.listenErr = mcpKey, adminKey, ""
 	if s.neededLocked() {
@@ -236,16 +262,60 @@ func (s *Server) startLocked() {
 	}()
 }
 
-func (s *Server) closeLocked() {
+// stopRetryLocked stops a pending bind retry.
+func (s *Server) stopRetryLocked() {
 	s.generation++
-	for _, request := range s.requests {
-		request.cancel()
-	}
 	if s.retry != nil {
 		if s.retry.Stop() {
 			s.retries.Done()
 		}
 		s.retry = nil
+	}
+}
+
+// drainLocked replaces the listener for Configure. MCP requests are
+// canceled, as when /mcp is turned off. The listener is closed before
+// drainLocked returns, so the address is free to bind again; the page and
+// API requests in progress are answered by a background Shutdown, which
+// closes their connections after drainTimeout or when Close is called.
+func (s *Server) drainLocked() {
+	s.stopRetryLocked()
+	for _, request := range s.requests {
+		if request.mcp {
+			request.cancel()
+		}
+	}
+	if s.http != nil {
+		server := s.http
+		s.drains.Add(1)
+		go func() {
+			defer s.drains.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			go func() {
+				select {
+				case <-s.stopCh:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+			if server.Shutdown(ctx) != nil {
+				_ = server.Close()
+			}
+		}()
+		// Shutdown closes the listener first, and Serve then returns.
+		<-s.done
+		s.http = nil
+	}
+	s.state.Running = false
+}
+
+// closeLocked closes the listener and its connections and cancels every
+// request, for Close.
+func (s *Server) closeLocked() {
+	s.stopRetryLocked()
+	for _, request := range s.requests {
+		request.cancel()
 	}
 	if s.http != nil {
 		_ = s.http.Close()
@@ -258,9 +328,13 @@ func (s *Server) closeLocked() {
 // Close releases the port and waits for canceled requests before plugin unload.
 func (s *Server) Close() {
 	s.mu.Lock()
+	if !s.stopped {
+		close(s.stopCh)
+	}
 	s.stopped = true
 	s.closeLocked()
 	s.mu.Unlock()
+	s.drains.Wait()
 	s.handlers.Wait()
 	s.retries.Wait()
 	s.serves.Wait()

@@ -1,10 +1,15 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseEmptyUsesDefaults(t *testing.T) {
@@ -12,7 +17,7 @@ func TestParseEmptyUsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.PollIntervalSeconds != 300 || !cfg.Ignition.Enabled || cfg.Ignition.StartHour != 7 {
+	if cfg.PollIntervalSeconds != 300 || cfg.Ignition.Enabled || cfg.Ignition.StartHour != 7 {
 		t.Fatalf("unexpected defaults %+v", cfg)
 	}
 	if !cfg.Provider("codex").Ignite || cfg.Provider("antigravity").Ignite {
@@ -139,5 +144,106 @@ func TestParseAccountWeightsDropsInvalidWeights(t *testing.T) {
 	}
 	if len(cfg.AccountWeights) != 2 || cfg.AccountWeights["a.json"] != 5 || cfg.AccountWeights["b.json"] != 0.5 {
 		t.Fatalf("account weights %v", cfg.AccountWeights)
+	}
+}
+
+// Ignition is off on a new installation and when a file leaves out
+// ignition.enabled; a file that sets it keeps its value.
+func TestIgnitionEnabledDefault(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{"ignition:\n  start_hour: 8\n", false},
+		{"ignition:\n  enabled: true\n", true},
+		{`{"ignition":{"enabled":true,"start_hour":8}}`, true},
+		{`{"ignition":{"enabled":false}}`, false},
+	} {
+		cfg, err := Parse([]byte(tc.raw))
+		if err != nil || cfg.Ignition.Enabled != tc.want {
+			t.Fatalf("%q: enabled=%v err=%v", tc.raw, cfg.Ignition.Enabled, err)
+		}
+	}
+	_, cfg, err := Open(filepath.Join(t.TempDir(), FileName))
+	if err != nil || cfg.Ignition.Enabled {
+		t.Fatalf("missing file: enabled=%v err=%v", cfg.Ignition.Enabled, err)
+	}
+}
+
+func TestCheck(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want error
+	}{
+		{"", nil},
+		{"admin_key: a\nmcp_key: b\n", nil},
+		{"admin_key: ''\nmcp_key: ''\n", nil},
+		{"admin_key: k\nmcp_key: k\n", ErrSameKeys},
+		{"admin_key: ' k '\nmcp_key: k\n", ErrSameKeys},
+		{"timezone: Asia/Shanghai\n", nil},
+		{"timezone: UTC\n", nil},
+		{"timezone: ' '\n", nil},
+		{"timezone: Mars/Olympus\n", ErrTimezone},
+		{"timezone: ../../etc/passwd\n", ErrTimezone},
+	} {
+		cfg, err := Parse([]byte(tc.raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Check(); !errors.Is(got, tc.want) {
+			t.Fatalf("%q: %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestPatchRefusesSameKeysAndInvalidTimezone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	store, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Patch(map[string]json.RawMessage{"admin_key": json.RawMessage(`"secret"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, patch := range []map[string]json.RawMessage{
+		{"mcp_key": json.RawMessage(`" secret "`)},
+		{"admin_key": json.RawMessage(`"x"`), "mcp_key": json.RawMessage(`"x"`)},
+		{"timezone": json.RawMessage(`"Not/AZone"`)},
+	} {
+		_, err := store.Patch(patch)
+		if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "Not/AZone") {
+			t.Fatalf("%s: %v", patch, err)
+		}
+	}
+	raw := store.Raw()
+	if len(raw) != 1 || string(raw["admin_key"]) != `"secret"` {
+		t.Fatalf("a refused patch changed the store: %v", raw)
+	}
+	_, cfg, err := Open(path)
+	if err != nil || cfg.AdminKey != "secret" || cfg.MCPKey != "" || cfg.Timezone != "" {
+		t.Fatalf("a refused patch reached the file: %+v %v", cfg, err)
+	}
+}
+
+// A file written by hand may hold what Patch refuses. Open keeps it: an
+// invalid timezone falls back to the process time zone with a warning.
+func TestOpenKeepsCheckedSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, []byte(`{"timezone":"Mars/Olympus","admin_key":"k","mcp_key":"k"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	store, cfg, err := Open(path)
+	if err != nil || store == nil {
+		t.Fatal(err)
+	}
+	if !cfg.SameKeys() || cfg.Location() != time.Local {
+		t.Fatalf("cfg %+v location %v", cfg, cfg.Location())
+	}
+	if !strings.Contains(logged.String(), "timezone") || strings.Contains(logged.String(), "Mars") {
+		t.Fatalf("warning %q", logged.String())
 	}
 }
