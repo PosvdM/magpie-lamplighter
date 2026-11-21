@@ -52,9 +52,9 @@ func TestAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []host.Account{
-		{Pin: "codex/1a2b3c4d5e6f7a8b", Provider: "codex", Label: "a@example.com · Team", Email: "a@example.com", Plan: "team", On: true},
-		{Pin: "claude/0f0e0d0c0b0a0908", Provider: "claude", Label: "主力号", Email: "b@example.com", Plan: "max", On: false},
-		{Pin: "agy-cli/ffeeddccbbaa9988", Provider: "agy-cli", Label: "c@example.com", Email: "c@example.com", On: true},
+		{Pin: "codex/1a2b3c4d5e6f7a8b", Provider: "codex", Label: "a@example.com · Team", Email: "a@example.com", User: "a@example.com · Team", Plan: "team", On: true},
+		{Pin: "claude/0f0e0d0c0b0a0908", Provider: "claude", Label: "主力号", Email: "b@example.com", User: "b@example.com", Plan: "max", On: false},
+		{Pin: "agy-cli/ffeeddccbbaa9988", Provider: "agy-cli", Label: "c@example.com", Email: "c@example.com", User: "c@example.com", On: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("accounts = %+v", got)

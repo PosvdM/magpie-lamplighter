@@ -67,6 +67,11 @@ type Account struct {
 	// Magpie knows one.
 	Label string `json:"label,omitempty"`
 	Email string `json:"email,omitempty"`
+	// User is Magpie's name of the account, the user of GET
+	// /v1/magpie/accounts as it is: the email, and for a seat in a Team or
+	// a similar workspace the workspace too, such as "a@b.com · Team".
+	// Magpie's per-account settings are keyed by it in lower case.
+	User string `json:"user,omitempty"`
 	// Plan is Magpie's plan name, for display only.
 	Plan string `json:"plan,omitempty"`
 	// On is false for an account the user switched off in Magpie.

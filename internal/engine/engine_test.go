@@ -140,7 +140,7 @@ func newTestEngineIn(t *testing.T, h *fakeHost, c *clock, dir string) (*Engine, 
 func standardHost(c *clock) *fakeHost {
 	return &fakeHost{
 		auths: []authEntry{
-			{ID: "codex-a.json", AuthIndex: "1", Name: "codex-a.json", Provider: "codex", Email: "alice.work@example.com"},
+			{ID: "codex-a.json", AuthIndex: "1", Name: "codex-a.json", Provider: "codex", Email: "alice.work@example.com", User: "alice.work@example.com · Team"},
 			{ID: "codex-b.json", AuthIndex: "2", Name: "codex-b.json", Provider: "codex", Email: "bob.team@example.net"},
 			{ID: "codex-c.json", AuthIndex: "5", Name: "codex-c.json", Provider: "codex", Disabled: true},
 			{ID: "claude.json", AuthIndex: "3", Name: "claude.json", Provider: "claude", Email: "me@example.com"},

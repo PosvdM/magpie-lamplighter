@@ -111,6 +111,12 @@ func TestStatusMagpieWarmup(t *testing.T) {
 	if claude == nil || claude.Provider != "claude" || claude.Email != "me@example.com" {
 		t.Fatalf("accounts handed over %+v", h.seen)
 	}
+	// Magpie's account name goes along: its per-account settings use it.
+	for _, a := range h.seen {
+		if a.Pin == "1" && (a.User != "alice.work@example.com · Team" || a.Email != "alice.work@example.com") {
+			t.Fatalf("Codex seat handed over as %+v", a)
+		}
+	}
 	// Only accounts that Lamplighter ignites are listed.
 	setConfig := func(change func(*config.Config)) {
 		e.mu.Lock()

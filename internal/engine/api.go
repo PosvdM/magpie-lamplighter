@@ -433,7 +433,7 @@ func (e *Engine) magpieWarmup() []string {
 		if provider == "" {
 			provider = cred.Provider
 		}
-		accounts = append(accounts, host.Account{Pin: cred.AuthIndex, Provider: provider, Email: cred.Email, On: true})
+		accounts = append(accounts, host.Account{Pin: cred.AuthIndex, Provider: provider, Email: cred.Email, User: cred.User, On: true})
 	}
 	e.mu.Unlock()
 	if len(accounts) == 0 {

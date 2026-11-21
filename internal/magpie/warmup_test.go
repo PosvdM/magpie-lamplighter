@@ -69,3 +69,32 @@ func TestMagpieWarmupFormat(t *testing.T) {
 		t.Fatalf("no config dir: %v %v", got, err)
 	}
 }
+
+// TestMagpieWarmupSeats matches a ChatGPT account's own time of day by
+// Magpie's account name: a Team seat is "a@b.com · Team", apart from a
+// personal plan of the same email.
+func TestMagpieWarmupSeats(t *testing.T) {
+	accounts := []host.Account{
+		{Pin: "codex/personal", Provider: "codex", Email: "a@example.com", User: "a@example.com"},
+		{Pin: "codex/team", Provider: "codex", Email: "a@example.com", User: "a@example.com · Team"},
+	}
+	dir := t.TempDir()
+	h := &Host{ConfigDir: dir}
+	for _, tc := range []struct {
+		name, settings string
+		want           []string
+	}{
+		{"seat only", `{"codexWarmAtOf":{"a@example.com · team":"07:30"}}`, []string{"codex/team"}},
+		{"personal only", `{"codexWarmAtOf":{"a@example.com":"07:30"}}`, []string{"codex/personal"}},
+		{"seat off", `{"codexWarmAts":["06:00"],"codexWarmAtOf":{"A@example.com · Team":"off"}}`, []string{"codex/personal"}},
+		{"personal off", `{"codexWarmAts":["06:00"],"codexWarmAtOf":{"a@example.com":"off"}}`, []string{"codex/team"}},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(tc.settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.MagpieWarmup(accounts)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, %v; want %v", tc.name, got, err, tc.want)
+		}
+	}
+}

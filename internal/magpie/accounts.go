@@ -64,6 +64,7 @@ func (h *Host) Accounts(ctx context.Context) ([]host.Account, error) {
 			Provider: a.Provider,
 			Label:    strings.TrimSpace(a.Label),
 			Email:    emailOf(a.User),
+			User:     strings.TrimSpace(a.User),
 			Plan:     a.Plan,
 			On:       *a.On,
 		})

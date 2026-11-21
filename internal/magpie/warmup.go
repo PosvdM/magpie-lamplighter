@@ -23,8 +23,9 @@ import (
 //     account whose 5-hour window is not running gets one. codexWarmAt and
 //     claudeWarmAt are the single time an older Magpie wrote, used when the
 //     list is absent.
-//   - codexWarmAtOf: a ChatGPT account's own time of day by its user name in
-//     lower case, "off" for none, in place of codexWarmAts.
+//   - codexWarmAtOf: a ChatGPT account's own time of day by its Magpie name
+//     (host.Account.User, "a@b.com · Team" for a workspace seat) in lower
+//     case, "off" for none, in place of codexWarmAts.
 //
 // The warm-up runs whatever the "Warm-up and check-in" built-in plugin
 // shows: that plugin is only the settings' place on the page.
@@ -45,7 +46,7 @@ type warmupSettings struct {
 // the week resets and does not schedule the 5-hour window.
 //
 // Accounts are matched by provider ("codex" or "claude") and, for a
-// ChatGPT account's own time of day, by Email, which is Magpie's user name.
+// ChatGPT account's own time of day, by User, else by Email.
 // A missing settings.json means no warm-up. A file that is not this format
 // is an error wrapping host.ErrFormat.
 func (h *Host) MagpieWarmup(accounts []host.Account) ([]string, error) {
@@ -122,7 +123,11 @@ func (s warmupSettings) fiveHour(account host.Account) bool {
 		if warmValue(s.CodexWarmup) == "all" {
 			return true
 		}
-		user := strings.ToLower(strings.TrimSpace(account.Email))
+		user := strings.TrimSpace(account.User)
+		if user == "" {
+			user = account.Email
+		}
+		user = strings.ToLower(strings.TrimSpace(user))
 		for name, at := range s.CodexWarmAtOf {
 			if user != "" && strings.ToLower(strings.TrimSpace(name)) == user {
 				at = strings.ToLower(strings.TrimSpace(at))

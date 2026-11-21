@@ -31,7 +31,9 @@ type Cred struct {
 	// Provider.
 	HostProvider string `json:"host_provider,omitempty"`
 	Email        string `json:"email,omitempty"`
-	Disabled     bool   `json:"disabled"`
+	// User is Magpie's name of the account (host.Account.User).
+	User     string `json:"user,omitempty"`
+	Disabled bool   `json:"disabled"`
 	// Note names the account: account_names, else Magpie's label when it
 	// is not the email.
 	Note string `json:"note,omitempty"`
@@ -246,6 +248,7 @@ func (e *Engine) loadCreds(ctx context.Context, cfg config.Config) ([]*Cred, err
 			Provider:     provider,
 			HostProvider: hostProvider,
 			Email:        account.Email,
+			User:         account.User,
 			Note:         accountNote(cfg, account),
 		})
 		counts[provider]++
@@ -302,7 +305,7 @@ func accountNote(cfg config.Config, account host.Account) string {
 
 // hostAccount is the host's view of cred.
 func hostAccount(cred *Cred) host.Account {
-	return host.Account{Pin: cred.AuthIndex, Provider: cred.HostProvider, Email: cred.Email, On: true}
+	return host.Account{Pin: cred.AuthIndex, Provider: cred.HostProvider, Email: cred.Email, User: cred.User, On: true}
 }
 
 // shouldSkipActive reports whether the active query of cred can be skipped at

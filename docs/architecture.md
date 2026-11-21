@@ -55,7 +55,7 @@ npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `n
 
 | 方法 | 来源 |
 | --- | --- |
-| `Accounts` | 网关的 `GET /v1/magpie/accounts`，只取 `kind` 为 `account` 的条目（API key 没有额度窗口）。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控。`Email` 取 `user` 中的邮箱，Team 等席位的 `a@b.com · Team` 取 `·` 之前的部分 |
+| `Accounts` | 网关的 `GET /v1/magpie/accounts`，只取 `kind` 为 `account` 的条目（API key 没有额度窗口）。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控。`User` 原样取 `user`（Magpie 的账号名，Magpie 按它的小写保存每个账号的设置）；`Email` 取 `user` 中的邮箱：Codex 的 Team、Business 等工作区席位和 Claude 的 Team、Enterprise 席位的 `user` 带上工作区（如 `a@b.com · Team`），`Email` 取 `·` 之前的部分，用于显示和打码 |
 | `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的文件，见下文“凭证” |
 | `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。见下文“额度记录” |
 | `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次尝试计算，过早时返回 `ErrRefreshLimited`。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒，请求的超时为 45 秒。引擎只在手动刷新凭证已过期的账号时调用，见下文“额度记录” |
@@ -511,9 +511,9 @@ Magpie 自带的预热（内置插件“Warm-up and check-in”的设置，由 M
 | --- | --- |
 | `codexWarmup`、`claudeWarmup` | `""` 或 `off` 关闭，`week` 只在 7 天窗口重置时预热，`all` 同时预热 5 小时窗口 |
 | `codexWarmAts`、`claudeWarmAts` | 每天开启 5 小时窗口的时间点列表（如 `06:00`）；列表不存在时读旧版 Magpie 写的单个时间 `codexWarmAt`、`claudeWarmAt`，空列表表示关闭 |
-| `codexWarmAtOf` | ChatGPT 账号自己的时间点，以小写的用户名（邮箱）为键，`off` 表示不预热，代替 `codexWarmAts` |
+| `codexWarmAtOf` | ChatGPT 账号自己的时间点，以小写的 Magpie 账号名（`host.Account.User`，工作区席位为 `a@b.com · team`）为键，`off` 表示不预热，代替 `codexWarmAts` |
 
-预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 和邮箱匹配。
+预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 匹配，`codexWarmAtOf` 按账号的 `User` 匹配（没有时用 `Email`），所以同一邮箱的个人账号和 Team 席位各自对应自己的设置。
 
 状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了这类预热的账号 pin，按字符串排序，没有时为空数组（不为 `null`）。Lamplighter 会点火的账号是：`ignition.enabled` 开启，且账号至少有一个额度组是点火目标（`groupIgnitable`：服务的 `ignite` 开启，`groups` 为空或包含该额度组的名称）。`ignition.enabled` 关闭时不读取设置，直接为空数组；还没有查询到额度组的账号不列出。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
 

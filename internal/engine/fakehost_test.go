@@ -16,12 +16,12 @@ import (
 // authEntry is an account the fake host lists. AuthIndex is its pin, and
 // Note its Magpie label.
 type authEntry struct {
-	ID, AuthIndex, Name, Provider, Email, Note string
-	Disabled                                   bool
+	ID, AuthIndex, Name, Provider, Email, Note, User string
+	Disabled                                         bool
 }
 
 func (a authEntry) account() host.Account {
-	return host.Account{Pin: a.AuthIndex, Provider: a.Provider, Label: a.Note, Email: a.Email, On: !a.Disabled}
+	return host.Account{Pin: a.AuthIndex, Provider: a.Provider, Label: a.Note, Email: a.Email, User: a.User, On: !a.Disabled}
 }
 
 // httpRequest and httpResponse are the quota requests the fake vendor sees.
