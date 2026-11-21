@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,6 +50,10 @@ type Store struct {
 // Open reads the configuration file at path. A missing file is an empty
 // configuration; a file that does not parse is an error, and the caller
 // keeps the defaults without writing over the file.
+//
+// A configuration that Check refuses is still returned: an invalid
+// timezone falls back to the time zone of the process (see
+// Config.Location) with a warning, and the caller handles SameKeys.
 func Open(path string) (*Store, Config, error) {
 	s := &Store{path: path, raw: map[string]json.RawMessage{}}
 	data, err := os.ReadFile(path)
@@ -65,6 +70,9 @@ func Open(path string) (*Store, Config, error) {
 	if err != nil {
 		return nil, Default(), err
 	}
+	if !cfg.TimezoneValid() {
+		log.Printf("warning: %s: %v; using the time zone of the process", path, ErrTimezone)
+	}
 	return s, cfg, nil
 }
 
@@ -80,8 +88,12 @@ func (s *Store) Raw() map[string]json.RawMessage {
 }
 
 // Patch replaces the given top-level keys, a null value deleting the key.
-// The result must parse; it is then written to the file whole (a temporary
-// file and a rename) and returned.
+// The result must parse and pass Config.Check; it is then written to the
+// file whole (a temporary file and a rename) and returned.
+//
+// Patch does not apply the result; a caller that applies it holds its own
+// lock across Patch and the apply, so that the order of the saved
+// configurations is also the order in which they are applied.
 func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -102,6 +114,9 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	}
 	cfg, err := Parse(data)
 	if err != nil {
+		return Config{}, err
+	}
+	if err := cfg.Check(); err != nil {
 		return Config{}, err
 	}
 	if err := writeFile(s.path, data); err != nil {

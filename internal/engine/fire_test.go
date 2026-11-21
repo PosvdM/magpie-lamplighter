@@ -123,6 +123,7 @@ func TestStatusMagpieWarmup(t *testing.T) {
 		defer e.mu.Unlock()
 		cfg := config.Default()
 		cfg.Timezone = "Asia/Shanghai"
+		cfg.Ignition.Enabled = true
 		change(&cfg)
 		e.cfg = cfg
 	}

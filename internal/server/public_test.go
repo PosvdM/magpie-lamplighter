@@ -161,3 +161,24 @@ func TestShutdownWithPublicRequest(t *testing.T) {
 	}
 	<-sent
 }
+
+// The PATCH that moves the public listener is answered on the connection
+// it came on, and the listener comes up at the new address.
+func TestPublicPatchMovesListener(t *testing.T) {
+	s, store := newServer(t)
+	addr, moved := freeAddr(t), freeAddr(t)
+	patch := fmt.Sprintf(`{"public_listen":%q,"web_enabled":true,"admin_key":"k"}`, addr)
+	if code, _ := do(t, s.Handler(), http.MethodPatch, "/api/config", patch); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	code, out := request(t, http.MethodPatch, "http://"+addr+"/api/config", "k", fmt.Sprintf(`{"public_listen":%q}`, moved))
+	if code != http.StatusOK || out["public_listen"] != moved {
+		t.Fatalf("move: %d %v", code, out)
+	}
+	if string(store.Raw()["public_listen"]) != fmt.Sprintf("%q", moved) {
+		t.Fatalf("saved %v", store.Raw())
+	}
+	if code, _ := request(t, http.MethodGet, "http://"+moved+"/api/status", "k", ""); code != http.StatusOK {
+		t.Fatalf("new address: %d", code)
+	}
+}

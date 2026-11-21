@@ -27,10 +27,12 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 
 ## 进程和数据目录
 
-`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥，地址不是回环地址时 `main.go` 记录一条警告；请求的 Host 不是回环地址时返回 403，见“HTTP 接口”的“内部监听”。需要从外部访问时使用对外监听。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
+`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`）。内部监听不要求密钥，`-listen` 的主机部分必须是回环地址（`127.0.0.0/8`、`::1` 或 `localhost`），否则程序报错退出（`main.go` 的 `checkListen`）；需要从其他机器访问时使用对外监听。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
-- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。
+- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。手工写入、`PATCH /api/config` 会拒绝的设置在启动时照常加载：`timezone` 无效时记一条警告日志，使用进程的时区；`admin_key` 与 `mcp_key` 相同时见“HTTP 接口”的“对外监听”。
 - `state.json`、`history/`、`instance.lock`：见下文“数据”。
+
+启动顺序（`main.go` 的 `run`）：检查 `-listen`，创建数据目录，取得 `instance.lock`，然后读取 `config.json`，开内部监听，按配置开对外监听，最后启动后台循环（它读取 `state.json`）。`instance.lock` 是独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个进程使用数据目录。Magpie 的 `plugin update` 等命令会另起一个插件宿主，它启动的程序使用另一个端口和同一个数据目录；这个程序拿不到锁时每秒重试一次（`lockRetry`），不读取数据目录中的文件，也不监听任何端口，收到 SIGINT 或 SIGTERM 时直接退出。拿到锁时前一个进程已经退出，所以从磁盘读到的是它最后写入的配置和状态。等待期间插件宿主调用 tool 连不上内部监听，约 10 秒后报错。进程退出时先关闭监听、停止后台循环，再释放锁。
 
 ## 插件外壳
 
@@ -112,8 +114,8 @@ Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gem
 
 Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）：
 
-- 内部监听：`-listen` 的地址，只绑定回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。路由外面另有 Host 检查、页面令牌和 CORS，见下文“内部监听”。
-- 对外监听：配置中的 `public_listen`（默认 `127.0.0.1:8318`），供服务器前面的域名或反向代理使用，页面和接口要求 `admin_key`，见下文“对外监听”。
+- 内部监听：`-listen` 的地址，只能是回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。路由外面另有 Host 检查、浏览器请求检查和 CORS，见下文“内部监听”。
+- 对外监听：配置中的 `public_listen`（默认 `127.0.0.1:8318`），供服务器前面的域名或反向代理使用。`GET /` 和 `HEAD /` 不要求密钥，`/api/*` 要求 `admin_key`，`/mcp` 要求 `mcp_key`，见下文“对外监听”。
 
 路由：
 
@@ -128,24 +130,25 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 | `POST /api/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
 | `POST /api/check-update` | 检查新版本，返回状态；页面打开时调用 |
 | `GET /api/config` | 已保存的配置原文，含密钥，供设置页填表 |
-| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析，然后整体写入 `config.json` 并应用。返回保存后的原文 |
+| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析并通过 `config.Config.Check`，然后整体写入 `config.json` 并应用。返回保存后的原文。`Check` 拒绝去掉首尾空白后相同的非空 `admin_key` 和 `mcp_key`，以及 `time.LoadLocation` 不认识的非空 `timezone`，返回 400，错误信息只写字段名，不含值。合并、写盘、应用到引擎和对外监听、生成响应在 `server.Server.patchMu` 内依次完成，并发的请求按保存的顺序应用，运行中的配置与文件一致 |
 | `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
 `account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
 
 ### 内部监听
 
-内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。
+内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。HTTP 服务（`main.go` 的 `newInternalServer`）读请求头限时 10 秒、读整个请求 30 秒、空闲连接 2 分钟，请求头最多 64 KiB；不限制写响应的时间，因为 tool 调用最长 50 秒，页面的操作最多等后台循环 3 分钟。
 
-**Host 检查**：请求的 Host 不是 `localhost` 或回环 IP（`127.0.0.0/8`、`::1`，端口不限）时返回 403，包括 `GET /`、`/api/*` 和预检请求。内部监听不要求密钥，恶意域名把自己的名字重新解析到 `127.0.0.1` 后，在浏览器中与内部监听同源，能读到页面和 `GET /api/config` 中的密钥；这类请求的 Host 是那个域名。合法的访问都用回环地址：Magpie 的页面服务代理把 Host 设为 `127.0.0.1:<端口>`（Magpie 源码 `internal/gui/pageservice.go` 的 `servePageService`），桌面窗口中的页面直接打开 `http://127.0.0.1:<端口>/`，插件宿主经 `127.0.0.1` 调用 tool。所以把 `-listen` 绑定到其他地址后从别的机器访问，也会得到 403。
+**Host 检查**：请求的 Host 不是 `localhost` 或回环 IP（`127.0.0.0/8`、`::1`，端口不限）时返回 403，包括 `GET /`、`/api/*` 和预检请求。内部监听不要求密钥，恶意域名把自己的名字重新解析到 `127.0.0.1` 后，在浏览器中与内部监听同源，能读到页面和 `GET /api/config` 中的密钥；这类请求的 Host 是那个域名。合法的访问都用回环地址：Magpie 的页面服务代理把 Host 设为 `127.0.0.1:<端口>`（Magpie 源码 `internal/gui/pageservice.go` 的 `servePageService`），桌面窗口中的页面直接打开 `http://127.0.0.1:<端口>/`，插件宿主经 `127.0.0.1` 调用 tool。`-listen` 只能绑定回环地址（见“进程和数据目录”），Host 检查防的是浏览器中的 DNS 重绑定。
 
 **页面令牌**：`server.New` 用 `crypto/rand` 生成 32 字节随机数，以 base64url（无填充）编码作为页面令牌，进程运行期间不变。内部监听的 `GET /` 返回 `web.PageWith(令牌)`：它把页面中的 `<meta name="lamplighter-page" content="">` 填上令牌，页面没有这个标签时原样返回。页面请求接口时在 `X-Lamplighter-Page` 请求头中带上令牌。对外监听返回不带令牌的 `web.Page()`。
 
-**CORS**：Magpie 的插件页面在 `sandbox="allow-scripts"` 的 iframe 中运行，页面服务代理还加上 CSP `sandbox`，页面是不透明源，请求自己的 `api/…` 时带 `Origin: null`，没有 CORS 头就读不到响应。任何网站都能建这样的 iframe，所以只对带页面令牌的请求开放：
+**浏览器请求和 CORS**：Magpie 的插件页面在 `sandbox="allow-scripts"` 的 iframe 中运行，页面服务代理还加上 CSP `sandbox`，页面是不透明源，请求自己的 `api/…` 时带 `Origin: null`，没有 CORS 头就读不到响应。任何网页都能向内部监听发请求（包括在 sandbox iframe 中带 `Origin: null`），读不到响应时路由也已经执行，刷新、点火、测试推送和修改配置都会生效。所以浏览器发出的 `/api/*` 请求在执行路由之前检查：
 
-- `/api/*` 的 `OPTIONS` 预检且 `Origin` 为 `null`：返回 204，带 `Access-Control-Allow-Origin: null`、`Access-Control-Allow-Methods: GET, POST, PATCH`、`Access-Control-Allow-Headers: Content-Type, Authorization, X-Lamplighter-Page`、`Access-Control-Max-Age: 600`、`Vary: Origin`。预检本身不带自定义请求头，所以不检查令牌。
-- `/api/*` 的其他请求：只有 `Origin` 为 `null` 且 `X-Lamplighter-Page` 等于令牌时（两边先求 SHA-256 再常数时间比较），才加 `Access-Control-Allow-Origin: null` 和 `Vary: Origin`。其余请求不加 CORS 头，但照常处理：没有 `Origin` 的请求（插件宿主调用 `POST /api/tools/{name}`）和同源请求不受影响。别的网站在 sandbox iframe 中仍能发出请求，只是读不到响应；令牌只在内部监听返回的页面里，它拿不到。
-- 不返回 `Access-Control-Allow-Credentials`，`GET /` 不加 CORS 头。
+- `/api/*` 的 `OPTIONS` 预检且 `Origin` 为 `null`：返回 204，带 `Access-Control-Allow-Origin: null`、`Access-Control-Allow-Methods: GET, POST, PATCH`、`Access-Control-Allow-Headers: Content-Type, Authorization, X-Lamplighter-Page`、`Access-Control-Max-Age: 600`、`Vary: Origin`。预检本身不带自定义请求头，所以不检查令牌；预检不执行路由。
+- 带 `Origin` 或 `Sec-Fetch-Site` 请求头的 `/api/*` 请求（包括其他预检）是浏览器发出的，网页无法去掉这两个头。只有同时满足以下两条才执行路由，否则返回 403：`X-Lamplighter-Page` 等于令牌（两边先求 SHA-256 再常数时间比较）；来源是插件页面，即 `Origin` 为 `null`、`Origin` 与内部监听同源（`http://` 加请求的 Host），或没有 `Origin` 而 `Sec-Fetch-Site` 为 `same-origin`。`Origin` 为 `null` 时响应带 `Access-Control-Allow-Origin: null` 和 `Vary: Origin`。令牌只在内部监听返回的页面里，其他网页拿不到。
+- 不带这两个头的请求照常处理，不加 CORS 头：插件宿主（Bun）调用 `POST /api/tools/{name}` 时不带它们。
+- 不返回 `Access-Control-Allow-Credentials`。`GET /` 不是 `/api/*`，不做这项检查，也不加 CORS 头，浏览器可以直接打开。
 
 对外监听不加 CORS：独立访问时页面与接口同源，鉴权靠 `admin_key`。
 
@@ -159,17 +162,18 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 | `/mcp`，见“MCP” | `mcp_enabled` 为真且 `mcp_key` 非空 | `Authorization: Bearer <mcp_key>`，以及 Origin 校验 |
 
 - 两部分都没有开启时不监听，端口释放。`admin_key` 不校验格式，非空即可；设置页生成的密钥为 `lladm_` 加 32 字节随机数的 base64url 编码。
+- `admin_key` 与 `mcp_key` 不能相同：同一把密钥会同时打开接口和 `/mcp`。`PATCH /api/config` 拒绝这样的配置；手工编辑的 `config.json` 在启动时含有相同的密钥时，`server.Server.apply` 以 `mcp.Config.Refused` 交给 `mcp.Server.Configure`，对外监听两部分都不提供，记一条错误日志，`status.public.error`（开启 MCP 时还有 `status.mcp.error`）说明原因，不含密钥。
 - `GET /`（以及 `HEAD /`）不要求密钥：页面本身不含数据，浏览器打开页面时也带不上请求头。页面请求接口收到 401 后让用户输入管理密钥，见“管理页面”。其他路径（包括不存在的路径）缺少密钥或密钥错误时返回 401 和 `WWW-Authenticate: Bearer`，不暴露有哪些路由；带对密钥后，不存在的路由返回 404。页面和接口没有开启时，`/mcp` 以外的路径都返回 404；`/mcp` 没有开启时返回 404。
 - 两把密钥只开放各自的部分：`admin_key` 不能访问 `/mcp`，`mcp_key` 不能访问页面和接口。比较方法相同：对 `Bearer <密钥>` 和请求的 `Authorization` 头各求 SHA-256，再常数时间比较，不泄露密钥长度和前缀。
 - 页面和接口不做 Origin 校验，也不返回 CORS 头：密钥在请求头中，其他网站的页面无法让浏览器带上它。
-- **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。绑定失败时记录错误，每 2 秒重试。
+- **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。需要重新绑定时（`mcp.Server.drainLocked`），旧监听立即停止接受连接、端口释放，MCP 请求被取消；已读入的页面和接口请求在后台由 `http.Server.Shutdown` 等待回完，最多 5 秒（`drainTimeout`），超时或 `mcp.Server.Close` 时关闭连接。`Configure` 不等待这些请求，因为修改 `public_listen` 的 `PATCH /api/config` 本身就在等 `Configure` 返回。绑定失败时记录错误，每 2 秒重试。
 - **关闭**：`server.Server.Shutdown` 先在 `server.Server.mu` 内标记停止，然后释放这把锁，再关闭对外监听（取消并等待其中的请求），最后停止引擎。对外的接口请求读取状态时要取这把锁，持锁等待会死锁。停止后的实例不再应用配置，也不重新监听。
 - **超时**：读请求头 5 秒、读请求 15 秒、写响应 190 秒、空闲连接 30 秒，请求头最多 16 KiB，页面、接口和 `/mcp` 共用。插件宿主的 tool 调用走内部监听，经对外接口调用 `POST /api/tools/{name}` 同样最长 50 秒。
 
 状态接口中的对外监听状态：
 
-- `public`：`listen`（`public_listen`）、`running`（正在监听）、`error`（绑定或运行的错误，没有时为空字符串）、`web`（页面和接口正在提供）、`mcp`（`/mcp` 正在提供）。两部分都没有开启时 `running`、`web`、`mcp` 都为假。
-- `mcp`：`enabled`（`mcp_enabled`）、`listen`、`running`（监听正在运行）、`error`、`path`（固定为 `/mcp`）。`error` 在开启 MCP 但 `mcp_key` 为空时为 `MCP key is empty`，开启 MCP 时为监听的错误，关闭 MCP 时为空。
+- `public`：`listen`（`public_listen`）、`running`（正在监听）、`error`（`admin_key` 与 `mcp_key` 相同的原因，或绑定、运行的错误；没有时为空字符串）、`web`（页面和接口正在提供）、`mcp`（`/mcp` 正在提供）。两部分都没有开启时 `running`、`web`、`mcp` 都为假。
+- `mcp`：`enabled`（`mcp_enabled`）、`listen`、`running`（监听正在运行）、`error`、`path`（固定为 `/mcp`）。开启 MCP 时，`error` 依次为 `admin_key` 与 `mcp_key` 相同的原因、`mcp_key` 为空时的 `MCP key is empty`、监听的错误；关闭 MCP 时为空。
 - `status.config` 不含 `admin_key` 和 `mcp_key`，以 `admin_key_set`、`mcp_key_set` 表示是否已设置；`GET /api/config` 返回原值供设置页填表。
 
 ## 管理页面
@@ -185,7 +189,7 @@ iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 
 - 复制文字时，沙箱中不调用 Clipboard API，改用选中文本加 `execCommand("copy")`；失败时提示手动复制，或经对外地址在浏览器中打开页面。截图见下文。
 - 管理密钥输入框的按钮为 `type="button"`，点击按钮和在输入框中按回车都提交密钥，不依赖表单的提交事件。
 
-页面在沙箱中请求自己的 `api/…` 也是跨源请求（`Origin: null`）。内部监听把进程启动时生成的令牌写入页面的 `<meta name="lamplighter-page" content="">`，页面读取它（`pageToken`），非空时在每个请求中以 `X-Lamplighter-Page` 发送；内部监听只对带正确令牌的 `Origin: null` 请求返回 CORS 头，见“HTTP 接口”。其他网站读不到页面，也就拿不到令牌。页面的请求只由自己的代码发出（`api`），不按父窗口的消息发请求或返回数据，嵌入页面的网站无法借用令牌。
+页面在沙箱中请求自己的 `api/…` 也是跨源请求（`Origin: null`）。内部监听把进程启动时生成的令牌写入页面的 `<meta name="lamplighter-page" content="">`，页面读取它（`pageToken`），非空时在每个请求中以 `X-Lamplighter-Page` 发送；内部监听拒绝不带正确令牌的浏览器请求，只对带正确令牌的 `Origin: null` 请求返回 CORS 头，见“HTTP 接口”的“内部监听”。其他网站读不到页面，也就拿不到令牌。页面的请求只由自己的代码发出（`api`），不按父窗口的消息发请求或返回数据，嵌入页面的网站无法借用令牌。
 
 ### 与 Magpie 窗口的通信
 
@@ -321,7 +325,7 @@ Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到�
 `engine.Engine` 用一个后台循环串行处理查询、点火和通知状态；HTTP 取消和模型流 watchdog 在独立 goroutine 中执行，不修改额度状态：
 
 1. 程序启动后先等 5 秒（`startupDelay`），让同时启动的 Magpie 网关就绪。
-2. 打开数据目录，取得 `instance.lock`。
+2. 读取 `state.json` 和最近的历史事件（`openStores`）。实例锁在进程启动时已由 `main.go` 取得，见“进程和数据目录”。
 3. 依次处理排队的被动数据、Did Codex Reset、到点的主动查询、Magpie 的额度记录（`pollKept`）、重置前后的查询、到期的点火、历史清理、新版本检查，并保存状态。
 4. 计算下一次需要醒来的时间，在这之前等待新的被动数据、管理操作或配置变更。
 
@@ -337,7 +341,7 @@ Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组�
 
 - 启动时读取 `config.json`；`PATCH /api/config` 保存并应用新的配置。无法解析的配置不会写入文件。
 - 收到 SIGINT 或 SIGTERM 时关闭监听、停止后台循环并退出。
-- `instance.lock` 是数据目录中的独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个实例在查询、点火和推送。新实例拿不到锁时每 10 秒重试一次。
+- `instance.lock` 由 `main.go` 在读取任何数据之前取得，进程退出前释放，见“进程和数据目录”。
 
 ## 额度获取
 
@@ -407,6 +411,8 @@ Antigravity 的响应头里没有额度。
 跳过规则（`shouldSkipActive`）：响应头里没有额度的服务（Antigravity）从不跳过，Magpie 也不为它提供额度记录，见“与 Magpie 的接口”的“额度记录”。其他服务在查询时刻前 `passive_skip_seconds` 秒内有被动数据，且距上次主动查询不足 `passive_skip_max_minutes` 分钟时跳过。只看查询时刻之前的一小段时间，最坏情况下两次数据间隔为查询间隔加 `passive_skip_seconds`。手动刷新不跳过。
 
 ## 点火
+
+`ignition.enabled` 默认关闭（`config.Default`）：点火会用用户的账号发送模型请求，由用户自己开启。配置文件中写了 `ignition.enabled` 时按文件的值。
 
 ### 时间
 

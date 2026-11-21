@@ -331,7 +331,6 @@ type Status struct {
 	Version            string    `json:"version"`
 	Running            bool      `json:"running"`
 	ConfigError        string    `json:"config_error,omitempty"`
-	LockError          string    `json:"lock_error,omitempty"`
 	ModelsError        string    `json:"models_error,omitempty"`
 	ListError          string    `json:"list_error,omitempty"`
 	// NotifyError is the reason the webhook settings were not applied.
@@ -487,7 +486,6 @@ func (e *Engine) Status() Status {
 		Version:            e.version,
 		Running:            e.running,
 		ConfigError:        e.cfgErr,
-		LockError:          e.lockErr,
 		ModelsError:        e.modelsErr,
 		NextModels:         maps.Clone(e.nextModels),
 		MagpieWarmup:       warmup,
