@@ -3,8 +3,8 @@
 ## 状态
 
 - 方案已获用户同意，可以直接开工，做完后按“交付”一节合并和发版，中间不用再问用户。
-- 第一阶段已完成，提交在 `dev` 分支：删除了 CPA 专属代码，定义了 `host.Host` 接口，`internal/magpie` 是返回 `host.ErrNotImplemented` 的桩，`go test ./...` 和页面测试都通过。`main` 停在 `0606041`（复制自 cpa-plugin-lamplighter v0.8.6），开发期间不动。
-- 下一步是第二阶段：按下文的五项任务并行开发，每项一个工作树，从 `dev` 拉分支，完成后合并回 `dev`。
+- 第一阶段（删除 CPA 专属代码、定义 `host.Host` 接口）和第二阶段（五项任务，见“第二阶段的结果”）都已完成并合并到 `dev`，`go vet ./...`、`go test -race ./...`、`node --test internal/web/page_test.cjs`、`node --test npm/test/` 都通过。`main` 停在 `0606041`（复制自 cpa-plugin-lamplighter v0.8.6），开发期间不动。
+- 下一步是 Docker 端到端联调，见“合并和联调”的第 2 步。
 
 ## 已确定的决策
 
@@ -17,78 +17,60 @@
 - 读取 Magpie 内部文件时，格式对不上返回包装 `host.ErrFormat` 的错误，不猜测字段。不追 Magpie 的版本变化，开发时拉 Magpie 最新源码（GitHub `yetone/magpie`）对照。
 - Magpie 容器保持 UTC，点火时间由 Lamplighter 按配置的 `timezone` 换算。
 - 不迁移 CPA 版的历史数据。后台常驻（setsid）暂不做，等上游 yetone/magpie#7114 的答复。
-- npm 包名 `magpie-lamplighter`，页面显示名 Magpie-Lamplighter，版本从 0.1.0 开始，用 Trusted Publishing 发布（参照 PosvdM/pi-endpoints 的 `.github/workflows/publish.yml`）。第一次发包可能要用户在本机手动执行 `npm publish`。
-- MCP 有两种接法：对外监听的 `/mcp`，以及 Magpie 的 `/mcp/magpie/tools/lamplighter`（可选）。
+- npm 包名 `magpie-lamplighter`，页面显示名 Magpie-Lamplighter，版本从 0.1.0 开始，用 Trusted Publishing 发布（参照 PosvdM/pi-endpoints 的 `.github/workflows/publish.yml`）。第一次发包由用户在本机执行 `npm publish`，步骤见“交付”。
+- MCP 有两种接法：对外监听的 `/mcp`，以及 Magpie 的 tool 方式（可选）：地址是 `/mcp/magpie/tools/magpie-lamplighter`，工具名带 `magpie-lamplighter_` 前缀（如 `magpie-lamplighter_list_quotas`）。Magpie 用插件的短名称命名，短名称是 npm 包名去掉 `opencode-`、`tools-`、`page-` 前缀。
 
 接口、数据目录和 HTTP 路由见 [架构](../architecture.md) 的“进程和数据目录”“与 Magpie 的接口”“HTTP 接口”三节。
 
-## 第二阶段任务
+## 第二阶段的结果
 
-开发按 sister-squad：前端、后端和联调用 Claude，审查用 GPT；额度用完不重试，停下来等重置。每项任务只改自己列出的文件，需要改别处时先和协调者确认。每项都要补测试，并更新架构文档中自己负责的部分；README 在发版前统一改写，任务中不改。
-
-### A：账号、凭证和额度记录
-
-- 文件：`internal/magpie/accounts.go` 及新建的同目录文件（凭证、代理、额度记录各自成文件）。
-- 实现 `Accounts`、`Credential`、`KeptQuotas`、`RefreshQuota`：
-  - `Accounts` 读网关的 `GET /v1/magpie/accounts`（Magpie 源码 `internal/gateway/accounts_list.go`）。
-  - `Credential` 读 Magpie 配置目录中的 `logins.json`（Codex、Claude）和 agy-cli 插件的账号文件（Antigravity），以及 `providers.json`、`settings.json` 中的代理。按 Magpie 源码 `internal/provider` 确认格式和代理的优先级。`Fingerprint` 的算法见架构文档“凭证问题”；token 过期且不能刷新时设 `Expired`。Google 的 token 可以在内存中刷新。
-  - `KeptQuotas` 把 Magpie 的额度记录转成 `quota.RawGroup`，组 key 和窗口 ID 必须与 `internal/providers` 中该服务 `Fetch` 的结果相同，否则不会更新已有窗口。
-  - `RefreshQuota` 调用 `POST /v1/magpie/quotas/refresh`。Claude 的刷新会运行 Claude Code 的 `/usage`，所以要限频。
-- 待定：`engine.shouldSkipActive` 目前只对有响应头解析的服务（Codex、Claude）生效。Antigravity 有了额度记录后是否也跳过主动查询，由这项任务提出方案，经协调者确认后修改 `internal/engine/poll.go`。
-- 测试用从 Magpie 源码或测试数据中整理的样例文件，格式错误的样例要得到 `host.ErrFormat`。
-
-### B：网关点火和预热冲突
-
-- 文件：`internal/magpie/gateway.go` 及同目录新文件、`internal/ignite`、`internal/failure`、`internal/engine/stream*.go`、`internal/engine/fire.go`。
-- 实现 `Models`（`GET /v1/models`）和 `OpenModelStream`、`ReadModelStream`、`CloseModelStream`：按 `Protocol` 分别发到 `/v1/responses`、`/v1/messages`、`/v1/chat/completions`，带 `X-Magpie-Account`，`CloseModelStream` 取消请求。`StreamChunk.Payload` 的格式要符合 `internal/engine/stream_parse.go` 的解析规则；网关的格式不同时修改解析器。
-- 网关的错误转成 `host.Error`，对照 Magpie 的错误格式检查 `ignite.Classify`、`ignite.ModelRejected`、`failure.Diagnose`。CPA 特有的分类（本地冷却 `model_cooldown`、`auth_not_found`、`unknown provider for model`）在 Magpie 中没有对应时删除，有对应时改成 Magpie 的写法。
-- Claude 在 Magpie 中可能经 Claude Code 转发（Magpie 文档 `docs/subsystems/claude-subscription-bridge.md`），确认点火请求能开始 5 小时窗口，以及 `X-Magpie-Account` 在这条路径上有效。
-- 预热冲突：Magpie 自带的预热和 Lamplighter 的点火同时开启会重复点火。查明 Magpie 的预热设置，在状态接口中加顶层字段 `magpie_warmup`：开启了预热的账号 pin 列表，没有时为空数组。页面的提示由任务 E 实现。
-- 改写架构文档的“请求”“流式执行与取消”“调用日志”“模型选择”“失败分类和保护”各节，删除其中剩下的 CPA 内容。
-
-### C：npm 外壳和发布
-
-- 文件：`package.json`、`npm/`（新建：Bun 入口、页面启动文件）、`.github/workflows/`、`scripts/`。
-- 插件声明：按 Magpie 文档 `docs/subsystems/plugin-runtime.md` 和 `plugin-tools.md` 写 `magpie` 字段：
-  - 页面 `magpie.page`，`service` 指向内部监听的端口选项。页面文件只负责跳到 `magpie.service`，没有时跳到 `http://127.0.0.1:<端口>/`（参照 `@magpie-community/page-chat`），管理页面本身由 Go 程序提供。
-  - tools 与 `internal/mcp` 中的工具一一对应，调用内部监听的 `POST /api/tools/{name}`，Magpie 的 tool 超时为 55 秒。
-- Bun 入口按平台启动随包发布的 Go 程序（linux、darwin、windows 各 amd64 和 arm64，静态编译，共约 20～25MB）。Magpie 用 `bun add --ignore-scripts` 安装插件，不能靠 postinstall 下载程序。启动时传 `-listen 127.0.0.1:<端口>`，`MAGPIE_ADDR` 原样传给子进程；宿主退出时子进程随之退出。
-- 发布：推送 `v*` 标签后先测试，再构建各平台程序、打 npm 包，用 Trusted Publishing 发布，并创建 GitHub Release。版本号经 `-ldflags "-X main.version=..."` 写入程序。
-- 更新开发文档的“构建”“发布”两节。
-
-### D：对外监听和鉴权
-
-- 文件：`internal/server`、`internal/mcp`、`internal/config`、`main.go`。
-- `public_listen` 上：`web_enabled` 为真且 `admin_key` 非空时提供页面和 `/api/*`，要求 `Authorization: Bearer <admin_key>`，错误时返回 401；`mcp_enabled` 时提供 `/mcp`，沿用 `mcp_key` 和现有的 Origin 校验。两者都关闭时不监听。内部监听保持不要密钥。
-- 修改配置时按现有的 `mcp.Configure` 方式只在必要时重新绑定；密钥比较用常数时间。
-- 更新架构文档的“HTTP 接口”和“MCP”两节。
-
-### E：前端
-
-- 文件：`internal/web/*`。
-- 嵌在 Magpie 中时：页面经 Magpie 的页面服务反向代理打开，在沙箱 iframe（`sandbox allow-scripts`）中运行，没有 `localStorage`，也不能复制文字；用到 `localStorage` 的地方都要容忍读写失败（Magpie 文档 `plugin-runtime.md` 的页面一节，源码 `internal/gui/pagebridge.js`、`pageservice.go`）。查明主题和语言能否从 Magpie 获得；能获得时跟随，不能时用浏览器的设置。删除读取 CPA 管理中心父页面的代码（`parentRoot`、`watchParent` 等）。
-- 独立访问时：遇到 401 输入管理密钥，密钥保存在 `localStorage`（已实现，确认在两种方式下都正常）。打码开关按浏览器保存（已实现）。
-- Magpie 每次 Restart（安装、更新或设置插件，更新 Bun）都会结束插件宿主及其子进程，宿主下一次被调用时才重新启动。页面打开时 Magpie 会先启动宿主，最多等 7 秒；服务未就绪时显示 502 页并每 2 秒重试。
-- 设置页增加对外监听的设置：`public_listen`（已有输入框）、`web_enabled`、`admin_key`（可生成，与 `mcp_key` 的做法一致）。
-- `status.magpie_warmup` 非空时显示提示，说明哪些账号开启了 Magpie 的预热，需要关闭以免重复点火。
-- `internal/web/page.css` 中 Kimi 和 Grok 的颜色变量可以保留。
-- 更新架构文档的“管理页面”一节。
+五项任务各在一个工作树中开发，已按 D（对外监听和鉴权）、C（npm 外壳和发布）、A（账号、凭证和额度记录）、B（网关点火和预热冲突）、E（前端）的顺序合并到 `dev`。合并后的收尾：统一访问网关的辅助函数（`internal/magpie/client.go`），`magpie.Host` 的运行状态改为字段；手动刷新时让 Magpie 刷新凭证已过期账号的额度；`magpie_warmup` 只列出 Lamplighter 会点火的账号；`host.Account` 增加 Magpie 的账号名 `User`，Codex Team 席位的预热时间点按它匹配；清理 CPA 版遗留的说明。各部分的现状见 [架构](../architecture.md) 和 [开发](../development.md)。
 
 ## 合并和联调
 
-1. 各任务合并回 `dev`，解决冲突后 `go vet ./...`、`go test -race ./...`、`node --test internal/web/page_test.cjs` 全部通过。
-2. 在测试服务器的 Magpie Docker 中安装 dev 版本做端到端验证：账号列表、三种服务的主动查询和额度记录、页面嵌入和独立访问、两种 MCP、tool 调用。先关闭 `ignition.enabled`，确认无误后对一个账号手动点火。服务器的地址和登录方式由用户另行提供。
+1. 各任务合并回 `dev`，测试全部通过（已完成）。
+2. 在测试服务器的 Magpie Docker 中安装 dev 版本做端到端验证：账号列表、三种服务的主动查询和额度记录、页面嵌入和独立访问、两种 MCP、tool 调用。先关闭 `ignition.enabled`，确认无误后对一个账号手动点火。服务器的地址和登录方式由用户另行提供。以下几点目前只按 Magpie 源码和文档实现，要实测：
+   - **程序的启动和退出**：Bun 中 `node:child_process` 经 Magpie 包装的 `Bun.spawn` 能否正常启动程序；Magpie Restart（安装、更新、设置插件）和宿主退出时程序是否随之结束，不残留进程；端口被旧进程占用时 `Supervisor` 的重试。
+   - **页面加载**：在 Magpie 桌面窗口和 `magpie web` 两种方式下都能加载数据，即页面令牌、`Origin: null` 的 CORS 和 Host 检查都放行 Magpie 的请求（`magpie web` 的页面服务代理是否把 Host 设为 `127.0.0.1:<端口>`）。
+   - **502 和出错页**：页面 10 秒内没有发出 `hello` 时，Magpie 是否把服务未就绪（502）期间的页面标为出错。
+   - **主题、语言和截图**：主题和语言随 Magpie 切换；截图经 `image.copy` 能复制到剪贴板（桌面窗口和 `magpie web` 都试）；沙箱中复制文字的退路。
+   - **独立访问**：经对外监听打开页面，收到 401 后输入管理密钥的流程；`status.public` 的各字段和设置页的显示；`-listen` 绑定非回环地址后从别处访问得到 403。
+   - **预热提示**：在 Magpie 中开启 Codex 或 Claude 的预热后，`magpie_warmup` 和页面提示是否正确；关闭点火或取消勾选额度组后提示是否消失；Codex Team 席位账号自己的时间点（`codexWarmAtOf`）能否匹配。
+   - **账号对应**：`/v1/magpie/accounts` 的 pin 与 `logins.json` 中的 `id`、插件账号按 `nameID` 算出的 id 能否对上真实的 Magpie；额度记录（`kept=1`）的额度卡能否按 `user` 对应到账号，组 key 和窗口 ID 是否与主动查询一致。
+   - **手动刷新过期凭证**：闲置的 Claude 账号 token 过期后，点“刷新”或调用 `refresh_quotas` 是否经 `POST /v1/magpie/quotas/refresh` 拿到新读数，经 Magpie 的 tool 调用能否在 50 秒内返回。
+   - **Antigravity 的 User-Agent**：额度查询用 `internal/providers` 中的 Hub 格式（`antigravity/hub/<版本> darwin/arm64`），agy-cli 插件自己用 `antigravity/cli/<版本> (aidev_client; …; auth_method=…)`。确认 Hub 格式能拿到 Gemini 额度组，且不会因与 agy 的 UA 不同而增加风险。
+   - **Claude 点火**：经 Claude Code 转发的点火能否开始 5 小时窗口，`X-Magpie-Account` 在这条路径上是否生效，额度响应头（`anthropic-ratelimit-unified-*`）是否及时写回；Claude Code 启动慢时 2 分钟的点火时限是否够用。
+   - **Codex 点火**：网关是否把 `x-codex-*` 响应头转发给客户端；不转发时只能靠“确认”中的主动查询。
+   - **网关的错误格式**：锁定账号被拒（400 套餐不含该模型、404 没有账号提供该模型、429 账号休息中）时，`gateway_http_error` 的正文能否被 `ignite.Classify` 和 `failure.Diagnose` 正确分类。模型列表中 Antigravity 模型的前缀是否为 `agy-cli/`。
+   - **Docker 中的路径**：`XDG_STATE_HOME`（数据目录应为 `/config/state/lamplighter`）、`MAGPIE_CONFIG_DIR`（缺省为宿主的工作目录）和 agy-cli 的 token 文件（`$XDG_STATE_HOME/magpie-agy-bridge/accounts/<agyHome>/…`；第一个账号在 `~/.gemini/antigravity-cli/`）的实际位置；升级插件后数据是否保留。
+   - **端口冲突**：内部监听默认 `127.0.0.1:8317`，与 CPA 的默认端口相同；对外监听默认 `127.0.0.1:8318`，与 CPA 版 Lamplighter 的 MCP 端口相同。同一台机器还运行 CPA 时要改 Magpie 插件选项中的 `port` 或 `public_listen`，README 中要写明。
 3. GPT 审查 `main...dev` 的差异，修完后开 PR 到 `main`。
+
+## 已知限制
+
+v0.1 有以下限制，README 改写时写进去：
+
+- macOS 和 Windows 上 agy 自己登录的第一个 Antigravity 账号，凭证在系统钥匙串中，Lamplighter 不读取，返回明确的错误；在 Magpie 中再添加一次该账号即可。
+- `auth_method` 不是 `consumer`（或为空）的 Google 账号要另行查询 Cloud Code project，v0.1 返回错误。
+- `MAGPIE_ADDR` 设为局域网地址时网关要求网关密钥，v0.1 不支持。
+- `-listen` 绑定非回环地址后，从其他机器访问内部监听会得到 403；从外部访问要用对外监听（`public_listen`）。
 
 ## 交付
 
-1. 改写 README 和 README_EN（删去顶部的开发中说明，按 Magpie 版写安装、配置和使用）。
+1. 改写 README 和 README_EN（删去顶部的开发中说明，按 Magpie 版写安装、配置和使用，包括“已知限制”和端口冲突的说明）。
 2. PR 合并到 `main`，删除本交接文档。
-3. 打 `v0.1.0` 标签发布。Trusted Publishing 还没配置好时，请用户在本机执行 `npm publish`。
+3. 首次发布 0.1.0：npm 只能为已存在的包配置 Trusted Publisher，所以第一个版本由用户在本机发布：
+   1. 在合并后的 `main` 上，登录 npm 后运行 `sh scripts/build.sh && npm publish`（`package.json` 的版本已是 `0.1.0`）。
+   2. 在 npm 上为 `magpie-lamplighter` 配置 Trusted Publisher：仓库 `PosvdM/magpie-lamplighter`，文件 `release.yml`。
+   3. 打 `v0.1.0` 标签并推送。`release.yml` 的 `publish` 会因为 0.1.0 已在 npm 上而失败，之后的 `release` 不会运行，需要手动创建 Release：用 `sh scripts/build.sh && npm pack` 打出的 `magpie-lamplighter-0.1.0.tgz` 运行 `gh release create v0.1.0 --draft --generate-notes magpie-lamplighter-0.1.0.tgz`，或在 GitHub 网页上创建。
+   4. `release.yml` 创建的是草稿 Release，补充说明后手动发布；程序按 GitHub 的最新 Release 提示更新，草稿发布前不会提示。
+
+   之后的版本：修改 `package.json` 的版本号，打 `v<版本号>` 标签推送，CI 测试、构建、经 Trusted Publishing 发布并创建草稿 Release，见 [开发](../development.md) 的“发布”。
 4. cpa-plugin-lamplighter 保持不动。它的 README 顶部说明和 issue #34 的回复，等用户用过 Magpie 版之后再做，评论稿先给用户看。
 
 ## 注意事项
 
-- 架构文档中“请求”以后的几节还有 CPA 的内容，由任务 B 改写；README 仍是 CPA 版的说明。
+- README 和 README_EN 仍是 CPA 版的说明，发版前统一改写。
 - `internal/engine/fakehost_test.go` 中的 `applyHeaders` 等辅助函数模拟点火响应头，测试仍在用。
 - 点火会发送真实请求并开始新的 5 小时窗口，联调时不要对生产账号批量点火。
+- 五个工作树（`.worktrees/sa-*`）和 `subagent/*` 分支还保留着，验收后再清理。工作树中有指向主检出 `node_modules` 的软链接，提交时按文件添加，不要用 `git add -A`。
