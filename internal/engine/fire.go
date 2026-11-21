@@ -293,10 +293,11 @@ type admission struct {
 // applied by Configure after the check withdraws it. The returned context
 // carries the request; opened ends the admission once OpenModelStream has
 // returned and reports false when the request was withdrawn meanwhile.
+// A stopped engine admits nothing, and Cancel cancels the admitted request.
 func (e *Engine) admit(ctx context.Context, t target) (context.Context, func() bool, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.mayIgniteLocked(t) {
+	if e.stopped || !e.mayIgniteLocked(t) {
 		return ctx, nil, false
 	}
 	reqCtx, cancel := context.WithCancelCause(ctx)

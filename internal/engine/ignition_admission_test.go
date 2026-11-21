@@ -347,3 +347,47 @@ func TestConfirmationStartsAtTheSentRequest(t *testing.T) {
 		t.Fatalf("confirmation did not query the account: %d", n)
 	}
 }
+
+// Stopping the engine while an admitted request waits for its response
+// headers cancels the request, and no further request is admitted or sent
+// while the process exits.
+func TestCancelStopsAdmittedRequest(t *testing.T) {
+	old := confirmDelays
+	confirmDelays = []time.Duration{time.Millisecond}
+	defer func() { confirmDelays = old }()
+	e, h, _, chosen := newAdmissionEngine(t)
+	opened := make(chan struct{})
+	var ended error
+	h.open = func(ctx context.Context, _ host.ModelRequest) (host.ModelStream, error) {
+		close(opened)
+		select {
+		case <-ctx.Done():
+			ended = ctx.Err()
+			return host.ModelStream{}, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return host.ModelStream{ID: "sent", StatusCode: 200}, nil
+		}
+	}
+	go func() {
+		<-opened
+		// The shutdown, from main.
+		e.Cancel()
+	}()
+	err := e.igniteTarget(context.Background(), e.config(), chosen, false)
+	if !errors.Is(err, context.Canceled) || ended == nil {
+		t.Fatalf("err = %v, request context %v", err, ended)
+	}
+	e.mu.Lock()
+	left := e.admission
+	e.mu.Unlock()
+	if left != nil {
+		t.Fatal("the admission was not ended")
+	}
+	if _, _, ok := e.admit(context.Background(), chosen); ok {
+		t.Fatal("a stopped engine admitted an ignition request")
+	}
+	_ = e.igniteTarget(context.Background(), e.config(), chosen, false)
+	if len(h.executed) != 1 {
+		t.Fatalf("requests after the stop: %+v", h.executed[1:])
+	}
+}

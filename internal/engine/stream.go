@@ -185,6 +185,10 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 	if t.automatic {
 		var ok bool
 		reqCtx, admitted, ok = e.admit(streamCtx, t)
+		if !ok && e.stopping() {
+			reason = "canceled"
+			return resp, context.Canceled
+		}
 		if !ok {
 			reason = "withdrawn"
 			return resp, errIgnitionWithdrawn

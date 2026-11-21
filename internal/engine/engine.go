@@ -275,7 +275,9 @@ func (e *Engine) Start() {
 // Cancel tells the loop to stop without waiting for it. From then on the
 // management operations return ErrStopped at once, those waiting for the
 // loop included, and a queued operation the loop has not started is
-// dropped; the network work of the operation in progress is canceled.
+// dropped; the network work of the operation in progress is canceled,
+// an automatic ignition request waiting for its response headers
+// included, and no further ignition request is admitted.
 // A stopped engine never starts again; the process exits after it.
 func (e *Engine) Cancel() {
 	e.mu.Lock()
@@ -285,6 +287,9 @@ func (e *Engine) Cancel() {
 	}
 	e.stopped = true
 	close(e.stopCh)
+	if a := e.admission; a != nil {
+		a.cancel(context.Canceled)
+	}
 }
 
 // Stop cancels the loop (see Cancel) and waits up to timeout for it to

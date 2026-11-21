@@ -34,7 +34,7 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 
 启动顺序（`main.go` 的 `run`）：检查 `-listen`，创建数据目录，取得 `instance.lock`，然后读取 `config.json`，开内部监听，按配置开对外监听，最后启动后台循环（它读取 `state.json`）。`instance.lock` 是独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个进程使用数据目录。Magpie 的 `plugin update` 等命令会另起一个插件宿主，它启动的程序使用另一个端口和同一个数据目录；这个程序拿不到锁时每秒重试一次（`lockRetry`），不读取数据目录中的文件，也不监听任何端口，收到 SIGINT 或 SIGTERM 时直接退出。每次重试前和拿到锁后都检查是否已收到退出信号，已收到时释放锁直接退出，不读配置、不绑定端口。拿到锁时前一个进程已经退出，所以从磁盘读到的是它最后写入的配置和状态。等待期间插件宿主调用 tool 连不上内部监听，约 10 秒后报错。
 
-退出顺序（`main.go` 的 `shutdown`）：先调用 `server.Server.Shutdown`（步骤见“HTTP 接口”的“对外监听”中的“关闭”），它返回后不再写 `config.json`；再关闭内部监听，等其中的请求最多 5 秒（`shutdownTimeout`），超时时关闭连接；最后释放锁。
+退出顺序（`main.go` 的 `shutdown`）：先调用 `server.Server.Shutdown`（步骤见“HTTP 接口”的“对外监听”中的“关闭”），它返回后不再写 `config.json`；再关闭内部监听，等其中的请求最多 5 秒（`shutdownTimeout`），超时时关闭连接；最后释放锁，`main` 随即返回，进程退出。后台循环 10 秒内没有结束时照样释放锁，它随进程结束；`state.json` 先写临时文件再改名（`store.StateFile.Save`），不会留下写了一半的文件。
 
 ## 插件外壳
 
@@ -173,7 +173,7 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 - 两把密钥只开放各自的部分：`admin_key` 不能访问 `/mcp`，`mcp_key` 不能访问页面和接口。比较方法相同：对 `Bearer <密钥>` 和请求的 `Authorization` 头各求 SHA-256，再常数时间比较，不泄露密钥长度和前缀。
 - 页面和接口不做 Origin 校验，也不返回 CORS 头：密钥在请求头中，其他网站的页面无法让浏览器带上它。
 - **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。需要重新绑定时（`mcp.Server.drainLocked`），旧监听立即停止接受连接、端口释放，MCP 请求被取消；已读入的页面和接口请求在后台由 `http.Server.Shutdown` 等待回完，最多 5 秒（`drainTimeout`），超时或 `mcp.Server.Close` 时关闭连接。`Configure` 不等待这些请求，因为修改 `public_listen` 的 `PATCH /api/config` 本身就在等 `Configure` 返回。绑定失败时记录错误，每 2 秒重试。
-- **关闭**：`server.Server.Shutdown` 依次：在 `server.Server.mu` 内标记停止，然后释放这把锁；取消引擎（`engine.Engine.Cancel`），管理操作立即返回 `engine.ErrStopped`（HTTP 503），排队未执行的操作放弃，正在执行的操作的网络请求被取消；关闭对外监听，取消并等待其中的请求；取一次 `patchMu`，等已开始的配置写入完成；最后等后台循环结束，最多 10 秒。先取消引擎再等请求，是因为页面和接口的请求可能在等后台循环。对外的接口请求读取状态时要取 `server.Server.mu`，持锁等待会死锁。`PATCH /api/config` 在 `patchMu` 内检查停止标记，停止后返回 503，不写盘，所以 `Shutdown` 返回后不再写 `config.json`。停止后的实例不再应用配置，也不重新监听。
+- **关闭**：`server.Server.Shutdown` 依次：在 `server.Server.mu` 内标记停止，然后释放这把锁；取消引擎（`engine.Engine.Cancel`），管理操作立即返回 `engine.ErrStopped`（HTTP 503），排队未执行的操作放弃，正在执行的操作的网络请求被取消，包括等待响应头的自动点火请求（`Cancel` 取消 `Engine.admission`），之后 `engine.admit` 不再准入新的点火请求；关闭对外监听，取消并等待其中的请求；取一次 `patchMu`，等已开始的配置写入完成；最后等后台循环结束，最多 10 秒。先取消引擎再等请求，是因为页面和接口的请求可能在等后台循环。对外的接口请求读取状态时要取 `server.Server.mu`，持锁等待会死锁。`PATCH /api/config` 在 `patchMu` 内检查停止标记，停止后返回 503，不写盘，所以 `Shutdown` 返回后不再写 `config.json`。停止后的实例不再应用配置，也不重新监听。
 - **超时**：读请求头 5 秒、读请求 15 秒、写响应 190 秒、空闲连接 30 秒，请求头最多 16 KiB，页面、接口和 `/mcp` 共用。插件宿主的 tool 调用走内部监听，经对外接口调用 `POST /api/tools/{name}` 同样最长 50 秒。
 
 状态接口中的对外监听状态：
@@ -433,7 +433,7 @@ Antigravity 的响应头里没有额度。
 
 额度组是否为点火目标由 `ignitionTarget` 判断：有 5 小时窗口，服务开启监控（`monitor`）和点火（`ignite`），额度组被选中（`groupIgnitable`）。有额度组勾选项的服务（`providers.Ignition.Groups`，目前只有 Antigravity）按配置中的 `groups` 选择：空数组表示一个都不选，字段省略或为 `null` 时使用 `DefaultGroups`；页面保存时总是写出勾选结果的数组，取消最后一个勾选即保存 `[]`。其他服务的 `groups` 为空时选择全部额度组。自动点火、手动点火、每个自动点火请求的准入和 `magpie_warmup` 共用这条规则。
 
-自动点火在每个请求（包括换下一个候选模型）发出前都重新读取配置：`ignition.enabled` 仍开启，当前仍在每天的点火时段内（`ignite.Schedule.InWindow`），账号仍在凭证列表中，额度组仍是点火目标（`engine.mayIgniteLocked`）。这项检查与登记在 `engine.mu` 下一次完成（`engine.admit`），登记的请求记在 `Engine.admission`。`engine.Configure` 在同一把锁下换上新配置后调用 `withdrawLocked`：新配置下目标不再满足条件时，取消这个请求的 context（原因为 `errIgnitionWithdrawn`），尚未发出的请求不再发出，正在等待响应头的请求被取消；`OpenModelStream` 返回后若已被撤销，关闭已打开的流。收到响应头后请求已到达厂商，准入结束，之后的配置变更不再撤销它。锁只保护检查和登记，不在持锁期间等待网络。不满足条件或被撤销时放弃这一轮中尚未发送的请求（`errIgnitionWithdrawn`），调用日志的 `end_reason` 为 `withdrawn`，只记一条 info 日志，不计失败。一轮点火可能因候选模型和确认持续数分钟，用户在这期间关闭点火或监控、取消额度组时，后续目标和候选模型都不再发送。手动点火（`POST /api/ignite`）不经过准入，不受 `ignition.enabled` 影响，按精确的额度组 key 查找目标。
+自动点火在每个请求（包括换下一个候选模型）发出前都重新读取配置：`ignition.enabled` 仍开启，当前仍在每天的点火时段内（`ignite.Schedule.InWindow`），账号仍在凭证列表中，额度组仍是点火目标（`engine.mayIgniteLocked`）。这项检查与登记在 `engine.mu` 下一次完成（`engine.admit`），登记的请求记在 `Engine.admission`。`engine.Configure` 在同一把锁下换上新配置后调用 `withdrawLocked`：新配置下目标不再满足条件时，取消这个请求的 context（原因为 `errIgnitionWithdrawn`），尚未发出的请求不再发出，正在等待响应头的请求被取消；`OpenModelStream` 返回后若已被撤销，关闭已打开的流。收到响应头后请求已到达厂商，准入结束，之后的配置变更不再撤销它。锁只保护检查和登记，不在持锁期间等待网络。引擎停止后（`engine.Engine.Cancel`）不再准入，已登记的请求被取消，调用日志的 `end_reason` 为 `canceled`。不满足条件或被撤销时放弃这一轮中尚未发送的请求（`errIgnitionWithdrawn`），调用日志的 `end_reason` 为 `withdrawn`，只记一条 info 日志，不计失败。一轮点火可能因候选模型和确认持续数分钟，用户在这期间关闭点火或监控、取消额度组时，后续目标和候选模型都不再发送。手动点火（`POST /api/ignite`）不经过准入，不受 `ignition.enabled` 影响，按精确的额度组 key 查找目标。
 
 同一额度组中有 5 小时以外的窗口用完（剩余 ≤ 0.01%）且尚未到重置时间时，定时点火跳过这个额度组，不尝试、不计失败、不推送；引擎在该窗口的重置时间醒来，由下一次查询确认额度是否恢复。页面在点火状态中显示被哪个窗口挡住（`blocked_window`、`blocked_until`）。手动点火不受此限制。
 
