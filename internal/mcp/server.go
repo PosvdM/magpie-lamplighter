@@ -1,4 +1,6 @@
-// Package mcp serves a stateless, JSON-only MCP Streamable HTTP endpoint.
+// Package mcp runs the public listener. It serves a stateless, JSON-only
+// MCP Streamable HTTP endpoint at /mcp behind the MCP key and, when
+// enabled, the management page and API behind the admin key.
 package mcp
 
 import (
@@ -24,7 +26,9 @@ type Backend interface {
 	CallTool(context.Context, string, map[string]string) (any, error)
 }
 
-// State describes the listener without its authentication key.
+// State describes /mcp on the listener without its key. Enabled reports
+// mcp_enabled; Error is an empty MCP key or, while /mcp is enabled, the
+// listener's error.
 type State struct {
 	Enabled bool   `json:"enabled"`
 	Listen  string `json:"listen"`
@@ -33,13 +37,41 @@ type State struct {
 	Path    string `json:"path"`
 }
 
+// Public describes the listener as a whole. Web and MCP report what it
+// serves at the moment: the page and API, and /mcp.
+type Public struct {
+	Listen  string `json:"listen"`
+	Running bool   `json:"running"`
+	Error   string `json:"error"`
+	Web     bool   `json:"web"`
+	MCP     bool   `json:"mcp"`
+}
+
+// Config configures the public listener. The listener runs while /mcp or
+// the page is served.
+type Config struct {
+	Listen string
+	// MCPEnabled serves /mcp behind MCPKey; an empty key keeps it off.
+	MCPEnabled bool
+	MCPKey     string
+	// WebEnabled serves the handler given to SetWeb behind AdminKey; an
+	// empty key keeps it off.
+	WebEnabled bool
+	AdminKey   string
+}
+
+const errMCPKeyEmpty = "MCP key is empty"
+
 // Server owns the listener and all HTTP handler lifetimes.
 type Server struct {
 	mu         sync.Mutex
 	backend    Backend
 	version    string
-	state      State
-	key        string
+	state      State  // Error unused; see State
+	listenErr  string // bind or serve error of the listener
+	key        string // MCP key; empty while /mcp is off
+	adminKey   string // empty while the page is off
+	web        http.Handler
 	http       *http.Server
 	done       chan struct{}
 	handlers   sync.WaitGroup
@@ -49,7 +81,7 @@ type Server struct {
 	retries    sync.WaitGroup
 	generation uint64
 
-	requests       map[context.Context]context.CancelFunc
+	requests       map[context.Context]admitted
 	toolSlots      chan struct{}
 	queryTimeout   time.Duration
 	refreshTimeout time.Duration
@@ -59,59 +91,105 @@ func New(backend Backend, version string) *Server {
 	return &Server{
 		backend: backend, version: version,
 		state:          State{Listen: "127.0.0.1:8318", Path: "/mcp"},
-		requests:       make(map[context.Context]context.CancelFunc),
+		requests:       make(map[context.Context]admitted),
 		toolSlots:      make(chan struct{}, 4),
 		queryTimeout:   10 * time.Second,
 		refreshTimeout: 180 * time.Second,
 	}
 }
 
-func (s *Server) State() State { s.mu.Lock(); defer s.mu.Unlock(); return s.state }
+// admitted is a request in progress: its cancel function and whether it
+// was admitted with the MCP key.
+type admitted struct {
+	cancel context.CancelFunc
+	mcp    bool
+}
+
+// State returns the state of /mcp, the mcp object of the status API.
+func (s *Server) State() State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.state
+	switch {
+	case state.Enabled && s.key == "":
+		state.Error = errMCPKeyEmpty
+	case state.Enabled:
+		state.Error = s.listenErr
+	}
+	return state
+}
+
+// Public returns the state of the listener, the public object of the
+// status API.
+func (s *Server) Public() Public {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	running := s.state.Running
+	return Public{
+		Listen: s.state.Listen, Running: running, Error: s.listenErr,
+		Web: running && s.adminKey != "" && s.web != nil,
+		MCP: running && s.key != "",
+	}
+}
+
+// SetWeb sets the handler of the page and API, served behind the admin key.
+// Call it before Configure.
+func (s *Server) SetWeb(h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.web = h
+}
 
 // Configure closes the old listener before binding the replacement. A failed
 // bind is retried every two seconds, including during hot-reload handover.
 //
-// A new non-empty key for a running listener on the same address replaces
-// the key without closing the listener: reverse proxies and MCP clients reuse
+// The listener is kept while it runs on the same address and still serves
+// /mcp or the page: changing a key or turning one of the two on or off
+// takes effect for the next request. Reverse proxies and MCP clients reuse
 // keep-alive connections, and a closing listener fails the next request on
-// them. serveHTTP reads the key under mu, so every request after Configure
-// returns is checked against the new key. Requests already admitted with the
-// old key are canceled, as when the listener closes.
-func (s *Server) Configure(enabled bool, listen, key string) {
+// them. serveHTTP reads the keys under mu, so every request after Configure
+// returns is checked against the new keys. MCP requests already admitted
+// with an old MCP key, or while /mcp is turned off, are canceled, as when
+// the listener closes; page and API requests run to the end.
+func (s *Server) Configure(c Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return
 	}
-	if s.state.Enabled == enabled && s.state.Listen == listen && s.state.Running {
-		if s.key == key {
-			return
-		}
-		if enabled && key != "" {
-			for _, cancel := range s.requests {
-				cancel()
+	mcpKey, adminKey := "", ""
+	if c.MCPEnabled {
+		mcpKey = c.MCPKey
+	}
+	if c.WebEnabled {
+		adminKey = c.AdminKey
+	}
+	if s.state.Running && s.state.Listen == c.Listen && (mcpKey != "" || adminKey != "" && s.web != nil) {
+		if mcpKey != s.key {
+			for _, request := range s.requests {
+				if request.mcp {
+					request.cancel()
+				}
 			}
-			s.key = key
-			return
 		}
+		s.key, s.adminKey, s.state.Enabled = mcpKey, adminKey, c.MCPEnabled
+		return
 	}
 	s.closeLocked()
-	s.state = State{Enabled: enabled, Listen: listen, Path: "/mcp"}
-	s.key = key
-	if !enabled {
-		return
+	s.state = State{Enabled: c.MCPEnabled, Listen: c.Listen, Path: "/mcp"}
+	s.key, s.adminKey, s.listenErr = mcpKey, adminKey, ""
+	if s.neededLocked() {
+		s.startLocked()
 	}
-	if key == "" {
-		s.state.Error = "MCP key is empty"
-		return
-	}
-	s.startLocked()
 }
+
+// neededLocked reports whether the listener has anything to serve.
+func (s *Server) neededLocked() bool { return s.key != "" || s.adminKey != "" && s.web != nil }
 
 func (s *Server) startLocked() {
 	listener, err := net.Listen("tcp", s.state.Listen)
 	if err != nil {
-		s.state.Error = "Cannot listen on MCP address: " + err.Error()
+		s.listenErr = "Cannot listen on public address: " + err.Error()
 		generation := s.generation
 		s.retries.Add(1)
 		s.retry = time.AfterFunc(2*time.Second, func() {
@@ -122,13 +200,13 @@ func (s *Server) startLocked() {
 				return
 			}
 			s.retry = nil
-			if !s.stopped && s.state.Enabled && s.key != "" && !s.state.Running {
+			if !s.stopped && s.neededLocked() && !s.state.Running {
 				s.startLocked()
 			}
 		})
 		return
 	}
-	s.state.Error = ""
+	s.listenErr = ""
 	server := &http.Server{Handler: http.HandlerFunc(s.serveHTTP), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 190 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	s.http, s.done, s.state.Running = server, make(chan struct{}), true
 	done := s.done
@@ -140,7 +218,7 @@ func (s *Server) startLocked() {
 			defer func() {
 				if recover() != nil {
 					_ = server.Close()
-					err = errors.New("MCP listener panic")
+					err = errors.New("public listener panic")
 				}
 			}()
 			return server.Serve(listener)
@@ -151,7 +229,7 @@ func (s *Server) startLocked() {
 		if s.http == server {
 			s.state.Running = false
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				s.state.Error = "MCP listener stopped: " + err.Error()
+				s.listenErr = "Public listener stopped: " + err.Error()
 			}
 		}
 	}()
@@ -159,8 +237,8 @@ func (s *Server) startLocked() {
 
 func (s *Server) closeLocked() {
 	s.generation++
-	for _, cancel := range s.requests {
-		cancel()
+	for _, request := range s.requests {
+		request.cancel()
 	}
 	if s.retry != nil {
 		if s.retry.Stop() {
@@ -236,8 +314,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// 请求登记与停止检查共用互斥锁，防止 Close 开始等待后登记新请求。
 	s.handlers.Add(1)
 	ctx, cancel := context.WithCancel(r.Context())
-	s.requests[ctx] = cancel
-	key := s.key
+	isMCP := r.URL.Path == "/mcp"
+	s.requests[ctx] = admitted{cancel: cancel, mcp: isMCP}
+	key, adminKey, web := s.key, s.adminKey, s.web
 	s.mu.Unlock()
 	defer func() {
 		cancel()
@@ -247,9 +326,47 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlers.Done()
 	}()
 	r = r.WithContext(ctx)
+	if isMCP {
+		s.serveMCP(w, r, key)
+		return
+	}
+	if adminKey == "" || web == nil {
+		writeStatus(w, http.StatusNotFound)
+		return
+	}
+	// The page itself holds no data and asks for the key when the API
+	// answers 401; a browser cannot send the key when it opens the page.
+	page := r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+	if !page && !bearer(r, adminKey) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeStatus(w, http.StatusUnauthorized)
+		return
+	}
+	web.ServeHTTP(w, r)
+}
+
+// bearer reports whether r carries "Authorization: Bearer <key>". Both
+// sides are hashed before the constant-time comparison, so neither the
+// length nor a prefix of the key leaks.
+func bearer(r *http.Request, key string) bool {
+	expected := sha256.Sum256([]byte("Bearer " + key))
+	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+	return key != "" && subtle.ConstantTimeCompare(expected[:], actual[:]) == 1
+}
+
+// writeStatus answers a page or API request with a JSON error.
+func writeStatus(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": http.StatusText(status)})
+}
+
+// serveMCP serves /mcp. key is the MCP key, empty while /mcp is off.
+func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request, key string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	if r.URL.Path != "/mcp" {
+	if key == "" {
 		w.WriteHeader(404)
 		return
 	}
@@ -257,9 +374,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 		return
 	}
-	expected := sha256.Sum256([]byte("Bearer " + key))
-	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-	if key == "" || subtle.ConstantTimeCompare(expected[:], actual[:]) != 1 {
+	if !bearer(r, key) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		w.WriteHeader(401)
 		return

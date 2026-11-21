@@ -128,9 +128,9 @@ type Config struct {
 	PassiveSkipMaxMinutes int `yaml:"passive_skip_max_minutes" json:"passive_skip_max_minutes"`
 
 	// PublicListen is the address of the public listener, which serves the
-	// page and API when WebEnabled and /mcp when MCPEnabled. It runs when
-	// either is on. The internal listener, on loopback for Magpie, is set
-	// on the command line instead.
+	// page and API when WebEnabled and /mcp when MCPEnabled, each only with
+	// its key set. It runs while it serves either. The internal listener,
+	// on loopback for Magpie, is set on the command line instead.
 	PublicListen string `yaml:"public_listen" json:"public_listen"`
 	// WebEnabled serves the page and API on the public listener, behind
 	// AdminKey; an empty AdminKey keeps them off.

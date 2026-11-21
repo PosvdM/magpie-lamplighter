@@ -20,7 +20,7 @@ func TestMCPBindFailureAndDisableStillAcknowledgeToken(t *testing.T) {
 	cfg := config.Default()
 	cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey, cfg.ConfigToken = true, occupied.Addr().String(), "key", "bind-failed"
 	rev := e.Configure(cfg, nil)
-	server.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
+	server.Configure(mcp.Config{Listen: cfg.PublicListen, MCPEnabled: cfg.MCPEnabled, MCPKey: cfg.MCPKey})
 	if state := server.State(); state.Running || state.Error == "" {
 		t.Fatalf("expected failed listener: %+v", state)
 	}
@@ -32,7 +32,7 @@ func TestMCPBindFailureAndDisableStillAcknowledgeToken(t *testing.T) {
 	applied := cfg
 	cfg.MCPEnabled, cfg.ConfigToken = false, "disabled"
 	rev = e.Configure(cfg, nil)
-	server.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
+	server.Configure(mcp.Config{Listen: cfg.PublicListen, MCPEnabled: cfg.MCPEnabled, MCPKey: cfg.MCPKey})
 	e.MCPConfigured(rev)
 	if e.Status().ConfigAppliedToken != "bind-failed" {
 		t.Fatal("disabled MCP config must still wait for engine")

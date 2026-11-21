@@ -3,8 +3,11 @@
 //
 // The internal listener runs on loopback and takes no key: Magpie reaches
 // it for the plugin page (magpie.page.service) and for the tools of the
-// plugin host. The public listener, for a domain in front of a server, is
-// described in docs/architecture.md.
+// plugin host. It refuses a Host that is not loopback and opens its API
+// to the sandboxed plugin page by a page token; see guardInternal. The
+// public listener at public_listen, run by package mcp,
+// serves the same handler behind admin_key when web_enabled, and /mcp
+// behind mcp_key when mcp_enabled; see docs/architecture.md.
 package server
 
 import (
@@ -39,6 +42,12 @@ type Server struct {
 	engine *engine.Engine
 	mcp    *mcp.Server
 	tools  *engine.MCPBackend
+	// handler serves the internal listener: the routes with the page
+	// token in the page, behind the Host check and with CORS for the
+	// page token (guardInternal). The public listener serves the routes
+	// without them, behind the admin key.
+	handler   http.Handler
+	pageToken string // random per process; see guardInternal
 
 	mu      sync.Mutex
 	stopped bool
@@ -49,11 +58,15 @@ type Server struct {
 func New(store *config.Store, cfg config.Config, parseErr error, e *engine.Engine, version string) *Server {
 	backend := engine.NewMCPBackend(e)
 	s := &Server{store: store, engine: e, mcp: mcp.New(backend, version), tools: backend}
+	s.pageToken = newPageToken()
+	s.handler = guardInternal(s.routes(web.PageWith(s.pageToken)), s.pageToken)
+	s.mcp.SetWeb(s.routes(web.Page()))
 	s.apply(cfg, parseErr)
 	return s
 }
 
-// apply hands cfg to the engine and the MCP listener.
+// apply hands cfg to the engine and the public listener, which is rebound
+// only when its address changes or it starts or stops serving.
 func (s *Server) apply(cfg config.Config, parseErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -62,7 +75,13 @@ func (s *Server) apply(cfg config.Config, parseErr error) {
 	}
 	revision := s.engine.Configure(cfg, parseErr)
 	if parseErr == nil {
-		s.mcp.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
+		s.mcp.Configure(mcp.Config{
+			Listen:     cfg.PublicListen,
+			MCPEnabled: cfg.MCPEnabled,
+			MCPKey:     cfg.MCPKey,
+			WebEnabled: cfg.WebEnabled,
+			AdminKey:   cfg.AdminKey,
+		})
 		s.engine.MCPConfigured(revision)
 	}
 }
@@ -70,30 +89,46 @@ func (s *Server) apply(cfg config.Config, parseErr error) {
 // Start starts the engine.
 func (s *Server) Start() { s.engine.Start() }
 
-// Shutdown closes the MCP listener and stops the engine.
+// Shutdown closes the public listener and stops the engine. It does not
+// hold mu while the listener waits for its requests: a page or API request
+// on it may be waiting for mu.
 func (s *Server) Shutdown() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
 	s.stopped = true
+	s.mu.Unlock()
 	s.mcp.Close()
 	s.engine.Stop(stopTimeout)
 }
 
-func (s *Server) status() engine.Status {
+// statusResponse is the status API: the engine's status, the state of
+// /mcp in mcp and that of the public listener in public.
+type statusResponse struct {
+	engine.Status
+	Public mcp.Public `json:"public"`
+}
+
+func (s *Server) status() statusResponse {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	status := s.engine.Status()
+	status := statusResponse{Status: s.engine.Status(), Public: s.mcp.Public()}
 	status.MCP = s.mcp.State()
 	return status
 }
 
 // Handler serves the internal listener.
-func (s *Server) Handler() http.Handler {
+func (s *Server) Handler() http.Handler { return s.handler }
+
+// routes returns the routes of both listeners, serving page at /.
+func (s *Server) routes(page []byte) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(web.Page())
+		w.Write(page)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.status())

@@ -6,8 +6,10 @@
 //	lamplighter -listen 127.0.0.1:8317
 //
 // It serves the page, the API and the plugin host's tool calls on -listen,
-// keeps its configuration, state and history in the data directory, and
-// reaches Magpie at MAGPIE_ADDR.
+// which takes no key and belongs on loopback; the optional public listener
+// at public_listen in the configuration serves them behind admin_key and
+// /mcp behind mcp_key. It keeps its configuration, state and history in the
+// data directory, and reaches Magpie at MAGPIE_ADDR.
 package main
 
 import (
@@ -70,6 +72,9 @@ func run(listen, dataDir string) error {
 	if err != nil {
 		return err
 	}
+	if !loopback(ln.Addr()) {
+		log.Printf("warning: %s is not a loopback address; the internal listener takes no key, use public_listen with admin_key instead", ln.Addr())
+	}
 	e := engine.New(engine.Options{Host: magpie.FromEnv(), Version: version, DataDir: dataDir})
 	srv := server.New(store, cfg, nil, e, version)
 	httpServer := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -92,4 +97,10 @@ func run(listen, dataDir string) error {
 		return nil
 	}
 	return err
+}
+
+// loopback reports whether addr is bound to a loopback address only.
+func loopback(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
 }

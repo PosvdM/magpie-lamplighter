@@ -78,7 +78,7 @@ func TestWebPreviewFixture(t *testing.T) {
 		t.Helper()
 		cfg := parse()
 		e.Configure(cfg, nil)
-		listener.Configure(cfg.MCPEnabled, cfg.PublicListen, cfg.MCPKey)
+		listener.Configure(mcp.Config{Listen: cfg.PublicListen, MCPEnabled: cfg.MCPEnabled, MCPKey: cfg.MCPKey})
 		status := e.Status()
 		status.MCP = listener.State()
 		if status.Config.Webhook.URL != "" || status.Config.BarkURL != "已设置" || status.Config.MCPKey != "" {
