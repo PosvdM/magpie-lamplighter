@@ -6,13 +6,17 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
+	"github.com/PosvdM/magpie-lamplighter/internal/engine"
 	"github.com/PosvdM/magpie-lamplighter/internal/magpie"
+	"github.com/PosvdM/magpie-lamplighter/internal/server"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -40,9 +44,12 @@ func TestRunRefusesNonLoopbackListen(t *testing.T) {
 	}
 }
 
+// The write timeout leaves room for the longest requests: a tool call of
+// up to 50 seconds and a page action that waits up to 3 minutes for the
+// background loop.
 func TestInternalServerTimeouts(t *testing.T) {
 	s := newInternalServer(http.NotFoundHandler())
-	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.IdleTimeout <= 0 || s.WriteTimeout != 0 {
+	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.IdleTimeout <= 0 || s.WriteTimeout <= 3*time.Minute {
 		t.Fatalf("timeouts %v %v %v %v", s.ReadHeaderTimeout, s.ReadTimeout, s.IdleTimeout, s.WriteTimeout)
 	}
 }
@@ -173,5 +180,113 @@ func TestRunStopsWhileWaiting(t *testing.T) {
 	}
 	if listening(internal) {
 		t.Fatal("listened")
+	}
+}
+
+// A process told to stop before it gets the lock does not wait lockRetry,
+// and one told to stop as it gets the lock releases it at once. Neither
+// reads config.json, which here does not parse, nor listens.
+func TestRunStopsBeforeAndAfterTakingTheLock(t *testing.T) {
+	old := lockRetry
+	lockRetry = time.Hour
+	t.Cleanup(func() { lockRetry = old })
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	internal := freeAddr(t)
+
+	// Free lock: taken, then released.
+	if err := run(ctx, internal, dir, &magpie.Host{}); err != nil {
+		t.Fatalf("free lock: %v", err)
+	}
+	if listening(internal) {
+		t.Fatal("listened")
+	}
+	lock, ok, err := store.TryLock(filepath.Join(dir, lockFile))
+	if err != nil || !ok {
+		t.Fatalf("lock kept: %v %v", ok, err)
+	}
+
+	// Held lock: no wait of lockRetry.
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, internal, dir, &magpie.Host{}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("held lock: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run waited for the lock after ctx ended")
+	}
+	lock.Release()
+}
+
+// shutdown stops the server before the internal listener: a PATCH that
+// arrives late is refused without writing, and a request that does not
+// end loses its connection after shutdownTimeout.
+func TestShutdownRefusesLatePatch(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	dir := t.TempDir()
+	cfgStore, cfg, err := config.Open(filepath.Join(dir, config.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := engine.New(engine.Options{Host: &magpie.Host{}, Version: "test", DataDir: dir})
+	srv := server.New(cfgStore, cfg, nil, e, "test")
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hang", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+	})
+	mux.Handle("/", srv.Handler())
+	httpServer := newInternalServer(mux)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go httpServer.Serve(ln)
+	base := "http://" + ln.Addr().String()
+	hung := make(chan error, 1)
+	go func() {
+		resp, err := http.Get(base + "/hang")
+		if err == nil {
+			resp.Body.Close()
+		}
+		hung <- err
+	}()
+	<-started
+
+	start := time.Now()
+	shutdown(srv, httpServer)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("shutdown took %v", elapsed)
+	}
+	select {
+	case err := <-hung:
+		if err == nil {
+			t.Fatal("the hanging request got a response")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the hanging request kept its connection")
+	}
+	// The PATCH a handler still running would send.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(`{"config_token":"late"}`))
+	req.Host = "127.0.0.1:8317"
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("late patch: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("config.json written: %v", err)
 	}
 }

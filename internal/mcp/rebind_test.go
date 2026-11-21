@@ -121,6 +121,30 @@ func TestCloseEndsDrain(t *testing.T) {
 	<-result
 }
 
+// Close cancels the page and API requests of the running listener and
+// waits for their handlers: server.Server.Shutdown relies on it to know
+// that no request of this listener is left.
+func TestCloseCancelsWebRequests(t *testing.T) {
+	addr := freeAddr(t)
+	s := New(&fakeBackend{}, "test")
+	web := &blockingWeb{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan bool, 1)}
+	s.SetWeb(web)
+	s.Configure(Config{Listen: addr, WebEnabled: true, AdminKey: "admin"})
+	result := startBlocked(t, addr, web)
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	awaitSignal(t, closed, "Close waited for a page request")
+	select {
+	case canceled := <-web.canceled:
+		if !canceled {
+			t.Fatal("the handler was not canceled")
+		}
+	default:
+		t.Fatal("Close returned with the handler running")
+	}
+	<-result
+}
+
 // A refused configuration serves nothing and reports why.
 func TestRefusedConfig(t *testing.T) {
 	addr := freeAddr(t)

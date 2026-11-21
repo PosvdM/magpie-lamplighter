@@ -325,7 +325,11 @@ func (s *Server) closeLocked() {
 	s.state.Running = false
 }
 
-// Close releases the port and waits for canceled requests before plugin unload.
+// Close releases the port, cancels every request in progress, page and API
+// requests included, and waits for their handlers and for the drains. A
+// handler that ignores its context holds Close up; server.Server.Shutdown
+// therefore cancels the engine first, which the management requests wait
+// for.
 func (s *Server) Close() {
 	s.mu.Lock()
 	if !s.stopped {

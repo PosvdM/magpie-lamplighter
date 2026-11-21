@@ -116,17 +116,34 @@ type commandReply struct {
 // ErrNotRunning means the background loop has not started yet.
 var ErrNotRunning = errors.New("Lamplighter 尚未就绪：启动后约 5 秒开始运行")
 
-func (e *Engine) send(kind, arg string) error {
-	return e.dispatch(kind, arg).err
+// ErrStopped means the engine is stopping: the process is exiting.
+var ErrStopped = errors.New("Lamplighter 正在退出")
+
+// ErrCanceled is the reply to a management request whose context ended
+// first, as when the client went away. A command the loop has already
+// taken still runs to the end.
+var ErrCanceled = errors.New("请求已取消，操作可能仍在后台完成")
+
+func (e *Engine) send(ctx context.Context, kind, arg string) error {
+	return e.dispatch(ctx, kind, arg).err
 }
 
-// dispatch hands a command to the loop and waits for its reply.
-func (e *Engine) dispatch(kind, arg string) commandReply {
+// dispatch hands a command to the loop and waits for its reply, for up to
+// commandTimeout, until ctx ends or until the engine stops. Stopping
+// wins over a free loop: a command is not handed over once Cancel has
+// been called.
+func (e *Engine) dispatch(ctx context.Context, kind, arg string) commandReply {
 	e.mu.Lock()
-	ready := e.running
+	ready, stopped := e.running, e.stopped
 	e.mu.Unlock()
+	if stopped {
+		return commandReply{err: ErrStopped}
+	}
 	if !ready {
 		return commandReply{err: ErrNotRunning}
+	}
+	if ctx.Err() != nil {
+		return commandReply{err: ErrCanceled}
 	}
 	cmd := command{kind: kind, arg: arg, reply: make(chan commandReply, 1)}
 	timer := time.NewTimer(commandTimeout)
@@ -135,25 +152,31 @@ func (e *Engine) dispatch(kind, arg string) commandReply {
 	case e.cmdCh <- cmd:
 	case <-timer.C:
 		return commandReply{err: errors.New("后台任务繁忙，请稍后再试")}
+	case <-ctx.Done():
+		return commandReply{err: ErrCanceled}
 	case <-e.stopCh:
-		return commandReply{err: ErrNotRunning}
+		return commandReply{err: ErrStopped}
 	}
 	select {
 	case reply := <-cmd.reply:
 		return reply
 	case <-timer.C:
 		return commandReply{err: errors.New("操作超时")}
+	case <-ctx.Done():
+		return commandReply{err: ErrCanceled}
 	case <-e.stopCh:
-		return commandReply{err: ErrNotRunning}
+		return commandReply{err: ErrStopped}
 	}
 }
 
 // Refresh runs an active query now, for one credential or for all when
 // authIndex is empty.
-func (e *Engine) Refresh(authIndex string) error { return e.send("refresh", authIndex) }
+func (e *Engine) Refresh(ctx context.Context, authIndex string) error {
+	return e.send(ctx, "refresh", authIndex)
+}
 
 // Ignite ignites one target now.
-func (e *Engine) Ignite(key string) error { return e.send("ignite", key) }
+func (e *Engine) Ignite(ctx context.Context, key string) error { return e.send(ctx, "ignite", key) }
 
 // ChannelResult is the outcome of a test notification on one channel.
 type ChannelResult struct {
@@ -169,12 +192,18 @@ type ChannelResult struct {
 
 // TestNotify sends a test notification to each configured channel. A
 // webhook whose settings were not applied is reported as failed.
-func (e *Engine) TestNotify() ([]ChannelResult, error) {
-	reply := e.dispatch("test_notify", "")
+func (e *Engine) TestNotify(ctx context.Context) ([]ChannelResult, error) {
+	reply := e.dispatch(ctx, "test_notify", "")
 	return reply.results, reply.err
 }
 
 func (e *Engine) runCommand(ctx context.Context, cmd command) {
+	// The loop's select may take a command after Cancel, when both are
+	// ready; such a command is dropped.
+	if e.stopping() {
+		cmd.reply <- commandReply{err: ErrStopped}
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			cmd.reply <- commandReply{err: fmt.Errorf("内部错误：%v", r)}
@@ -894,7 +923,9 @@ func (e *Engine) language() string {
 
 // SetLanguage records the language the management page reports;
 // notifications use it from then on.
-func (e *Engine) SetLanguage(lang string) error { return e.send("language", lang) }
+func (e *Engine) SetLanguage(ctx context.Context, lang string) error {
+	return e.send(ctx, "language", lang)
+}
 
 // eventTime formats a time for event params; the page shows it in the
 // plugin's time zone.

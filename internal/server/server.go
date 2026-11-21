@@ -56,6 +56,8 @@ type Server struct {
 
 	// patchMu serializes PATCH /api/config from the merge to the response,
 	// so that the configurations are applied in the order they are saved.
+	// Shutdown takes it after setting stopped, to wait for a write in
+	// progress; see patchConfig.
 	patchMu sync.Mutex
 	// patched, when set by a test, runs between saving a patch and applying
 	// it.
@@ -112,9 +114,24 @@ func (s *Server) apply(cfg config.Config, parseErr error) {
 // Start starts the engine.
 func (s *Server) Start() { s.engine.Start() }
 
-// Shutdown closes the public listener and stops the engine. It does not
-// hold mu while the listener waits for its requests: a page or API request
-// on it may be waiting for mu.
+// errStopped is the answer to PATCH /api/config once Shutdown has begun:
+// the configuration is not saved.
+var errStopped = errors.New("Lamplighter 正在退出，设置未保存")
+
+// Shutdown stops the server for the process to exit. In order:
+//
+//  1. It marks the server stopped: configurations are no longer applied
+//     and PATCH /api/config answers 503 without saving.
+//  2. It cancels the engine: management operations return at once, a
+//     queued one is dropped, and the one in progress is canceled.
+//  3. It closes the public listener and waits for its requests, which
+//     no longer wait for the engine.
+//  4. It waits for a configuration write already in progress.
+//  5. It waits up to stopTimeout for the background loop.
+//
+// When it returns, config.json is not written again, and the caller may
+// release the instance lock once its own listener is closed. It does not
+// hold mu while waiting: a page or API request may be waiting for mu.
 func (s *Server) Shutdown() {
 	s.mu.Lock()
 	if s.stopped {
@@ -123,8 +140,19 @@ func (s *Server) Shutdown() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
+	s.engine.Cancel()
 	s.mcp.Close()
+	// Wait for the write in progress; later ones see stopped.
+	s.patchMu.Lock()
+	s.patchMu.Unlock()
 	s.engine.Stop(stopTimeout)
+}
+
+// isStopped reports whether Shutdown has begun.
+func (s *Server) isStopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
 }
 
 // statusResponse is the status API: the engine's status, the state of
@@ -171,7 +199,7 @@ func (s *Server) routes(page []byte) http.Handler {
 		if !readJSON(w, r, &body) {
 			return
 		}
-		s.action(w, s.engine.Refresh(strings.TrimSpace(body.AuthIndex)))
+		s.action(w, s.engine.Refresh(r.Context(), strings.TrimSpace(body.AuthIndex)))
 	})
 	mux.HandleFunc("POST /api/ignite", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -184,10 +212,10 @@ func (s *Server) routes(page []byte) http.Handler {
 			writeError(w, http.StatusBadRequest, errors.New("缺少 target"))
 			return
 		}
-		s.action(w, s.engine.Ignite(strings.TrimSpace(body.Target)))
+		s.action(w, s.engine.Ignite(r.Context(), strings.TrimSpace(body.Target)))
 	})
 	mux.HandleFunc("POST /api/test-notify", func(w http.ResponseWriter, r *http.Request) {
-		results, err := s.engine.TestNotify()
+		results, err := s.engine.TestNotify(r.Context())
 		if err != nil {
 			s.action(w, err)
 			return
@@ -205,7 +233,7 @@ func (s *Server) routes(page []byte) http.Handler {
 		if !readJSON(w, r, &body) {
 			return
 		}
-		s.action(w, s.engine.SetLanguage(body.Language))
+		s.action(w, s.engine.SetLanguage(r.Context(), body.Language))
 	})
 	mux.HandleFunc("POST /api/check-update", func(w http.ResponseWriter, r *http.Request) {
 		s.action(w, s.engine.CheckRelease())
@@ -219,6 +247,10 @@ func (s *Server) routes(page []byte) http.Handler {
 			return
 		}
 		raw, err := s.patchConfig(patch)
+		if errors.Is(err, errStopped) {
+			writeError(w, http.StatusServiceUnavailable, err)
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -246,9 +278,18 @@ func (s *Server) routes(page []byte) http.Handler {
 // Two patches never interleave: otherwise the later one could be saved
 // last and applied first, leaving the running configuration different
 // from the file.
+//
+// Once Shutdown has begun it returns errStopped without saving: the
+// instance lock is released after Shutdown, and a write after that could
+// overwrite the file of the next process. The check is made under
+// patchMu, which Shutdown takes after setting stopped, so every write
+// either finishes before Shutdown returns or does not start.
 func (s *Server) patchConfig(patch map[string]json.RawMessage) (map[string]json.RawMessage, error) {
 	s.patchMu.Lock()
 	defer s.patchMu.Unlock()
+	if s.isStopped() {
+		return nil, errStopped
+	}
 	cfg, err := s.store.Patch(patch)
 	if err != nil {
 		return nil, err
@@ -261,7 +302,7 @@ func (s *Server) patchConfig(patch map[string]json.RawMessage) (map[string]json.
 }
 
 func (s *Server) action(w http.ResponseWriter, err error) {
-	if errors.Is(err, engine.ErrNotRunning) {
+	if errors.Is(err, engine.ErrNotRunning) || errors.Is(err, engine.ErrStopped) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}

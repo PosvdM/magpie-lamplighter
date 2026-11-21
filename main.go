@@ -119,24 +119,47 @@ func run(ctx context.Context, listen, dataDir string, h host.Host) error {
 	case <-ctx.Done():
 	case err = <-served:
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpServer.Shutdown(shutdownCtx)
-	srv.Shutdown()
+	shutdown(srv, httpServer)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
 }
 
-// newInternalServer returns the HTTP server of the internal listener. It
-// sets no write timeout: a tool call takes up to 50 seconds and an action
-// of the page waits up to 3 minutes for the background loop.
+// shutdownTimeout bounds how long the internal listener waits for its
+// requests on the way out. Tests shorten it.
+var shutdownTimeout = 5 * time.Second
+
+// shutdown stops srv first, so that the requests of both listeners stop
+// waiting for the engine and no configuration is written after it
+// returns (see server.Server.Shutdown), then closes the internal
+// listener, closing the connections of the requests still running after
+// shutdownTimeout. The caller releases the instance lock after it.
+func shutdown(srv *server.Server, httpServer *http.Server) {
+	srv.Shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if httpServer.Shutdown(ctx) != nil {
+		_ = httpServer.Close()
+	}
+}
+
+// internalWriteTimeout bounds how long a request on the internal listener
+// may take, from reading its header to the end of the response. It is
+// longer than the longest request: a tool call takes up to 50 seconds
+// (server.toolTimeout), and refresh_quotas through /api/tools ends with
+// it. An action of the page (POST /api/refresh, /api/ignite) can wait up
+// to 3 minutes for the background loop (engine.commandTimeout), so the
+// timeout is above that too.
+const internalWriteTimeout = 200 * time.Second
+
+// newInternalServer returns the HTTP server of the internal listener.
 func newInternalServer(h http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      internalWriteTimeout,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 	}
@@ -144,7 +167,8 @@ func newInternalServer(h http.Handler) *http.Server {
 
 // lockDataDir takes the instance lock of dir, trying again every lockRetry
 // while another process holds it. It returns a nil lock and no error when
-// ctx ends first.
+// ctx has ended, also when the lock was just taken: the caller then reads
+// no file of dir and opens no listener.
 func lockDataDir(ctx context.Context, dir string) (*store.Lock, error) {
 	path := filepath.Join(dir, lockFile)
 	waiting := false
@@ -154,6 +178,10 @@ func lockDataDir(ctx context.Context, dir string) (*store.Lock, error) {
 			return nil, err
 		}
 		if ok {
+			if ctx.Err() != nil {
+				lock.Release()
+				return nil, nil
+			}
 			if waiting {
 				log.Printf("took %s", path)
 			}
@@ -162,6 +190,9 @@ func lockDataDir(ctx context.Context, dir string) (*store.Lock, error) {
 		if !waiting {
 			log.Printf("another Lamplighter process holds %s; waiting for it to exit", path)
 			waiting = true
+		}
+		if ctx.Err() != nil {
+			return nil, nil
 		}
 		timer := time.NewTimer(lockRetry)
 		select {

@@ -165,15 +165,21 @@ func TestStartupWithSameKeys(t *testing.T) {
 
 func TestPatchRefusesInvalidTimezone(t *testing.T) {
 	s, store := newServer(t)
-	code, out := do(t, s.Handler(), http.MethodPatch, "/api/config", `{"timezone":"Asia/Nowhere"}`)
-	if message, _ := out["error"].(string); code != http.StatusBadRequest || !strings.Contains(message, "timezone") {
-		t.Fatalf("%d %v", code, out)
+	// "Local" is the process time zone to time.LoadLocation; an empty
+	// timezone means that.
+	for _, name := range []string{"Asia/Nowhere", "Local"} {
+		code, out := do(t, s.Handler(), http.MethodPatch, "/api/config", `{"timezone":"`+name+`"}`)
+		if message, _ := out["error"].(string); code != http.StatusBadRequest || !strings.Contains(message, "timezone") || strings.Contains(message, name) {
+			t.Fatalf("%s: %d %v", name, code, out)
+		}
+		if len(store.Raw()) != 0 {
+			t.Fatalf("%s: saved %v", name, store.Raw())
+		}
 	}
-	if len(store.Raw()) != 0 {
-		t.Fatalf("saved %v", store.Raw())
-	}
-	if code, _ := do(t, s.Handler(), http.MethodPatch, "/api/config", `{"timezone":"Asia/Shanghai"}`); code != http.StatusOK {
-		t.Fatal(code)
+	for _, name := range []string{"Asia/Shanghai", "UTC"} {
+		if code, _ := do(t, s.Handler(), http.MethodPatch, "/api/config", `{"timezone":"`+name+`"}`); code != http.StatusOK {
+			t.Fatal(name, code)
+		}
 	}
 	if code, _ := do(t, s.Handler(), http.MethodPatch, "/api/config", `{"timezone":""}`); code != http.StatusOK {
 		t.Fatal(code)

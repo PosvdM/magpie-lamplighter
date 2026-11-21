@@ -29,10 +29,12 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 
 `lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`）。内部监听不要求密钥，`-listen` 的主机部分必须是回环地址（`127.0.0.0/8`、`::1` 或 `localhost`），否则程序报错退出（`main.go` 的 `checkListen`）；需要从其他机器访问时使用对外监听。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
-- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。手工写入、`PATCH /api/config` 会拒绝的设置在启动时照常加载：`timezone` 无效时记一条警告日志，使用进程的时区；`admin_key` 与 `mcp_key` 相同时见“HTTP 接口”的“对外监听”。
+- `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。手工写入、`PATCH /api/config` 会拒绝的设置在启动时照常加载：`timezone` 无效（包括 `Local`）时记一条警告日志，按 `timezone` 为空处理，即使用 `timezone_offset_hours`，没有时使用进程的时区；`admin_key` 与 `mcp_key` 相同时见“HTTP 接口”的“对外监听”。
 - `state.json`、`history/`、`instance.lock`：见下文“数据”。
 
-启动顺序（`main.go` 的 `run`）：检查 `-listen`，创建数据目录，取得 `instance.lock`，然后读取 `config.json`，开内部监听，按配置开对外监听，最后启动后台循环（它读取 `state.json`）。`instance.lock` 是独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个进程使用数据目录。Magpie 的 `plugin update` 等命令会另起一个插件宿主，它启动的程序使用另一个端口和同一个数据目录；这个程序拿不到锁时每秒重试一次（`lockRetry`），不读取数据目录中的文件，也不监听任何端口，收到 SIGINT 或 SIGTERM 时直接退出。拿到锁时前一个进程已经退出，所以从磁盘读到的是它最后写入的配置和状态。等待期间插件宿主调用 tool 连不上内部监听，约 10 秒后报错。进程退出时先关闭监听、停止后台循环，再释放锁。
+启动顺序（`main.go` 的 `run`）：检查 `-listen`，创建数据目录，取得 `instance.lock`，然后读取 `config.json`，开内部监听，按配置开对外监听，最后启动后台循环（它读取 `state.json`）。`instance.lock` 是独占文件锁（Unix 上用 `flock`，Windows 上以不共享的方式打开文件），保证同一时间只有一个进程使用数据目录。Magpie 的 `plugin update` 等命令会另起一个插件宿主，它启动的程序使用另一个端口和同一个数据目录；这个程序拿不到锁时每秒重试一次（`lockRetry`），不读取数据目录中的文件，也不监听任何端口，收到 SIGINT 或 SIGTERM 时直接退出。每次重试前和拿到锁后都检查是否已收到退出信号，已收到时释放锁直接退出，不读配置、不绑定端口。拿到锁时前一个进程已经退出，所以从磁盘读到的是它最后写入的配置和状态。等待期间插件宿主调用 tool 连不上内部监听，约 10 秒后报错。
+
+退出顺序（`main.go` 的 `shutdown`）：先调用 `server.Server.Shutdown`（步骤见“HTTP 接口”的“对外监听”中的“关闭”），它返回后不再写 `config.json`；再关闭内部监听，等其中的请求最多 5 秒（`shutdownTimeout`），超时时关闭连接；最后释放锁。
 
 ## 插件外壳
 
@@ -134,14 +136,14 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 | `POST /api/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
 | `POST /api/check-update` | 检查新版本，返回状态；页面打开时调用 |
 | `GET /api/config` | 已保存的配置原文，含密钥，供设置页填表 |
-| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析并通过 `config.Config.Check`，然后整体写入 `config.json` 并应用。返回保存后的原文。`Check` 拒绝去掉首尾空白后相同的非空 `admin_key` 和 `mcp_key`，以及 `time.LoadLocation` 不认识的非空 `timezone`，返回 400，错误信息只写字段名，不含值。合并、写盘、应用到引擎和对外监听、生成响应在 `server.Server.patchMu` 内依次完成，并发的请求按保存的顺序应用，运行中的配置与文件一致 |
+| `PATCH /api/config` | 替换给出的顶层键，值为 `null` 时删除该键；合并结果必须能解析并通过 `config.Config.Check`，然后整体写入 `config.json` 并应用。返回保存后的原文。`Check` 拒绝去掉首尾空白后相同的非空 `admin_key` 和 `mcp_key`，以及 `time.LoadLocation` 不认识的非空 `timezone` 和 `Local`（`time.LoadLocation` 把它当作进程的时区，空值已表示这个意思），返回 400，错误信息只写字段名，不含值。合并、写盘、应用到引擎和对外监听、生成响应在 `server.Server.patchMu` 内依次完成，并发的请求按保存的顺序应用，运行中的配置与文件一致。进程开始退出后返回 503，不写盘 |
 | `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
 `account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
 
 ### 内部监听
 
-内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。HTTP 服务（`main.go` 的 `newInternalServer`）读请求头限时 10 秒、读整个请求 30 秒、空闲连接 2 分钟，请求头最多 64 KiB；不限制写响应的时间，因为 tool 调用最长 50 秒，页面的操作最多等后台循环 3 分钟。
+内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。HTTP 服务（`main.go` 的 `newInternalServer`）读请求头限时 10 秒、读整个请求 30 秒、空闲连接 2 分钟，请求头最多 64 KiB，从读完请求头到写完响应最多 200 秒（`internalWriteTimeout`）：tool 调用最长 50 秒，页面的操作最多等后台循环 3 分钟。
 
 **Host 检查**：请求的 Host 不是 `localhost` 或回环 IP（`127.0.0.0/8`、`::1`，端口不限）时返回 403，包括 `GET /`、`/api/*` 和预检请求。内部监听不要求密钥，恶意域名把自己的名字重新解析到 `127.0.0.1` 后，在浏览器中与内部监听同源，能读到页面和 `GET /api/config` 中的密钥；这类请求的 Host 是那个域名。合法的访问都用回环地址：Magpie 的页面服务代理把 Host 设为 `127.0.0.1:<端口>`（Magpie 源码 `internal/gui/pageservice.go` 的 `servePageService`），桌面窗口中的页面直接打开 `http://127.0.0.1:<端口>/`，插件宿主经 `127.0.0.1` 调用 tool。`-listen` 只能绑定回环地址（见“进程和数据目录”），Host 检查防的是浏览器中的 DNS 重绑定。
 
@@ -171,7 +173,7 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 - 两把密钥只开放各自的部分：`admin_key` 不能访问 `/mcp`，`mcp_key` 不能访问页面和接口。比较方法相同：对 `Bearer <密钥>` 和请求的 `Authorization` 头各求 SHA-256，再常数时间比较，不泄露密钥长度和前缀。
 - 页面和接口不做 Origin 校验，也不返回 CORS 头：密钥在请求头中，其他网站的页面无法让浏览器带上它。
 - **重新绑定**：只有地址变化，或监听从有内容可提供变为没有（反之亦然）时，`Configure` 才关闭旧监听再绑定新地址。监听在运行且地址不变时，更换密钥或开关其中一部分只替换内存中的设置，监听保持不动：反向代理和 MCP 客户端会复用 keep-alive 连接，关闭中的监听会让下一个请求失败。请求在 `mcp.Server.mu` 内读取密钥，`Configure` 返回后的请求都按新设置处理。用旧 `mcp_key` 进入的 MCP 请求，以及关闭 `/mcp` 时仍在执行的 MCP 请求会被取消；页面和接口的请求执行到结束，所以经对外地址修改 `admin_key` 的 `PATCH /api/config` 也能收到响应。需要重新绑定时（`mcp.Server.drainLocked`），旧监听立即停止接受连接、端口释放，MCP 请求被取消；已读入的页面和接口请求在后台由 `http.Server.Shutdown` 等待回完，最多 5 秒（`drainTimeout`），超时或 `mcp.Server.Close` 时关闭连接。`Configure` 不等待这些请求，因为修改 `public_listen` 的 `PATCH /api/config` 本身就在等 `Configure` 返回。绑定失败时记录错误，每 2 秒重试。
-- **关闭**：`server.Server.Shutdown` 先在 `server.Server.mu` 内标记停止，然后释放这把锁，再关闭对外监听（取消并等待其中的请求），最后停止引擎。对外的接口请求读取状态时要取这把锁，持锁等待会死锁。停止后的实例不再应用配置，也不重新监听。
+- **关闭**：`server.Server.Shutdown` 依次：在 `server.Server.mu` 内标记停止，然后释放这把锁；取消引擎（`engine.Engine.Cancel`），管理操作立即返回 `engine.ErrStopped`（HTTP 503），排队未执行的操作放弃，正在执行的操作的网络请求被取消；关闭对外监听，取消并等待其中的请求；取一次 `patchMu`，等已开始的配置写入完成；最后等后台循环结束，最多 10 秒。先取消引擎再等请求，是因为页面和接口的请求可能在等后台循环。对外的接口请求读取状态时要取 `server.Server.mu`，持锁等待会死锁。`PATCH /api/config` 在 `patchMu` 内检查停止标记，停止后返回 503，不写盘，所以 `Shutdown` 返回后不再写 `config.json`。停止后的实例不再应用配置，也不重新监听。
 - **超时**：读请求头 5 秒、读请求 15 秒、写响应 190 秒、空闲连接 30 秒，请求头最多 16 KiB，页面、接口和 `/mcp` 共用。插件宿主的 tool 调用走内部监听，经对外接口调用 `POST /api/tools/{name}` 同样最长 50 秒。
 
 状态接口中的对外监听状态：
@@ -337,7 +339,7 @@ Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到�
 
 Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组一起退出，所以没有“停用”状态。
 
-`ObservePassive` 和 HTTP 接口不直接执行网络请求：前者只把读数放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果，最多 3 分钟。唯一的例外是 `check-update`，见下文。
+`ObservePassive` 和 HTTP 接口不直接执行网络请求：前者只把读数放入队列（队列满时丢弃，丢一个被动样本没有影响），后者把操作交给后台循环并等待结果（`engine.dispatch`），最多 3 分钟；请求的 context 结束（如客户端断开）或引擎停止时立即返回，已交给后台循环的操作仍会执行完。唯一的例外是 `check-update`，见下文。
 
 新版本检查读取 GitHub API 的 `releases/latest`（不含草稿和预发布版本），后台循环开始工作后读一次，之后每 6 小时读一次，失败后 30 分钟重试。页面打开时调用 `check-update` 再读一次，距上次尝试读取（无论成败）不到 1 分钟（`releaseRecheckPeriod`）时不读：未登录的 GitHub API 每个地址每小时只能请求 60 次，GitHub 不响应时也不会让每次打开页面都等到超时。这次读取在处理请求的 goroutine 中进行，不经过后台循环，以免排在查询和点火之后；插件停止时请求随之取消。同一时间只有一个读取（`releaseMu`）：已有读取在进行时，页面的请求直接返回，后台循环不等待并在 30 分钟后重试；距上次成功读取不到 1 分钟时，后台循环也不读。请求使用 Did Codex Reset 相同的出口（环境变量中的代理或直连）。版本号按数字逐段比较；最新版本比当前版本新时，状态接口返回 `latest_version` 和 `release_url`，页面在版本号右边显示更新图标。失败只记 debug 日志，保留上一次的结果。当前版本不是纯数字版本时（开发版本 `dev`、`0.0.0-dev.<commit>` 和预发布版本）不检查；最新 Release 的标签不是纯数字版本时视为没有新版本。
 
@@ -346,7 +348,7 @@ Magpie 停用插件时会重启插件宿主，Lamplighter 随宿主的进程组�
 ### 生命周期
 
 - 启动时读取 `config.json`；`PATCH /api/config` 保存并应用新的配置。无法解析的配置不会写入文件。
-- 收到 SIGINT 或 SIGTERM 时关闭监听、停止后台循环并退出。
+- 收到 SIGINT 或 SIGTERM 时取消后台循环，关闭监听，等已开始的配置写入完成后退出，见“进程和数据目录”。
 - `instance.lock` 由 `main.go` 在读取任何数据之前取得，进程退出前释放，见“进程和数据目录”。
 
 ## 额度获取

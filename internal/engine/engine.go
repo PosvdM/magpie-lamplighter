@@ -267,17 +267,27 @@ func (e *Engine) Start() {
 	go e.supervise()
 }
 
-// Stop ends the loop and waits up to timeout for it to finish. A stopped
-// engine never starts again; the process exits after it.
-func (e *Engine) Stop(timeout time.Duration) {
+// Cancel tells the loop to stop without waiting for it. From then on the
+// management operations return ErrStopped at once, those waiting for the
+// loop included, and a queued operation the loop has not started is
+// dropped; the network work of the operation in progress is canceled.
+// A stopped engine never starts again; the process exits after it.
+func (e *Engine) Cancel() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.stopped {
-		e.mu.Unlock()
 		return
 	}
 	e.stopped = true
-	started := e.started
 	close(e.stopCh)
+}
+
+// Stop cancels the loop (see Cancel) and waits up to timeout for it to
+// finish.
+func (e *Engine) Stop(timeout time.Duration) {
+	e.Cancel()
+	e.mu.Lock()
+	started := e.started
 	e.mu.Unlock()
 	if !started {
 		return
