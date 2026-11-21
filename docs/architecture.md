@@ -26,7 +26,7 @@ Lamplighter 是一个 Go 程序。Magpie 的插件 `magpie-lamplighter`（npm �
 
 ## 进程和数据目录
 
-`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥，地址不是回环地址时 `main.go` 记录一条警告。需要从外部访问时使用对外监听，见“HTTP 接口”。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
+`lamplighter -listen <地址>` 在 `-listen` 上开内部监听（默认 `127.0.0.1:8317`），只应绑定回环地址：内部监听不要求密钥，地址不是回环地址时 `main.go` 记录一条警告；请求的 Host 不是回环地址时返回 403，见“HTTP 接口”的“内部监听”。需要从外部访问时使用对外监听。数据目录依次取 `-data-dir`、`LAMPLIGHTER_DATA_DIR`、`$XDG_STATE_HOME/lamplighter`（Magpie 的 Docker 镜像中为 `/config/state/lamplighter`，升级后保留）、Windows 的 `%LOCALAPPDATA%\lamplighter`、`~/.local/state/lamplighter`（`config.DataDir`）。目录中有：
 
 - `config.json`：配置，权限 600。文件不存在时使用默认值；存在但无法解析时程序退出并报告文件路径，不覆盖它。
 - `state.json`、`history/`、`instance.lock`：见下文“数据”。
@@ -51,9 +51,9 @@ Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，�
 
 ## HTTP 接口
 
-Lamplighter 有两个监听，使用同一套路由（`server.Server.Handler`）：
+Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）：
 
-- 内部监听：`-listen` 的地址，只绑定回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。
+- 内部监听：`-listen` 的地址，只绑定回环地址，不要求密钥。Magpie 的页面服务（`magpie.page.service`）和插件宿主的 tool 经它访问。路由外面另有 Host 检查、页面令牌和 CORS，见下文“内部监听”。
 - 对外监听：配置中的 `public_listen`（默认 `127.0.0.1:8318`），供服务器前面的域名或反向代理使用，页面和接口要求 `admin_key`，见下文“对外监听”。
 
 路由：
@@ -73,6 +73,22 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.Handler`）
 | `POST /api/tools/{name}` | 执行一个 MCP 工具，请求体为参数对象，返回 `{"result": …}` 或 `{"error": "…"}`；插件宿主的 tool 经这里调用，最长 50 秒 |
 
 `account_names` 以 pin 为键保存账号名称：Magpie 没有让插件修改账号名称的接口。
+
+### 内部监听
+
+内部监听的处理器是 `server.guardInternal` 包着的路由，代码在 `internal/server/internal.go`。
+
+**Host 检查**：请求的 Host 不是 `localhost` 或回环 IP（`127.0.0.0/8`、`::1`，端口不限）时返回 403，包括 `GET /`、`/api/*` 和预检请求。内部监听不要求密钥，恶意域名把自己的名字重新解析到 `127.0.0.1` 后，在浏览器中与内部监听同源，能读到页面和 `GET /api/config` 中的密钥；这类请求的 Host 是那个域名。合法的访问都用回环地址：Magpie 的页面服务代理把 Host 设为 `127.0.0.1:<端口>`（Magpie 源码 `internal/gui/pageservice.go` 的 `servePageService`），桌面窗口中的页面直接打开 `http://127.0.0.1:<端口>/`，插件宿主经 `127.0.0.1` 调用 tool。所以把 `-listen` 绑定到其他地址后从别的机器访问，也会得到 403。
+
+**页面令牌**：`server.New` 用 `crypto/rand` 生成 32 字节随机数，以 base64url（无填充）编码作为页面令牌，进程运行期间不变。内部监听的 `GET /` 返回 `web.PageWith(令牌)`：它把页面中的 `<meta name="lamplighter-page" content="">` 填上令牌，页面没有这个标签时原样返回。页面请求接口时在 `X-Lamplighter-Page` 请求头中带上令牌。对外监听返回不带令牌的 `web.Page()`。
+
+**CORS**：Magpie 的插件页面在 `sandbox="allow-scripts"` 的 iframe 中运行，页面服务代理还加上 CSP `sandbox`，页面是不透明源，请求自己的 `api/…` 时带 `Origin: null`，没有 CORS 头就读不到响应。任何网站都能建这样的 iframe，所以只对带页面令牌的请求开放：
+
+- `/api/*` 的 `OPTIONS` 预检且 `Origin` 为 `null`：返回 204，带 `Access-Control-Allow-Origin: null`、`Access-Control-Allow-Methods: GET, POST, PATCH`、`Access-Control-Allow-Headers: Content-Type, Authorization, X-Lamplighter-Page`、`Access-Control-Max-Age: 600`、`Vary: Origin`。预检本身不带自定义请求头，所以不检查令牌。
+- `/api/*` 的其他请求：只有 `Origin` 为 `null` 且 `X-Lamplighter-Page` 等于令牌时（两边先求 SHA-256 再常数时间比较），才加 `Access-Control-Allow-Origin: null` 和 `Vary: Origin`。其余请求不加 CORS 头，但照常处理：没有 `Origin` 的请求（插件宿主调用 `POST /api/tools/{name}`）和同源请求不受影响。别的网站在 sandbox iframe 中仍能发出请求，只是读不到响应；令牌只在内部监听返回的页面里，它拿不到。
+- 不返回 `Access-Control-Allow-Credentials`，`GET /` 不加 CORS 头。
+
+对外监听不加 CORS：独立访问时页面与接口同源，鉴权靠 `admin_key`。
 
 ### 对外监听
 

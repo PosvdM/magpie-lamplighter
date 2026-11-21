@@ -3,7 +3,9 @@
 //
 // The internal listener runs on loopback and takes no key: Magpie reaches
 // it for the plugin page (magpie.page.service) and for the tools of the
-// plugin host. The public listener at public_listen, run by package mcp,
+// plugin host. It refuses a Host that is not loopback and opens its API
+// to the sandboxed plugin page by a page token; see guardInternal. The
+// public listener at public_listen, run by package mcp,
 // serves the same handler behind admin_key when web_enabled, and /mcp
 // behind mcp_key when mcp_enabled; see docs/architecture.md.
 package server
@@ -40,9 +42,12 @@ type Server struct {
 	engine *engine.Engine
 	mcp    *mcp.Server
 	tools  *engine.MCPBackend
-	// handler serves both listeners: the internal one directly and the
-	// public one behind the admin key.
-	handler http.Handler
+	// handler serves the internal listener: the routes with the page
+	// token in the page, behind the Host check and with CORS for the
+	// page token (guardInternal). The public listener serves the routes
+	// without them, behind the admin key.
+	handler   http.Handler
+	pageToken string // random per process; see guardInternal
 
 	mu      sync.Mutex
 	stopped bool
@@ -53,8 +58,9 @@ type Server struct {
 func New(store *config.Store, cfg config.Config, parseErr error, e *engine.Engine, version string) *Server {
 	backend := engine.NewMCPBackend(e)
 	s := &Server{store: store, engine: e, mcp: mcp.New(backend, version), tools: backend}
-	s.handler = s.routes()
-	s.mcp.SetWeb(s.handler)
+	s.pageToken = newPageToken()
+	s.handler = guardInternal(s.routes(web.PageWith(s.pageToken)), s.pageToken)
+	s.mcp.SetWeb(s.routes(web.Page()))
 	s.apply(cfg, parseErr)
 	return s
 }
@@ -116,12 +122,13 @@ func (s *Server) status() statusResponse {
 // Handler serves the internal listener.
 func (s *Server) Handler() http.Handler { return s.handler }
 
-func (s *Server) routes() http.Handler {
+// routes returns the routes of both listeners, serving page at /.
+func (s *Server) routes(page []byte) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(web.Page())
+		w.Write(page)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.status())

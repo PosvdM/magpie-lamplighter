@@ -29,7 +29,9 @@ func newServer(t *testing.T) (*Server, *config.Store) {
 func do(t *testing.T, h http.Handler, method, path, body string) (int, map[string]any) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(method, path, strings.NewReader(body)))
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Host = "127.0.0.1:8317"
+	h.ServeHTTP(rec, req)
 	var out map[string]any
 	if strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -60,7 +62,9 @@ func TestPageAndUnknownRoutes(t *testing.T) {
 	s, _ := newServer(t)
 	h := s.Handler()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "127.0.0.1:8317"
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<html") {
 		t.Fatalf("page: %d", rec.Code)
 	}
