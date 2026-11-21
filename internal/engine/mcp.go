@@ -16,6 +16,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -46,18 +47,9 @@ func describeTime(t, now time.Time) *modelTime {
 }
 
 // maskEmail keeps the last two characters of the unquoted email local part,
-// such as "***rk". The domain and the length of the local part are left out.
-func maskEmail(email string) string {
-	local := email
-	if at := strings.LastIndexByte(email, '@'); at >= 0 {
-		local = email[:at]
-	}
-	runes := []rune(strings.ReplaceAll(local, "\"", ""))
-	if len(runes) > 2 {
-		runes = runes[len(runes)-2:]
-	}
-	return "***" + string(runes)
-}
+// such as "***rk". The domain and the length of the local part are left out
+// (redact.Email).
+func maskEmail(email string) string { return redact.Email(email) }
 
 // noteEmail matches entire non-whitespace fragments containing @, including
 // quoted local parts and domain literals. Unicode whitespace also separates fragments.
@@ -728,7 +720,7 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	select {
 	case result := <-cmd.reply:
 		if result.err != nil {
-			return map[string]any{"ok": false, "error": refreshReason(result.err)}, nil
+			return map[string]any{"ok": false, "error": redact.Text(refreshReason(result.err))}, nil
 		}
 		return map[string]any{"ok": true, "as_of": describeTime(e.now(), e.now())}, nil
 	case <-ctx.Done():

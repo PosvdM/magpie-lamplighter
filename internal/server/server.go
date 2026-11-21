@@ -26,6 +26,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
 	"github.com/PosvdM/magpie-lamplighter/internal/engine"
 	"github.com/PosvdM/magpie-lamplighter/internal/mcp"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/web"
 )
 
@@ -266,7 +267,7 @@ func (s *Server) routes(page []byte) http.Handler {
 		defer cancel()
 		result, err := s.tools.CallTool(ctx, r.PathValue("name"), args)
 		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
+			writeToolError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"result": result})
@@ -307,7 +308,7 @@ func (s *Server) action(w http.ResponseWriter, err error) {
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "status": s.status()})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": redact.Text(err.Error()), "status": s.status()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": s.status()})
@@ -342,6 +343,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Write(raw)
 }
 
+// writeToolError answers the error of a tool call as the plugin host
+// expects it, {"error": "…"}, redacted (redact.Text).
+func writeToolError(w http.ResponseWriter, err error) {
+	writeJSON(w, http.StatusOK, map[string]any{"error": redact.Text(err.Error())})
+}
+
+// writeError answers err, redacted (redact.Text) as every error text of
+// the API answers is.
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	writeJSON(w, status, map[string]string{"error": redact.Text(err.Error())})
 }

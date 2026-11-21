@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -34,6 +35,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/engine"
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/magpie"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/server"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
@@ -57,14 +59,22 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("lamplighter: ")
+	setupLog(os.Stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	err := run(ctx, *listen, *dataDir, magpie.FromEnv())
 	stop()
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// setupLog has the standard logger write to w. Every log line, those of
+// package log and net/http included, leaves out emails, credentials and
+// URL parameters (redact.Writer).
+func setupLog(w io.Writer) {
+	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+	log.SetPrefix("lamplighter: ")
+	log.SetOutput(redact.Writer(w))
 }
 
 // run serves until ctx ends. It takes the instance lock of the data

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 const ignitionOutputWindow = 2 * time.Second
@@ -144,11 +145,13 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 		if !firstOutput.IsZero() {
 			firstWait = firstOutput.Sub(started).Milliseconds()
 		}
+		// The reply is the record's only free text; it is redacted
+		// (redact.Text), as every log line is.
 		fields := map[string]any{
 			"event": "ignition_stream", "provider": t.group.Provider,
 			"model": req.Model, "auth_index": t.group.AuthIndex,
 			"correlation_id": correlation, "stream_id": streamID,
-			"reply": capture.reply.String(), "reply_truncated": capture.replyChars > replyLimit,
+			"reply": redact.Text(capture.reply.String()), "reply_truncated": capture.replyChars > replyLimit,
 			"output_received": capture.output, "usage": capture.usage, "usage_source": "magpie_gateway",
 			"usage_completeness": usageState, "end_reason": reason,
 			"first_output_wait_ms": firstWait, "total_ms": time.Since(started).Milliseconds(),

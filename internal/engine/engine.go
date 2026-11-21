@@ -24,6 +24,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/models"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/release"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
@@ -361,7 +362,7 @@ func (e *Engine) logf(level, format string, args ...any) {
 		return
 	}
 	defer func() { _ = recover() }()
-	e.host.Log(level, fmt.Sprintf(format, args...), nil)
+	e.host.Log(level, redact.Text(fmt.Sprintf(format, args...)), nil)
 }
 
 func (e *Engine) resolveDataDir(config.Config) string {

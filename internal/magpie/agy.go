@@ -20,6 +20,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/egress"
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 // The agy-cli plugin (@magpie-community/opencode-agy-cli-auth, read at
@@ -145,7 +146,7 @@ func (h *Host) agyTokenFile(l savedLogin) (agyFile, error) {
 	}
 	raw, ok := auth[key]
 	if !ok {
-		return agyFile{}, fmt.Errorf("plugin-auth.json 中没有 agy-cli 账号 %q", key)
+		return agyFile{}, errors.New("plugin-auth.json 中没有这个 agy-cli 账号")
 	}
 	var entry struct {
 		Type     string         `json:"type"`
@@ -153,27 +154,27 @@ func (h *Host) agyTokenFile(l savedLogin) (agyFile, error) {
 		Metadata map[string]any `json:"metadata"`
 	}
 	if !isJSONObject(raw) {
-		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: not an object", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: not an object", host.ErrFormat)
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
-		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: %v", key, host.ErrFormat, err)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: %v", host.ErrFormat, err)
 	}
 	if entry.Type != "api" {
-		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: type is %q, not api", key, host.ErrFormat, entry.Type)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: type is not api", host.ErrFormat)
 	}
 	home := ""
 	if v, ok := entry.Metadata["agyHome"]; ok {
 		s, isString := v.(string)
 		if !isString || !agyHomeID.MatchString(s) {
-			return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: agyHome is not a home id", key, host.ErrFormat)
+			return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: agyHome is not a home id", host.ErrFormat)
 		}
 		home = s
 	}
 	switch {
 	case home != "" && entry.Key != "agy:"+home:
-		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: key does not name agyHome", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: key does not name agyHome", host.ErrFormat)
 	case home == "" && entry.Key != "agy":
-		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: neither agy's own account nor one with an agyHome", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中这个 agy-cli 账号的条目：%w: neither agy's own account nor one with an agyHome", host.ErrFormat)
 	}
 	// The plugin names the account by its email in metadata, and Magpie
 	// lists it by that name.
@@ -229,18 +230,8 @@ func (f agyFile) belongs(signedIn string) error {
 }
 
 // maskEmail keeps the last two characters of the local part of email,
-// such as "***rk", as the MCP tools name an account.
-func maskEmail(email string) string {
-	local := email
-	if at := strings.LastIndexByte(email, '@'); at >= 0 {
-		local = email[:at]
-	}
-	runes := []rune(strings.ReplaceAll(local, "\"", ""))
-	if len(runes) > 2 {
-		runes = runes[len(runes)-2:]
-	}
-	return "***" + string(runes)
-}
+// such as "***rk", as the MCP tools name an account (redact.Email).
+func maskEmail(email string) string { return redact.Email(email) }
 
 // agyStored is agy's stored sign-in, as go-keyring writes it.
 type agyStored struct {

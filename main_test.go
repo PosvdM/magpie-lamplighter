@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -288,5 +289,27 @@ func TestShutdownRefusesLatePatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, config.FileName)); !os.IsNotExist(err) {
 		t.Fatalf("config.json written: %v", err)
+	}
+}
+
+// The standard logger, which package log and net/http write to, leaves
+// out emails, URL parameters and tokens.
+func TestLogIsRedacted(t *testing.T) {
+	writer, flags, prefix := log.Writer(), log.Flags(), log.Prefix()
+	t.Cleanup(func() {
+		log.SetOutput(writer)
+		log.SetFlags(flags)
+		log.SetPrefix(prefix)
+	})
+	var out strings.Builder
+	setupLog(&out)
+	log.Printf("http: carol.secret@corp.example GET https://vendor.example/v1?user=carol%%40corp.example Bearer ya29.A0b1C2d3E4f5G6h7I8j9K0l1M2n3O4p5Q6r7S8t9")
+	for _, part := range []string{"carol.secret", "corp.example", "user=", "A0b1C2d3E4f5G6h7I8j9"} {
+		if strings.Contains(out.String(), part) {
+			t.Errorf("%q shows %q", out.String(), part)
+		}
+	}
+	if !strings.Contains(out.String(), "lamplighter: http: ***et GET https://vendor.example/v1 Bearer …") {
+		t.Fatalf("log %q", out.String())
 	}
 }

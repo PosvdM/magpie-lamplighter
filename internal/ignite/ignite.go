@@ -16,6 +16,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
 	"github.com/PosvdM/magpie-lamplighter/internal/failure"
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -311,7 +312,7 @@ func RecordCredentialFailure(ts *store.TargetState, now time.Time, err error, su
 	ts.LastFailureEpoch = epoch(now)
 	ts.RetryAtEpoch = 0
 	ts.CircuitOpenUntilEpoch = 0
-	ts.CircuitReason = truncate(summary, 500)
+	ts.CircuitReason = truncate(redact.Text(summary), 500)
 }
 
 // recentCooldown reports whether the previous failure, shortly before now,
@@ -323,11 +324,14 @@ func (s Schedule) recentCooldown(ts *store.TargetState, now time.Time) bool {
 	return PinHeld(errors.New(ts.LastError))
 }
 
+// errorText is the text of err as state.json keeps it, redacted
+// (redact.Text). Magpie's fixed wording of a held account (PinHeld)
+// survives redaction.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return redact.Text(err.Error())
 }
 
 func truncate(text string, n int) string {

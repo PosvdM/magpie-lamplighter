@@ -16,6 +16,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -56,8 +57,13 @@ func (e *Engine) addEventDetail(level, kind, group, label, detail, message strin
 
 // addAccountEvent records an event of the account with auth index account,
 // which may have no quota group yet.
+//
+// The message, detail and params are redacted (redactEvent) before the
+// event is kept, written to the history or logged.
 func (e *Engine) addAccountEvent(account, level, kind, group, label, detail, message string, params map[string]string) {
 	now := e.now()
+	ev := redactEvent(Event{Message: message, Detail: detail, Params: params})
+	message, detail, params = ev.Message, ev.Detail, ev.Params
 	e.mu.Lock()
 	e.events = append(e.events, Event{Time: now, Level: level, Kind: kind, Group: group, Message: message, Label: label, Detail: detail, Params: params, Account: account})
 	if len(e.events) > maxEvents {
@@ -81,7 +87,7 @@ func (e *Engine) loadRecentEvents() {
 		if record.Kind != "e" {
 			continue
 		}
-		events = append(events, Event{
+		events = append(events, redactEvent(Event{
 			Time:    time.Unix(record.Time, 0).UTC(),
 			Level:   record.Level,
 			Kind:    record.Event,
@@ -91,7 +97,7 @@ func (e *Engine) loadRecentEvents() {
 			Detail:  record.Detail,
 			Params:  record.Params,
 			Account: record.Account,
-		})
+		}))
 	}
 	if len(events) > maxEvents {
 		events = events[len(events)-maxEvents:]
@@ -262,7 +268,7 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 	notifyErr := e.notifyErr
 	e.mu.Unlock()
 	if notifyErr != "" {
-		results = append(results, ChannelResult{Channel: "Webhook", Error: notifyErr})
+		results = append(results, ChannelResult{Channel: "Webhook", Error: redact.Text(notifyErr)})
 	}
 	var channels []notify.Channel
 	if e.alerts != nil {
@@ -289,7 +295,7 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 			result := ChannelResult{Channel: channel.Name}
 			defer func() {
 				if r := recover(); r != nil {
-					result.OK, result.Error = false, fmt.Sprintf("内部错误：%v", r)
+					result.OK, result.Error = false, redact.Text(fmt.Sprintf("内部错误：%v", r))
 				}
 				tested[i] = result
 			}()
@@ -301,8 +307,9 @@ func (e *Engine) testNotify(ctx context.Context) ([]ChannelResult, error) {
 				err = channel.Sender.Send(ctx, msg)
 			}
 			result.OK = err == nil
+			result.Response = redact.Text(result.Response)
 			if err != nil {
-				result.Error = err.Error()
+				result.Error = errText(err)
 			}
 		}()
 	}
@@ -617,6 +624,7 @@ func (e *Engine) Status() Status {
 	if status.Events == nil {
 		status.Events = []Event{}
 	}
+	redactStatus(&status)
 	return status
 }
 
@@ -803,10 +811,10 @@ func (e *Engine) historyContext(ctx context.Context, span time.Duration, kind st
 		}
 		if record.Kind == "e" {
 			if record.Event == "ignite" || record.Event == "ignite_manual" || record.Event == "ignite_failed" || record.Event == "ignite_paused" {
-				resp.Events = append(resp.Events, Event{
+				resp.Events = append(resp.Events, redactEvent(Event{
 					Time: time.Unix(record.Time, 0).UTC(), Level: record.Level, Kind: record.Event,
 					Group: record.Group, Message: record.Message, Label: record.Label, Detail: record.Detail, Params: record.Params,
-				})
+				}))
 			}
 			return nil
 		}

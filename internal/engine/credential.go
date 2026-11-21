@@ -14,6 +14,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -361,7 +362,7 @@ func credentialSummary(d failure.Diagnosis) string {
 	if d.SummaryFallback {
 		return ""
 	}
-	return d.Summary
+	return redact.Text(d.Summary)
 }
 
 // noteCredentialOK records that cred worked for source. A working quota

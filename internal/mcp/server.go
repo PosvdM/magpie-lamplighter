@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 // Backend returns only model-safe DTOs, never management responses.
@@ -135,6 +137,7 @@ func (s *Server) State() State {
 	case state.Enabled:
 		state.Error = s.listenErr
 	}
+	state.Error = redact.Text(state.Error)
 	return state
 }
 
@@ -149,7 +152,7 @@ func (s *Server) Public() Public {
 		err = s.refused
 	}
 	return Public{
-		Listen: s.state.Listen, Running: running, Error: err,
+		Listen: s.state.Listen, Running: running, Error: redact.Text(err),
 		Web: running && s.adminKey != "" && s.web != nil,
 		MCP: running && s.key != "",
 	}
@@ -620,7 +623,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, raw []byt
 			arguments[name] = text
 		}
 		if err := validateArguments(params.Name, arguments); err != nil {
-			reply(w, req.ID, nil, &rpcError{-32602, err.Error()})
+			reply(w, req.ID, nil, &rpcError{-32602, redact.Text(err.Error())})
 			return
 		}
 		value, err := s.callTool(r.Context(), params.Name, arguments)
@@ -629,7 +632,9 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request, raw []byt
 			return
 		}
 		if err != nil {
-			reply(w, req.ID, map[string]any{"content": []any{map[string]string{"type": "text", "text": err.Error()}}, "isError": true}, nil)
+			// The error leaves the process: redacted, as every error text
+			// of the MCP answers is.
+			reply(w, req.ID, map[string]any{"content": []any{map[string]string{"type": "text", "text": redact.Text(err.Error())}}, "isError": true}, nil)
 			return
 		}
 		data, err := json.Marshal(value)

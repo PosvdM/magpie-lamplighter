@@ -10,6 +10,7 @@ import (
 
 	"github.com/PosvdM/magpie-lamplighter/internal/config"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
@@ -569,12 +570,13 @@ func PlanMessage(lang, label, from, to string) Message {
 }
 
 // CircuitMessage is sent once when ignition pauses until the next day.
-// summary is the error in one sentence, see failure.Diagnose.
+// summary is the error in one sentence, see failure.Diagnose; it is
+// redacted (redact.Text), as are the summaries of CredentialMessage.
 func CircuitMessage(lang, label string, until time.Time, summary string, loc *time.Location) Message {
 	return Message{
 		Kind:  KindCircuit,
 		Title: T(lang, "circuit_title", label),
-		Body:  T(lang, "circuit_body", until.In(loc).Format("01/02 15:04"), truncate(summary, 220)),
+		Body:  T(lang, "circuit_body", until.In(loc).Format("01/02 15:04"), truncate(redact.Text(summary), 220)),
 		Level: LevelTimeSensitive,
 		Label: label,
 	}
@@ -605,7 +607,7 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 	if p.Ignition {
 		source = T(lang, "source_ignite")
 	}
-	summary := truncate(p.Summary, 220)
+	summary := truncate(redact.Text(p.Summary), 220)
 	var title string
 	var lines []string
 	switch p.Kind {

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 // Host talks to one Magpie.
@@ -70,8 +71,9 @@ var (
 	_ host.KeptRefresher   = (*Host)(nil)
 )
 
-// Log writes one line: the level, the message and the fields as JSON when
-// there are any.
+// Log writes one line: the level and the message, without emails,
+// credentials or URL parameters (redact.Text). The fields are left out:
+// the message of a record that has them carries them as JSON.
 func (h *Host) Log(level, message string, fields map[string]any) {
 	logger := h.Logger
 	if logger == nil {
@@ -80,5 +82,5 @@ func (h *Host) Log(level, message string, fields map[string]any) {
 	if level == "debug" && os.Getenv("LAMPLIGHTER_DEBUG") == "" {
 		return
 	}
-	logger.Printf("[%s] %s", level, message)
+	logger.Printf("[%s] %s", level, redact.Text(message))
 }
