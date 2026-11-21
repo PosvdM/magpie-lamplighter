@@ -58,7 +58,7 @@ npm 包 `magpie-lamplighter` 是 Go 程序在 Magpie 中的外壳，源码在 `n
 | `Accounts` | 网关的 `GET /v1/magpie/accounts`，只取 `kind` 为 `account` 的条目（API key 没有额度窗口）。每个账号的 `pin`（`<服务>/<id>`）是 Lamplighter 中账号的唯一键：`state.json`、`account_weights`、`account_order`、`account_names` 都以它为键，点火时作为 `X-Magpie-Account` 发送。`on` 为假的账号不监控。`Email` 取 `user` 中的邮箱，Team 等席位的 `a@b.com · Team` 取 `·` 之前的部分 |
 | `Credential` | Magpie 配置目录（`MAGPIE_CONFIG_DIR`，否则 `$XDG_CONFIG_HOME/magpie`，否则 `~/.config/magpie`）中的文件，见下文“凭证” |
 | `KeptQuotas` | 网关的 `GET /v1/magpie/quotas?kept=1`：Magpie 记下的最近读数，不向厂商发请求。见下文“额度记录” |
-| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次尝试计算，过早时返回 `ErrRefreshLimited`。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒，请求的超时为 45 秒 |
+| `RefreshQuota` | 网关的 `POST /v1/magpie/quotas/refresh?provider=<服务>&user=<账号名>`。Claude 的刷新会运行 Claude Code 的 `/usage`，所以同一个 Claude 账号 10 分钟（`claudeRefreshGap`）内只刷新一次，其他账号 1 分钟（`refreshGap`）内只刷新一次，按上次尝试计算，过早时返回 `ErrRefreshLimited`。网关对同一张额度卡 30 秒内只读一次，最多等 30 秒，请求的超时为 45 秒。引擎只在手动刷新凭证已过期的账号时调用，见下文“额度记录” |
 | `Models` | 网关的 `GET /v1/models` |
 | `OpenModelStream` / `ReadModelStream` / `CloseModelStream` | 向网关发送点火请求（`openai-response` 为 `POST /v1/responses`，`claude` 为 `POST /v1/messages`，`openai` 为 `POST /v1/chat/completions`），带 `X-Magpie-Account`；关闭流时取消请求 |
 | `Log` | 标准错误输出，由插件宿主转交 Magpie 的日志 |
@@ -105,6 +105,8 @@ Antigravity 不输出额度记录：Magpie 按额度池命名它的窗口（`Gem
 
 被动数据：引擎每 60 秒（`keptInterval`）读一次 `KeptQuotas`，在本轮主动查询之后应用每个账号比上次更新的读数（`pollKept`）。Magpie 根据它转发的请求更新这些读数，Lamplighter 因此不需要逐请求的响应头。
 
+**过期的凭证**：`Credential` 返回 `Expired` 时，引擎不向厂商查询，改用该账号在额度记录中的读数（`keptFallback`）：比已应用的读数新时应用，没有读数时报告错误。手动刷新（页面的刷新按钮、`POST /api/refresh` 和 MCP 的 `refresh_quotas`，包括只刷新一个账号）时，引擎先调用 `RefreshQuota` 让 Magpie 重新读取这个账号的额度，再读一次额度记录（`refreshKept`）；`RefreshQuota` 失败时照样应用已有的读数，并在账号的错误中写明刷新失败的原因。一次手动刷新中的所有 `RefreshQuota` 共用 35 秒的期限（`manualRefreshBudget`）：经 Magpie 调用的 tool 最多等约 50 秒，网关等一张额度卡最多 30 秒。定时查询和重置前后的查询不调用 `RefreshQuota`，因为 Claude 的刷新会运行 Claude Code 的 `/usage`。
+
 ## HTTP 接口
 
 Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）：
@@ -119,7 +121,7 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 | `GET /` | 管理页面 |
 | `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置（`admin_key_set`、`mcp_key_set`）；`public` 和 `mcp` 是对外监听的状态，见下文“对外监听”。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
 | `GET /api/history?range=…&window=5h\|7d` | 额度历史和点火事件，参数和返回格式见下文“额度变化图表” |
-| `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号 |
+| `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号；凭证已过期的账号先让 Magpie 刷新额度，见“与 Magpie 的接口”的“额度记录” |
 | `POST /api/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
 | `POST /api/test-notify` | 同时向已配置的渠道发送测试通知，`results` 中每个渠道一项：`channel`、`ok`、`error`，webhook 还有 `response`（响应的前 200 字）和 `unchecked`（没有设置 `success_json`，只检查了 HTTP 状态码） |
 | `POST /api/language` | 记录通知语言，`{"language": "zh-CN"}`；中文的各种写法记为 `zh`，其他语言记为 `en` |
@@ -290,7 +292,7 @@ MCP 在对外监听的 `/mcp` 上提供，`mcp_enabled` 为真且 `mcp_key` 非�
 
 - `list_quotas` 仅返回当前窗口，按服务及额度组汇总；每个账号带 `credential_invalid`（已确认的凭证失效，或最近一次查询为认证失败）和 `account_suspended`（已确认的账号停用），取自状态接口账号的 `credential_problem`；每个窗口的合计只计入拥有该窗口的账号，权重依次取 `account_weights`、套餐默认权重、1。给出每个窗口最先预计耗尽的账号。5 小时速度采用当前周期累计最低读数的分段最小二乘拟合，最大偏差 2 个百分点，最多 256 个输入点；7 天速度采用本周期累计使用量除以周期已过时间。缺失周期或样本时预测为空；超过 15 分钟或 3 个查询间隔（取较长者）未更新时标记过旧并停止预测。7 天匀速剩余为距重置占整个周期的比例，每日匀速预算为 `100/7`，同时给出实剩、差值和剩余每天可用量。滑动占位观测通过受锁保护的副本提供；不能确认窗口是否开始时返回空值。
 - `get_quota_history` 与 `list_quotas` 使用可取消的流式历史查询，扫描时先按所选账号、服务和窗口筛选，再按时间桶只保留最后一个样本；`list_quotas` 只读取当前窗口的样本，避免退役系列占用预算。此过程不全量保留原始记录。桶长度至少为管理历史的分段长度和所选范围的 1/2000（按秒取整，最少 1 秒）中的较大者；聚合中间结果最多 20000 个桶，超限返回工具错误。结果排序和预测计算只处理有界集合。`get_quota_history` 保留消失的窗口，按服务、账号、窗口筛选后每个系列最多 200 点、单次最多 2000 点，采样保留首尾，返回格式不含管理历史的 `resets`。已删除账号的历史使用匿名的 `retired account` 标识。
-- `refresh_quotas` 将请求交给原有引擎命令队列，全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。等待上限 180 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
+- `refresh_quotas` 与 `POST /api/refresh` 一样交给引擎命令队列执行手动刷新（凭证已过期的账号先让 Magpie 刷新额度，见“额度记录”），全局每 60 秒一次（引擎运行期间已接受的刷新失败也计入，未运行或停用时不占用限流），超限给出等待秒数和时间。`/mcp` 上等待上限 180 秒，经 Magpie 的 tool 调用最长 50 秒；连接关闭或超时结束等待，已进入引擎的查询可能继续完成。
 - `get_quota_events` 从最近保留的最多 200 条引擎事件中筛选重置、耗尽、点火成功/失败和凭证问题（`credential_invalid`、`credential_restored`），支持 `since` 和最多 100 条的 `limit`。事件带 `reason`（`auth`、`suspended`、`rate_limited`，只输出这三个取值），凭证事件还带 `source`（`ignite`、`query`）；账号还没有额度组时，凭证事件的 `group` 为空。重置和耗尽事件独立于通知渠道记录，窗口消失或首次返回不产生事件。
 
 Magpie 在转发请求时按自己的规则选择账号。Lamplighter 读不到完整的模型到账号的路由，因此 `model` 查询保守地保留候选额度组并标记 `certain: false`；不根据模型名称猜测唯一账号。

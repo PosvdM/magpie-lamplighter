@@ -325,10 +325,32 @@ func (e *Engine) shouldSkipActive(cfg config.Config, cred *Cred, slot, now time.
 	return true
 }
 
+// manualRefreshBudget bounds the quota refreshes that Magpie runs for
+// expired credentials during one manual refresh, all of them together. A
+// tool call through Magpie waits at most about 50 seconds for the whole
+// refresh; Magpie's gateway itself waits at most 30 seconds for one quota.
+const manualRefreshBudget = 35 * time.Second
+
 // poll runs one round of active queries. slot is the aligned time this round
 // belongs to. onlyAuth limits the round to one credential. force disables the
-// passive skip rule, for the manual refresh button.
+// passive skip rule, for the reset probes.
 func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool) {
+	e.pollWith(ctx, cfg, slot, onlyAuth, force, nil)
+}
+
+// manualPoll is the round of a manual refresh (the refresh button, POST
+// /api/refresh and the refresh_quotas tool): forced, and an expired
+// credential first has Magpie refresh its quota (refreshKept). Scheduled
+// rounds never do: a Claude refresh runs Claude Code's /usage.
+func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string) {
+	renew, cancel := context.WithTimeout(ctx, manualRefreshBudget)
+	defer cancel()
+	e.pollWith(ctx, cfg, e.now(), onlyAuth, true, renew)
+}
+
+// pollWith is poll; a non-nil renew lets an expired credential have Magpie
+// refresh its quota, within renew's deadline.
+func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool, renew context.Context) {
 	start := e.now()
 	creds, err := e.loadCreds(ctx, cfg)
 	if err != nil {
@@ -350,7 +372,7 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 		if !force && e.shouldSkipActive(cfg, cred, slot, now) {
 			continue
 		}
-		if err := e.refreshCred(ctx, cfg, cred); err != nil {
+		if err := e.queryCredWith(ctx, cfg, cred, true, renew); err != nil {
 			errs[cred.AuthIndex] = err.Error()
 			e.logf("warn", "额度刷新失败：%s：%v", labelFor(providers.Title(cred.Provider), cred), err)
 		}
@@ -390,15 +412,41 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 	return errors.New("凭证已过期，Magpie 也没有这个账号的额度记录")
 }
 
+// refreshKept asks Magpie to read the quota of cred again, for an account
+// whose token has expired, and then applies Magpie's new reading. When the
+// refresh fails, Magpie's last reading still applies (keptFallback) and the
+// refresh error is returned with the outcome of that fallback.
+func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
+	refreshErr := e.host.RefreshQuota(renew, cred.AuthIndex)
+	if refreshErr != nil && renew.Err() != nil && ctx.Err() == nil {
+		refreshErr = fmt.Errorf("超过 %s 未完成：%w", manualRefreshBudget, refreshErr)
+	}
+	err := e.keptFallback(ctx, cfg, cred)
+	switch {
+	case refreshErr == nil:
+		return err
+	case err != nil:
+		return fmt.Errorf("Magpie 刷新额度失败：%v；%w", refreshErr, err)
+	default:
+		return fmt.Errorf("Magpie 刷新额度失败，已显示 Magpie 记下的读数：%w", refreshErr)
+	}
+}
+
 // refreshCred runs the active query of one credential.
 func (e *Engine) refreshCred(ctx context.Context, cfg config.Config, cred *Cred) error {
-	return e.queryCred(ctx, cfg, cred, true)
+	return e.queryCredWith(ctx, cfg, cred, true, nil)
 }
 
 // queryCred runs the active query of one credential. Without track, the
 // result does not change the credential state: no new or ended credential
 // problem, event or notification.
 func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, track bool) error {
+	return e.queryCredWith(ctx, cfg, cred, track, nil)
+}
+
+// queryCredWith is queryCred; with renew set, an expired credential has
+// Magpie refresh its quota first (refreshKept).
+func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context) error {
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
 		return fmt.Errorf("读取凭证失败：%w", err)
@@ -415,6 +463,9 @@ func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, t
 	if credential.Expired {
 		// The token can only be renewed by Magpie or the agent CLI that
 		// owns it; Magpie's own last reading stands in.
+		if renew != nil {
+			return e.refreshKept(ctx, renew, cfg, cred)
+		}
 		return e.keptFallback(ctx, cfg, cred)
 	}
 	readAt := e.now()

@@ -185,7 +185,7 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 	var results []ChannelResult
 	switch cmd.kind {
 	case "refresh":
-		e.poll(ctx, cfg, e.now(), cmd.arg, true)
+		e.manualPoll(ctx, cfg, cmd.arg)
 		e.mu.Lock()
 		if cmd.arg != "" {
 			if text, ok := e.pollErrs[cmd.arg]; ok {
