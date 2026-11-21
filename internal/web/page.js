@@ -79,7 +79,12 @@
   // replaces the page with Magpie's error view.
   var magpie = { ready: false, theme: null, visible: true, calls: {}, next: 0 };
 
+  // Magpie's window and magpie web always frame the page in a sandbox, so
+  // only a sandboxed page in a frame speaks the protocol. Opened through
+  // the public listener the page is not sandboxed; another site that
+  // frames it is no Magpie and gets neither answers nor calls.
   function inFrame() {
+    if (!SANDBOXED) return false;
     try { return window.parent !== window; } catch (e) { return false; }
   }
 
@@ -142,16 +147,32 @@
 
   // The colors and fonts of Magpie's theme (pluginpages.js sends them as
   // tokens), which page.css takes as --magpie-<token> variables. Only these
-  // keys with string values are taken; a token missing from a later theme
-  // is removed, so page.css falls back to its own value.
+  // keys are taken, and only values that are what the key names
+  // (tokenValue); any other value counts as missing. A token missing from a
+  // later theme is removed, so page.css falls back to its own value.
   var MAGPIE_TOKENS = ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"];
+  var FONT_TOKENS = { font: true, code: true };
+
+  // value as the token name takes it, or "". A value can never load
+  // anything: colors must be a color to CSS.supports and hold no function
+  // that refers to something else (url(), image-set(), var(), env(),
+  // attr()); fonts must be a list of font families, without parentheses,
+  // braces, semicolons, backslashes or angle brackets.
+  function tokenValue(name, value) {
+    if (typeof value !== "string") return "";
+    value = value.trim();
+    if (!value || value.length > 300) return "";
+    if (FONT_TOKENS[name]) return /[(){};\\<>@]/.test(value) ? "" : value;
+    if (/url|image|var\(|env\(|attr\(|[;{}\\<>@]/i.test(value)) return "";
+    return typeof CSS !== "undefined" && CSS.supports && CSS.supports("color", value) ? value : "";
+  }
 
   function themeTokens(tokens) {
     var out = {};
     if (!tokens || typeof tokens !== "object") return out;
     MAGPIE_TOKENS.forEach(function (name) {
-      var value = tokens[name];
-      if (typeof value === "string" && value.trim()) out[name] = value.trim();
+      var value = tokenValue(name, tokens[name]);
+      if (value) out[name] = value;
     });
     return out;
   }
@@ -1609,10 +1630,47 @@
     return title ? title + " · " : "";
   }
 
+  // A short form of the service, for chart rows too narrow for its title:
+  // "AG" for Antigravity, the initials of a title of several words, else
+  // its first two letters.
+  var SERVICE_SHORT = { antigravity: "AG" };
+  function serviceShort(provider) {
+    if (SERVICE_SHORT[provider]) return SERVICE_SHORT[provider];
+    var title = provider ? providerTitle(provider) : "";
+    if (title.length <= 3) return title;
+    var words = title.split(/[\s-]+/).filter(Boolean);
+    return (words.length > 1 ? words.map(function (w) { return w[0]; }).join("") : title.slice(0, 2)).toUpperCase();
+  }
+
+  function shortPrefix(provider) {
+    var short = provider ? serviceShort(provider) : "";
+    return short ? short + " · " : "";
+  }
+
   // The label of quota group key as it shows apart from its account card.
+  // A label that names the account, such as "Antigravity#main" of a
+  // credential event, already starts with the service and stays as it is.
   function groupTitle(key, label) {
     var provider = sharedGroups(status && status.accounts)[key];
-    return label && provider ? servicePrefix(provider) + label : label;
+    if (!label || !provider) return label;
+    var title = providerTitle(provider);
+    if (label === title || label.indexOf(title + "#") === 0) return label;
+    return servicePrefix(provider) + label;
+  }
+
+  // Events of an account rather than one of its quota groups: credential
+  // problems, their end, and their notifications. Their group key is the
+  // account's first quota group only so that the event finds its account.
+  var ACCOUNT_EVENTS = { credential_invalid: true, credential_restored: true };
+  var ACCOUNT_NOTIFY_KINDS = { credential: true, suspended: true, rate_limited: true, credential_ok: true };
+
+  // The label of an event in the list and the chart's tooltips: a quota
+  // group's label with its service as groupTitle gives it, an account's as
+  // it is.
+  function eventTitle(ev, label) {
+    if (ACCOUNT_EVENTS[ev.kind]) return label;
+    if ((ev.kind === "notify" || ev.kind === "notify_failed") && ACCOUNT_NOTIFY_KINDS[notifyKind(ev)]) return label;
+    return groupTitle(ev.group, label);
   }
 
   function retryText(seconds) {
@@ -1886,7 +1944,7 @@
   // The label and detail of an event, for the chart's tooltips.
   function eventParts(ev) {
     var view = eventView(ev);
-    return { label: groupTitle(ev.group, view.label) || "—", detail: view.detail };
+    return { label: eventTitle(ev, view.label) || "—", detail: view.detail };
   }
 
   // The label and detail of an event as nodes, with the account names
@@ -1896,7 +1954,7 @@
   // from the provider.
   function eventMasked(ev, view) {
     view = view || eventView(ev);
-    var label = view.label ? [el("span", { class: SENSITIVE, text: groupTitle(ev.group, view.label) })] : [document.createTextNode("—")];
+    var label = view.label ? [el("span", { class: SENSITIVE, text: eventTitle(ev, view.label) })] : [document.createTextNode("—")];
     var detail = view.whole ? [el("span", { class: SENSITIVE, text: view.detail })] : maskedNodes(view.detail, [view.label].concat(view.secrets));
     return { label: label, detail: detail };
   }
@@ -2011,6 +2069,24 @@
     });
   }
 
+  // The time zone the page shows times in: the configured one with its
+  // offset, or the browser's. A change redraws the chart and the times in
+  // the settings from the data the page has.
+  function zoneKey(st) {
+    return zoneSet(st) ? st.timezone + "|" + st.utc_offset_seconds : "browser";
+  }
+
+  var shownZone = null;
+  function renderZoneChange() {
+    var zone = zoneKey(status), changed = shownZone !== null && zone !== shownZone;
+    shownZone = zone;
+    if (!changed) return;
+    $("timezone-note").textContent = timezoneText();
+    if (!history) return;
+    if (chartPointer || chartCard.contains(document.activeElement)) chartBehind = true;
+    else renderChart();
+  }
+
   function renderStatus() {
     sortAccounts();
     checkApplied();
@@ -2026,6 +2102,7 @@
     renderEvents();
     renderLanguageNote();
     renderMcp();
+    renderZoneChange();
   }
 
   function loadStatus(timeout) {
@@ -2165,22 +2242,37 @@
   // Samples of the row in the detail chart; hovering either chart snaps to them.
   var snapPoints = [];
 
-  // The value of a color variable of page.css for an SVG attribute. Most
+  // The value of a color variable of page.css for an SVG attribute. Many
   // derive from Magpie's tokens with color-mix(), which is resolved to the
   // color it gives through a hidden element, so the chart and its
-  // screenshots carry plain colors. applyTheme clears the cache.
+  // screenshots carry plain colors. The element sits in a parent of a
+  // color no theme uses (PROBE_SENTINEL): a value the browser cannot parse
+  // leaves the element that inherited color, which counts as a failure,
+  // and the variable's <name>-static value of page.css is used instead.
+  // applyTheme clears the cache.
+  var PROBE_SENTINEL = "rgb(1, 2, 3)";
   var colorCache = {};
   function cssVar(name) {
-    var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    var root = getComputedStyle(document.documentElement);
+    var value = root.getPropertyValue(name).trim();
     if (value.indexOf("(") < 0 || /^(rgba?|hsla?)\(/.test(value)) return value;
-    if (!colorCache[value]) {
-      var probe = el("i", { hidden: true });
-      probe.style.color = value;
-      document.body.appendChild(probe);
-      colorCache[value] = getComputedStyle(probe).color || value;
-      document.body.removeChild(probe);
-    }
-    return colorCache[value];
+    if (!Object.prototype.hasOwnProperty.call(colorCache, value)) colorCache[value] = resolveColor(value);
+    if (colorCache[value]) return colorCache[value];
+    var fallback = root.getPropertyValue(name + "-static").trim();
+    return fallback || root.getPropertyValue("--fg").trim() || "currentColor";
+  }
+
+  // The color value gives, or "" where the browser does not take it.
+  function resolveColor(value) {
+    var probe = el("i", {});
+    probe.style.color = value;
+    if (!probe.style.color) return "";
+    var host = el("div", { hidden: true }, [probe]);
+    host.style.color = PROBE_SENTINEL;
+    document.body.appendChild(host);
+    var color = getComputedStyle(probe).color;
+    document.body.removeChild(host);
+    return color && color !== PROBE_SENTINEL ? color : "";
   }
 
   var LEVEL_VARS = { empty: "--quota-empty-color", low: "--quota-low-color", medium: "--quota-medium-color", high: "--quota-high-color", full: "--quota-full-color" };
@@ -2200,19 +2292,35 @@
 
   function pct(v) { return v == null ? "—" : Math.round(v) + "%"; }
 
-  // name cut to max characters with an ellipsis. A name that starts with
-  // the service (prefix, "Antigravity · ") loses characters of the service
-  // first, then the whole service, so the group label tells the rows apart.
-  function fitName(name, prefix, max) {
-    if (name.length <= max) return name;
-    prefix = prefix || "";
-    if (prefix && name.indexOf(prefix) === 0) {
-      var label = name.slice(prefix.length), room = max - label.length - 3;
-      if (room >= 2) return prefix.replace(/ · $/, "").slice(0, room - 1) + "… · " + label;
-      name = label;
-      if (name.length <= max) return name;
+  // name cut with an ellipsis to fit room, as width measures text. A name
+  // that starts with the service (prefix, "Antigravity · ") takes its short
+  // form (short, "AG · ") instead, and then loses characters at the end of
+  // the group label: the service always stays in front, so "Claude / GPT"
+  // of an Antigravity account never reads as a Claude account.
+  function fitName(name, prefix, room, short, width) {
+    if (width(name) <= room) return name;
+    var keep = 1;
+    if (prefix && short && name.indexOf(prefix) === 0) {
+      name = short + name.slice(prefix.length);
+      if (width(name) <= room) return name;
+      keep = Array.from(short).length + 1;
     }
-    return name.slice(0, Math.max(1, max - 1)) + "…";
+    var chars = Array.from(name), n = chars.length - 1;
+    for (; n > keep; n--) if (width(chars.slice(0, n).join("") + "…") <= room) break;
+    return chars.slice(0, Math.max(keep, n)).join("") + "…";
+  }
+
+  // The width of text in the body font at size px and weight, in the
+  // chart's units: measured on a canvas, or estimated per character where
+  // there is none.
+  var measureContext = null;
+  function textWidth(text, size, weight) {
+    if (measureContext === null) {
+      try { measureContext = document.createElement("canvas").getContext("2d") || false; } catch (err) { measureContext = false; }
+    }
+    if (!measureContext) return Array.from(text).length * size * 0.54;
+    measureContext.font = weight + " " + size + "px " + getComputedStyle(document.body).fontFamily;
+    return measureContext.measureText(text).width;
   }
 
   function fmtDiff(d) { return d == null ? "—" : (d > 0 ? "+" : d < 0 ? "−" : "") + Math.abs(d) + "%"; }
@@ -2400,8 +2508,8 @@
       var account = accountOf["group|" + s.group];
       if (account === undefined) account = accountOf["auth|" + s.auth_index];
       if (!byLabel[id]) { byLabel[id] = []; order.push(id); }
-      var prefix = shared[s.group] ? servicePrefix(s.provider) : "";
-      byLabel[id].push({ id: s.group + "|" + s.window, name: prefix + s.label + extra, prefix: prefix, source: source,
+      var prefix = shared[s.group] ? servicePrefix(s.provider) : "", short = shared[s.group] ? shortPrefix(s.provider) : "";
+      byLabel[id].push({ id: s.group + "|" + s.window, name: prefix + s.label + extra, prefix: prefix, short: short, source: source,
         sub: meta ? meta.email : emailOf[s.auth_index] || s.auth_index || "", group: s.group, inactive: !meta, lastAt: lastPoint ? lastPoint[0] : null,
         points: s.points, floor: cycleFloor(s.points), resets: Array.isArray(s.resets) ? s.resets : [],
         reset: meta ? meta.reset : null, weight: meta ? meta.weight : 1, last: lastPoint ? lastPoint[1] : meta.remaining,
@@ -2446,8 +2554,9 @@
     var now = Date.now() / 1000;
     var resets = kids.map(function (k) { return k.reset; }).filter(function (t) { return t > now; });
     var weights = kids.reduce(function (sum, k) { return sum + k.weight; }, 0);
-    var prefix = kids.map(function (k) { return k.prefix; }).filter(function (p) { return p; })[0] || "";
-    return { id: "group:" + id, name: prefix + kids[0].source, prefix: prefix, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
+    var named = kids.filter(function (k) { return k.prefix; })[0];
+    var prefix = named ? named.prefix : "", short = named ? named.short : "";
+    return { id: "group:" + id, name: prefix + kids[0].source, prefix: prefix, short: short, children: kids, points: pooled(kids, limit, "points"), floor: pooled(kids, limit, "floor"),
       last: kids.reduce(function (sum, k) { return sum + k.weight * k.last; }, 0) / weights,
       reset: resets.length ? Math.min.apply(null, resets) : null, groups: kids.map(function (k) { return k.group; }) };
   }
@@ -2476,7 +2585,7 @@
   function geometry(width, end) {
     var now = new Date(history.to).getTime() / 1000;
     var to = end || now, from = to - (now - new Date(history.from).getTime() / 1000);
-    var labelW = width < 640 ? 120 : 190, rightW = width < 640 ? 112 : 136;
+    var labelW = width < 640 ? 132 : 190, rightW = width < 640 ? 112 : 136;
     var plotW = width - labelW - rightW;
     return { from: from, to: to, now: now, width: width, labelW: labelW, rightW: rightW, plotW: plotW,
       x: function (t) { return labelW + (t - from) / (to - from) * plotW; },
@@ -2639,11 +2748,15 @@
       var lx = 4 + f.depth * 18;
       if (r.children) root.appendChild(svgText({ x: lx, y: y0 + 15, "font-size": 10, fill: cssVar("--text-tertiary") }, chartExpanded[r.id] ? "▾" : "▸"));
       var nameX = lx + (r.children ? 14 : 0);
-      var maxChars = Math.floor((g.labelW - nameX - (r.children ? 30 : 8)) / 7);
-      var name = f.depth ? fitName(r.sub, "", maxChars) : fitName(r.name, r.prefix, maxChars);
+      // Row names are semibold (.row-name in page.css); a pooled row keeps
+      // room for its account count after the name.
+      var size = f.depth ? 12 : 13, measure = function (text) { return textWidth(text, size, 600); };
+      var count = r.children ? "×" + r.children.length : "", countW = count ? textWidth(count, 11, 400) + 6 : 0;
+      var room = g.labelW - nameX - 6 - countW;
+      var name = f.depth ? fitName(r.sub, "", room, "", measure) : fitName(r.name, r.prefix, room, r.short, measure);
       root.appendChild(svgSensitive(svgText({ x: nameX, y: y0 + 15, "font-size": f.depth ? 12 : 13, "font-weight": f.depth ? 400 : 600,
         fill: cssVar(f.depth ? "--text-secondary" : "--text-primary"), "class": "row-name" }, name), f.depth || r.orphan || hasSecret(f.depth ? r.sub : r.name)));
-      if (r.children) root.appendChild(svgText({ x: nameX + name.length * 8 + 8, y: y0 + 15, "font-size": 11, fill: cssVar("--text-tertiary") }, "×" + r.children.length));
+      if (count) root.appendChild(svgText({ x: nameX + measure(name) + 6, y: y0 + 15, "font-size": 11, fill: cssVar("--text-tertiary") }, count));
       root.appendChild(svg("rect", { x: g.labelW, y: y0, width: g.plotW, height: LANE, rx: 4, fill: cssVar("--chart-lane") }));
       drawBand(root, g, r.floor, y0, limit, r.inactive);
       var rx = g.width - g.rightW + 14;
@@ -2683,7 +2796,7 @@
       else root.appendChild(svg("circle", { cx: x, cy: cy, r: 3.5, fill: cssVar("--viz-success"), stroke: cssVar("--bg-primary"), "stroke-width": 1.5 }));
     });
     var failed = events.filter(function (ev) { return ev.failed; }).length;
-    root.appendChild(svgText({ x: g.width - 2, y: ey + 13, "font-size": 11, "text-anchor": "end", fill: cssVar(failed ? "--viz-failure" : "--text-tertiary") },
+    root.appendChild(svgText({ x: g.width - 2, y: ey + 13, "font-size": 11, "text-anchor": "end", fill: cssVar(failed ? "--failure-text" : "--text-tertiary") },
       translate("lane_ok", events.length - failed) + (failed ? translate("lane_failed", failed) : "")));
     var eventHit = svg("rect", { x: g.labelW, y: ey - 2, width: g.plotW, height: 22, fill: "transparent" });
     eventHit.addEventListener("pointermove", function (e) { hoverAt(e, root, null, "overview"); });
@@ -3092,7 +3205,7 @@
     var low = status.config ? Number(status.config.low_threshold) : 0;
     if (low > 0 && low < 100) {
       root.appendChild(svg("line", { x1: g.labelW, x2: g.labelW + g.plotW, y1: y(low), y2: y(low), stroke: cssVar("--viz-failure"), "stroke-opacity": 0.5, "stroke-dasharray": "4 4" }));
-      root.appendChild(svgText({ x: g.labelW - 8, y: y(low) + 4, "text-anchor": "end", "font-size": 11, fill: cssVar("--viz-failure") }, axisPercent(low)));
+      root.appendChild(svgText({ x: g.labelW - 8, y: y(low) + 4, "text-anchor": "end", "font-size": 11, fill: cssVar("--failure-text") }, axisPercent(low)));
     }
     // The time the projection runs out goes on the time axis, in place of the
     // tick labels it would cover.
@@ -3226,7 +3339,7 @@
         root.appendChild(svgText({ x: rightX, y: (upper ? yA : yB) + shift + 4, "font-size": 13, "font-weight": 650, fill: cssVar("--text-primary") }, pct(row.last)));
         root.appendChild(svgText({ x: rightX, y: (upper ? yB : yA) + shift + 4, "font-size": 12, fill: cssVar("--text-tertiary") }, pct(pace)));
         root.appendChild(svgText({ x: rightX, y: mid + shift + 4, "font-size": 12, "font-weight": 650,
-          fill: cssVar(diff > 0 ? "--viz-success" : diff < 0 ? "--viz-failure" : "--text-secondary") }, fmtDiff(diff)));
+          fill: cssVar(diff > 0 ? "--success-text" : diff < 0 ? "--failure-text" : "--text-secondary") }, fmtDiff(diff)));
       }
     }
 
@@ -3321,7 +3434,7 @@
   // left of the plot that lines the plot up with the overview; the plot
   // stays where it is. The y-axis labels keep the right SIDE_GAP pixels of
   // the blank. Where the blank is too narrow, in a chart below 640 pixels
-  // wide (labelW 120), or too short for the heading, such as with a long
+  // wide (labelW 132), or too short for the heading, such as with a long
   // name, the heading stays above the chart.
   var SIDE_GAP = 46;
   function placeDetailHead(wrap, head, box, g) {

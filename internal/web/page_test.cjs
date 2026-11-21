@@ -17,6 +17,9 @@ function context(names, globals) {
   return ctx;
 }
 
+// CSS.supports("color", v) of a browser, for the color values the tests use.
+const fakeCSS = { supports: (prop, v) => prop === "color" && /^(#[0-9a-f]{3,8}|(rgba?|hsla?|oklch|color-mix)\(.*\)|[a-z]+)$/i.test(v) };
+
 test("a save counts as applied only by its own config token or a later one", () => {
   const ctx = context(["tokenApplied", "checkApplied"], { status: { config: { bark_url: "已设置" } } });
   const tokens = ["a1", "b2", "c3"];
@@ -692,7 +695,7 @@ function pageVar(name) {
 
 const EVENT_FUNCTIONS = ["groupLabel", "retryText", "cutText", "errorSummary", "notifyKind", "eventWindow", "sameSubject",
   "eventSeconds", "eventRows", "notifyTitle", "eventView", "eventParts", "eventMasked", "pushMarks", "parseTime",
-  "sharedGroups", "servicePrefix", "groupTitle"];
+  "sharedGroups", "servicePrefix", "groupTitle", "eventTitle"];
 
 // Elements and text nodes as plain objects; translate shows the key and
 // its arguments.
@@ -721,7 +724,7 @@ function eventContext(globals = {}) {
     },
     ...globals,
   });
-  vm.runInContext(["EVENT_TYPES", "NOTIFY_TRIGGERS", "NOTIFY_LAG", "PAUSE_PAIR", "ERROR_CHARS"].map(pageVar).join("\n"), ctx);
+  vm.runInContext(["EVENT_TYPES", "NOTIFY_TRIGGERS", "NOTIFY_LAG", "PAUSE_PAIR", "ERROR_CHARS", "ACCOUNT_EVENTS", "ACCOUNT_NOTIFY_KINDS"].map(pageVar).join("\n"), ctx);
   return ctx;
 }
 
@@ -972,7 +975,7 @@ test("the detail heading moves left of the plot only where it fits", () => {
   assert.equal(w.css["--detail-side"], "144px");
   // Too narrow: the blank of a chart below 640 pixels.
   w = wrap();
-  ctx.placeDetailHead(w, { offsetHeight: 100 }, { clientWidth: 600, offsetHeight: 206 }, { labelW: 120, width: 600 });
+  ctx.placeDetailHead(w, { offsetHeight: 100 }, { clientWidth: 600, offsetHeight: 206 }, { labelW: 132, width: 600 });
   assert.ok(!w.classes.has("side"));
   // Too tall, such as a long name over several lines.
   w = wrap();
@@ -1120,8 +1123,9 @@ test("the theme and language follow Magpie, else the browser", () => {
 test("the page speaks Magpie's bridge protocol to its parent only", async () => {
   const posted = [], calls = { theme: 0, language: 0, refresh: 0 };
   const parent = { postMessage: (msg, target) => posted.push([plain(msg), target]) };
-  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible", "themeTokens"], {
-    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 }, MAGPIE_TOKENS: ["bg"],
+  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieTheme", "magpieVisible", "themeTokens", "tokenValue"], {
+    window: { parent }, magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 }, MAGPIE_TOKENS: ["bg"], FONT_TOKENS: {},
+    SANDBOXED: true, CSS: fakeCSS,
     status: null, history: null, renderChart: () => {},
     applyTheme: () => calls.theme++, applyLanguage: () => calls.language++,
     loadStatus: () => { calls.refresh++; return Promise.resolve(); }, refreshHistory: () => {},
@@ -1151,8 +1155,8 @@ test("the page speaks Magpie's bridge protocol to its parent only", async () => 
 });
 
 test("Magpie's theme tokens become --magpie-<token> variables on the root", () => {
-  const ctx = context(["themeTokens", "applyTokens"]);
-  vm.runInContext(pageVar("MAGPIE_TOKENS"), ctx);
+  const ctx = context(["themeTokens", "applyTokens", "tokenValue"], { CSS: fakeCSS });
+  vm.runInContext(pageVar("MAGPIE_TOKENS") + pageVar("FONT_TOKENS"), ctx);
   assert.deepEqual([...ctx.MAGPIE_TOKENS], ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"]);
   // Only the known keys with string values are taken.
   const tokens = ctx.themeTokens({ bg: " #1a1a1e ", "fg-2": "#b9b9c1", accent: 5, red: "", font: '"SF Pro Text", sans-serif', "x; color": "red", line: null });
@@ -1194,9 +1198,50 @@ test("a screenshot keeps the root's Magpie tokens", () => {
 test("opened on its own the page asks nothing of a parent", async () => {
   const win = {};
   win.parent = win;
-  const ctx = context(["inFrame", "magpieCall"], { window: win, magpie: { calls: {}, next: 0 } });
+  const ctx = context(["inFrame", "magpieCall"], { window: win, magpie: { calls: {}, next: 0 }, SANDBOXED: true });
   assert.equal(ctx.inFrame(), false);
   await assert.rejects(ctx.magpieCall("hello"), /not in Magpie/);
+});
+
+test("a page outside a sandbox ignores the site that frames it", async () => {
+  const posted = [], calls = { theme: 0 };
+  const parent = { postMessage: (msg) => posted.push(msg) };
+  // Magpie always frames the page sandboxed; a page from the public
+  // listener framed by another site is not.
+  const ctx = context(["inFrame", "magpieCall", "magpieMessage", "magpieHello"], {
+    window: { parent, addEventListener: () => { throw new Error("listens"); } },
+    magpie: { ready: false, theme: null, visible: true, calls: {}, next: 0 }, SANDBOXED: false,
+    magpieTheme: () => calls.theme++, magpieVisible: () => calls.theme++,
+  });
+  assert.equal(ctx.inFrame(), false);
+  ctx.magpieHello();
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "theme", data: { dark: true, tokens: { bg: "#000" } } } });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: false } } });
+  await assert.rejects(ctx.magpieCall("image.copy", { png: "blob" }), /not in Magpie/);
+  assert.deepEqual(posted, []);
+  assert.equal(calls.theme, 0);
+  assert.equal(ctx.magpie.ready, false);
+  assert.match(source, /function inFrame\(\) \{\n    if \(!SANDBOXED\) return false;/);
+});
+
+test("theme tokens take only colors and font lists that load nothing", () => {
+  const ctx = context(["tokenValue"], { CSS: fakeCSS });
+  vm.runInContext(pageVar("FONT_TOKENS"), ctx);
+  for (const good of ["#1a1a1e", "rgb(28 28 33)", "rgba(0, 0, 0, .5)", "oklch(70% 0.1 250)", "color-mix(in srgb, #fff 20%, #000)", "white"]) {
+    assert.equal(ctx.tokenValue("bg", good), good, good);
+  }
+  for (const bad of ["url(https://evil.example/x)", "URL(x)", "image-set(\"x.png\" 1x)", "-webkit-image-set(url(x) 1x)", "var(--x)", "env(safe-area-inset-top)",
+    "attr(data-x)", "red; background: url(x)", "red}", "#fff\\", "<x>", "notacolor(1)", "#fff 1px", "", "  ", 5, null]) {
+    assert.equal(ctx.tokenValue("bg", bad), "", String(bad));
+  }
+  assert.equal(ctx.tokenValue("font", ' -apple-system, "SF Pro Text", "Segoe UI", sans-serif '), '-apple-system, "SF Pro Text", "Segoe UI", sans-serif');
+  assert.equal(ctx.tokenValue("code", 'ui-monospace, "SF Mono", Menlo, monospace'), 'ui-monospace, "SF Mono", Menlo, monospace');
+  for (const bad of ["url(x.woff)", "a; color: red", "a{}", "a\\66", "var(--x)", "@import", "x".repeat(301)]) {
+    assert.equal(ctx.tokenValue("font", bad), "", bad);
+  }
+  // Without CSS.supports no color is taken.
+  ctx.CSS = undefined;
+  assert.equal(ctx.tokenValue("bg", "#fff"), "");
 });
 
 test("the sandbox drops neither storage errors nor confirmations", () => {
@@ -1541,10 +1586,11 @@ test("a quota group of an account with several names its service apart from the 
     group_order: ["GPT", "Claude", "Gemini", "Claude / GPT"],
   };
   const providerTitle = (id) => titles[id] || id;
-  const ctx = context(["sharedGroups", "servicePrefix", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupTitle", "fitName", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
     status, providerTitle, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
     gapLimit: () => 900, pooled: () => [],
   });
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
   assert.deepEqual(plain(ctx.sharedGroups(status.accounts)), { "antigravity:4:gemini": "antigravity", "antigravity:4:cg": "antigravity" });
   assert.equal(ctx.groupTitle("antigravity:4:cg", "Claude / GPT"), "Antigravity · Claude / GPT");
   assert.equal(ctx.groupTitle("claude:3:claude", "Claude"), "Claude");
@@ -1561,6 +1607,7 @@ test("a quota group of an account with several names its service apart from the 
   ] };
   const rows = ctx.chartRows();
   assert.deepEqual(plain(rows.map((r) => r.name)), ["GPT", "Claude", "Antigravity · Gemini", "Antigravity · Claude / GPT"]);
+  assert.deepEqual(plain(rows.map((r) => r.short)), ["", "", "AG · ", "AG · "]);
   // Pooled rows of several Antigravity accounts name the service too.
   status.accounts.push({ auth_index: "5", provider: "antigravity", groups: [
     { key: "antigravity:5:gemini", label: "Gemini#b", source_label: "Gemini", windows: [{ id: "five-hour", kind: "5h", short: "5h", remaining: 30, reset: "" }] },
@@ -1569,17 +1616,32 @@ test("a quota group of an account with several names its service apart from the 
   ctx.history.series.push(series({ group: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", provider: "antigravity", auth_index: "5" }, 20));
   const pooled = ctx.chartRows().filter((r) => r.children);
   assert.deepEqual(plain(pooled.map((r) => r.name)), ["Antigravity · Gemini", "Antigravity · Claude / GPT"]);
+  assert.deepEqual(plain(pooled.map((r) => [r.prefix, r.short])), [["Antigravity · ", "AG · "], ["Antigravity · ", "AG · "]]);
   assert.deepEqual(plain(pooled[1].children.map((c) => c.name)), ["Antigravity · Claude / GPT", "Antigravity · Claude / GPT#b"]);
 
-  // A narrow label column shortens the service before the group label.
-  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 19), "Ant… · Claude / GPT");
-  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 17), "A… · Claude / GPT");
-  assert.equal(ctx.fitName("Antigravity · Gemini", "Antigravity · ", 15), "Antig… · Gemini");
-  // Too narrow for a part of the service as well: the group label alone.
-  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 15), "Claude / GPT");
-  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 8), "Claude …");
-  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 30), "Antigravity · Claude / GPT");
-  assert.equal(ctx.fitName("alice.long.name@example.com", "", 10), "alice.lon…");
+  // A narrow label column uses the short form of the service, which always
+  // stays in front of the group label.
+  // Widths in characters here; the page measures the text.
+  const chars = (text) => Array.from(text).length;
+  const ag = (name, max) => ctx.fitName(name, "Antigravity · ", max, "AG · ", chars);
+  assert.equal(ag("Antigravity · Claude / GPT", 30), "Antigravity · Claude / GPT");
+  assert.equal(ag("Antigravity · Claude / GPT", 20), "AG · Claude / GPT");
+  assert.equal(ag("Antigravity · Claude / GPT", 17), "AG · Claude / GPT");
+  assert.equal(ag("Antigravity · Claude / GPT", 15), "AG · Claude / …");
+  assert.equal(ag("Antigravity · Gemini", 15), "AG · Gemini");
+  // The narrowest pooled row, and narrower: never the group label alone.
+  assert.equal(ag("Antigravity · Claude / GPT", 10), "AG · Clau…");
+  assert.equal(ag("Antigravity · Claude / GPT", 4), "AG · C…");
+  for (const max of [1, 4, 8, 10, 12, 15, 16, 17]) assert.match(ag("Antigravity · Claude / GPT", max), /^AG · /, String(max));
+  assert.equal(ctx.fitName("alice.long.name@example.com", "", 10, "", chars), "alice.lon…");
+  // Measured widths: narrow letters fit more characters.
+  const narrow = (text) => Array.from(text).reduce((w, c) => w + (/[ ·.il\/]/.test(c) ? 3 : 7), 0);
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 106, "AG · ", narrow), "AG · Claude / GPT");
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 80, "AG · ", narrow), "AG · Claude / …");
+  assert.equal(ctx.fitName("Antigravity · Claude / GPT", "Antigravity · ", 60, "AG · ", narrow), "AG · Clau…");
+  assert.equal(ctx.serviceShort("antigravity"), "AG");
+  assert.equal(ctx.serviceShort("codex"), "GPT");
+  assert.equal(ctx.serviceShort("claude"), "CL");
 
   // Events and the ignition table name it the same way.
   const events = eventContext({ status, providerTitle });
@@ -1614,7 +1676,7 @@ test("the threshold label of the detail chart keeps at most one decimal", () => 
   assert.equal(ctx.axisPercent(12.5), "12.5%");
   assert.equal(ctx.axisPercent(12.345), "12.3%");
   assert.equal(ctx.axisPercent(33.333333), "33.3%");
-  assert.match(source, /fill: cssVar\("--viz-failure"\) \}, axisPercent\(low\)\)/);
+  assert.match(source, /fill: cssVar\("--failure-text"\) \}, axisPercent\(low\)\)/);
 });
 
 test("links to other sites open outside the sandbox and show their address inside it", () => {
@@ -1645,4 +1707,200 @@ test("links to other sites open outside the sandbox and show their address insid
   ctx.$ = () => plainHome;
   ctx.setupHome();
   assert.deepEqual(plainHome.attrs, {});
+});
+
+// The page.css blocks outside @supports, and the declarations of a rule.
+function cssParts() {
+  const css = fs.readFileSync(path.join(__dirname, "page.css"), "utf8").replace(/\/\*[^]*?\*\//g, "");
+  let outside = "", supports = "", i = 0;
+  while (i < css.length) {
+    const at = css.indexOf("@supports", i);
+    if (at < 0) { outside += css.slice(i); break; }
+    outside += css.slice(i, at);
+    let depth = 0, j = css.indexOf("{", at);
+    for (; j < css.length; j++) {
+      if (css[j] === "{") depth++;
+      else if (css[j] === "}" && --depth === 0) break;
+    }
+    supports += css.slice(at, j + 1);
+    i = j + 1;
+  }
+  const rule = (selector) => {
+    const m = outside.match(new RegExp(selector.replace(/[[\]().*"]/g, "\\$&") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, selector);
+    return Object.fromEntries([...m[1].matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((d) => [d[1], d[2].trim()]));
+  };
+  return { css, outside, supports, rule };
+}
+
+test("browsers without color-mix() get static colors, and token colors are background-color", () => {
+  const { css, outside, supports, rule } = cssParts();
+  // Every color-mix() is inside a @supports (color: color-mix(...)) block.
+  assert.doesNotMatch(outside, /color-mix/);
+  assert.match(supports, /^@supports \(color: color-mix\(in srgb, red, blue\)\)/);
+  // Each variable the block mixes has a static value outside it.
+  const light = rule(":root"), dark = rule(':root[data-theme="dark"]');
+  for (const [, name] of supports.matchAll(/(--[\w-]+):\s*color-mix/g)) {
+    if (name === "--type-bg") continue;
+    assert.ok(light[name], name);
+  }
+  // The static values of the dark theme replace those of the light theme
+  // that are fixed colors.
+  for (const name of ["--bg-tertiary", "--bg-hover", "--border-primary-static", "--border-hover", "--primary-hover", "--focus-ring", "--quota-track",
+    "--row-hover", "--fieldset-bg", "--seg-track", "--warning-bg", "--success-badge-bg", "--failure-badge-bg", "--amber-bg", "--success-badge-border",
+    "--failure-badge-border", "--amber-border", "--chart-lane-static", "--chart-hatch-static", "--chart-select-static"]) {
+    assert.ok(dark[name] && dark[name] !== light[name], name);
+  }
+  for (const type of ["codex", "claude", "antigravity", "kimi"]) assert.ok(light["--type-" + type + "-bg"] && dark["--type-" + type + "-bg"], type);
+  // Plain colors of the theme set background-color, never the background
+  // shorthand.
+  assert.doesNotMatch(css, /background:\s*(var|color-mix|url)/);
+  for (const [, value] of css.matchAll(/background:\s*([^;}]+)/g)) assert.match(value.trim(), /^(transparent|currentColor)$/, value);
+});
+
+// WCAG contrast of two colors, #rrggbb or rgba() over the color under it.
+function rgb(c, under) {
+  if (c.startsWith("#")) return [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+  const [r, g, b, a] = c.match(/[\d.]+/g).map(Number);
+  const u = rgb(under);
+  return [r, g, b].map((v, i) => v * a + u[i] * (1 - a));
+}
+function contrast(a, b) {
+  const lum = (c) => { const f = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]; };
+  const [x, y] = [lum(a), lum(b)];
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+test("small status text reads at 4.5:1 or more in both themes", () => {
+  const { rule } = cssParts();
+  const light = rule(":root"), darkRule = rule(':root[data-theme="dark"]');
+  const themes = {
+    light: { ...light, card: "#ffffff", bg: "#f4f4f6", green: "#189a58", red: "#d64545", amber: "#b45309" },
+    dark: { ...light, ...darkRule, card: "#232327", bg: "#1a1a1e", green: "#6fd99b", red: "#f28b82", amber: "#f2b544" },
+  };
+  for (const [name, t] of Object.entries(themes)) {
+    const texts = {
+      green: [t["--success-text-static"], t["--success-badge-bg"]],
+      red: [t["--failure-text-static"], t["--failure-badge-bg"]],
+      amber: [name === "light" ? t["--amber-text"] : t.amber, t["--amber-bg"]],
+    };
+    for (const [color, [text, tint]] of Object.entries(texts)) {
+      for (const ground of [t.card, t.bg]) {
+        assert.ok(contrast(rgb(text), rgb(ground)) >= 4.5, `${name} ${color} on ${ground}`);
+        assert.ok(contrast(rgb(text), rgb(tint, ground)) >= 4.5, `${name} ${color} on its tint over ${ground}`);
+      }
+    }
+    for (const type of ["codex", "claude", "antigravity", "kimi"]) {
+      assert.ok(contrast(rgb(t["--type-" + type]), rgb(t["--type-" + type + "-bg"])) >= 4.5, `${name} ${type} badge`);
+    }
+  }
+  // The light green, red and amber of Magpie stay for icons, lines and
+  // fills; text that is small takes the text colors.
+  const css = fs.readFileSync(path.join(__dirname, "page.css"), "utf8");
+  assert.match(css, /--success-text: color-mix\(in srgb, var\(--green\) 62%, var\(--fg\)\)/);
+  for (const selector of [".badge-success", ".source-passive", ".quota-percent.percent-empty", '.save-state[data-state="failed"]', ".event-mark.failed", ".test-result.failed"]) {
+    const m = css.match(new RegExp(selector.replace(/[[\]().*"]/g, "\\$&") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, selector);
+    assert.doesNotMatch(m[1], /color: var\(--(green|red|amber|error-color|viz-success|viz-failure)\)/, selector);
+  }
+  assert.doesNotMatch(source, /svgText\([^)]*cssVar\("--viz-(success|failure)"/);
+});
+
+test("a color the browser cannot resolve falls back to the static value", () => {
+  const SENTINEL = "rgb(1, 2, 3)";
+  // A browser that knows rgb() and #hex but not color-mix(): the probe keeps
+  // its parent's color.
+  const make = (knows) => {
+    const vars = {
+      "--chart-lane": "color-mix(in srgb, #ededf1 4%, transparent)", "--chart-lane-static": "rgba(237, 237, 241, 0.04)",
+      "--odd": "color-mix(in srgb, red, blue)", "--fg": "#ededf1",
+    };
+    const node = (tag) => ({ tag, style: {}, children: [], parent: null });
+    const ctx = context(["cssVar", "resolveColor"], {
+      colorCache: {}, PROBE_SENTINEL: SENTINEL,
+      el: (tag, attrs, children) => { const n = node(tag); (children || []).forEach((c) => { c.parent = n; n.children.push(c); }); return n; },
+      document: { documentElement: { root: true }, body: { appendChild: () => {}, removeChild: () => {} } },
+      getComputedStyle: (n) => n.root ? { getPropertyValue: (k) => vars[k] || "" }
+        : { color: knows(n.style.color) ? "rgb(9, 9, 9)" : n.parent && n.parent.style.color },
+    });
+    // The style setter of an element rejects what the browser cannot parse.
+    return ctx;
+  };
+  // Assignment taken, computed color inherited: a failure.
+  let ctx = make(() => false);
+  assert.equal(ctx.cssVar("--chart-lane"), "rgba(237, 237, 241, 0.04)");
+  assert.equal(ctx.cssVar("--odd"), "#ededf1");
+  // Resolved: the computed color.
+  ctx = make((v) => /^color-mix/.test(v));
+  assert.equal(ctx.cssVar("--chart-lane"), "rgb(9, 9, 9)");
+  // Plain colors are returned as they are.
+  assert.equal(ctx.cssVar("--fg"), "#ededf1");
+  // The probe sits in a parent of the sentinel color, and an assignment the
+  // browser rejects (style.color stays "") counts as a failure too.
+  assert.match(source, /host\.style\.color = PROBE_SENTINEL;/);
+  assert.match(source, /if \(!probe\.style\.color\) return "";/);
+  assert.match(source, /return color && color !== PROBE_SENTINEL \? color : "";/);
+});
+
+test("a change of the displayed time zone redraws the chart from the loaded history", () => {
+  let drawn = 0;
+  const ctx = context(["zoneSet", "zoneKey", "renderZoneChange"], {
+    status: { timezone: "Local", utc_offset_seconds: 0 }, history: { series: [] }, shownZone: null,
+    chartPointer: false, chartBehind: false, chartCard: { contains: () => false }, document: { activeElement: null },
+    renderChart: () => drawn++, timezoneText: () => "note", $: () => ({}),
+  });
+  ctx.renderZoneChange();
+  assert.equal(drawn, 0);
+  // The same status again: nothing to redraw.
+  ctx.renderZoneChange();
+  assert.equal(drawn, 0);
+  // From unset to set, then another offset, then a different zone.
+  ctx.status = { timezone: "Asia/Shanghai", utc_offset_seconds: 28800 };
+  ctx.renderZoneChange();
+  assert.equal(drawn, 1);
+  ctx.status = { timezone: "Asia/Shanghai", utc_offset_seconds: 28800 };
+  ctx.renderZoneChange();
+  assert.equal(drawn, 1);
+  ctx.status = { timezone: "America/St_Johns", utc_offset_seconds: -12600 };
+  ctx.renderZoneChange();
+  assert.equal(drawn, 2);
+  // With the mouse on the chart the redraw waits until it leaves.
+  ctx.chartPointer = true;
+  ctx.status = { timezone: "", utc_offset_seconds: 0 };
+  ctx.renderZoneChange();
+  assert.equal(drawn, 2);
+  assert.equal(ctx.chartBehind, true);
+  assert.equal(ctx.zoneKey({ timezone: "Local", utc_offset_seconds: 3600 }), "browser");
+  // Nothing new is fetched, and renderStatus calls it.
+  assert.doesNotMatch(source.match(/  function renderZoneChange\(\) \{[^]*?\n  \}/)[0], /fetchHistory|loadHistory/);
+  assert.match(source, /renderMcp\(\);\n    renderZoneChange\(\);\n  \}/);
+});
+
+test("account events keep their account label, without the service in front again", () => {
+  const titles = { antigravity: "Antigravity", claude: "Claude" };
+  const status = { accounts: [{ auth_index: "4", provider: "antigravity", groups: [
+    { key: "antigravity:4:gemini", label: "Gemini#main", source_label: "Gemini" },
+    { key: "antigravity:4:cg", label: "Claude / GPT#main", source_label: "Claude / GPT" },
+  ] }] };
+  const ctx = eventContext({ status, providerTitle: (id) => titles[id] || id });
+  // Credential events name the account and carry its first group's key.
+  const credential = event("credential_invalid", 0, { group: "antigravity:4:gemini", label: "Antigravity#main", level: "error", params: { reason: "auth" } });
+  assert.equal(ctx.eventParts(credential).label, "Antigravity#main");
+  assert.equal(ctx.eventMasked(credential).label[0].text, "Antigravity#main");
+  const restored = event("credential_restored", 0, { group: "antigravity:4:gemini", label: "Antigravity", params: { source: "query" } });
+  assert.equal(ctx.eventParts(restored).label, "Antigravity");
+  for (const kind of ["credential", "suspended", "rate_limited", "credential_ok"]) {
+    const sent = event("notify", 0, { group: "antigravity:4:gemini", label: "Antigravity#main", params: { title: "x", notify_kind: kind } });
+    assert.equal(ctx.eventParts(sent).label, "Antigravity#main", kind);
+  }
+  // Quota group events, and their notifications, get the service.
+  assert.equal(ctx.eventParts(event("reset", 0, { group: "antigravity:4:cg", label: "Claude / GPT#main", params: { window: "five-hour", kind: "5h", label: "5h", remaining: "40" } })).label,
+    "Antigravity · Claude / GPT#main");
+  assert.equal(ctx.eventParts(event("notify", 0, { group: "antigravity:4:cg", label: "Claude / GPT#main", params: { title: "x", notify_kind: "quota" } })).label,
+    "Antigravity · Claude / GPT#main");
+  assert.equal(ctx.eventParts(event("ignite_paused", 0, { group: "antigravity:4:cg", label: "Claude / GPT#main", params: { until: "2026-11-21T08:00:00Z" } })).label,
+    "Antigravity · Claude / GPT#main");
+  // An account label never gets the service twice, whatever the kind.
+  assert.equal(ctx.groupTitle("antigravity:4:cg", "Antigravity#main"), "Antigravity#main");
+  assert.equal(ctx.groupTitle("antigravity:4:cg", "Antigravity"), "Antigravity");
 });
