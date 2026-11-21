@@ -119,7 +119,7 @@ Lamplighter 有两个监听，使用同一套路由（`server.Server.routes`）�
 | 方法和路径 | 作用 |
 | --- | --- |
 | `GET /` | 管理页面 |
-| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置（`admin_key_set`、`mcp_key_set`）；`public` 和 `mcp` 是对外监听的状态，见下文“对外监听”。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
+| `GET /api/status` | 状态页数据，配置中的密钥只显示是否已设置（`admin_key_set`、`mcp_key_set`）；`public` 和 `mcp` 是对外监听的状态，见下文“对外监听”；`magpie_warmup` 是 Lamplighter 会点火、Magpie 也开启了预热的账号 pin 列表，见“Magpie 的预热”。`providers` 按显示顺序列出支持的服务（`id`、`title`、能否点火 `ignite`、中英文的模型提示 `model_hint`、可勾选的点火额度组 `groups` 及说明 `groups_hint`），`group_order` 是额度组的显示顺序；每个窗口带 `kind`（`5h` 或 `7d`，其他长度的窗口没有这个字段） |
 | `GET /api/history?range=…&window=5h\|7d` | 额度历史和点火事件，参数和返回格式见下文“额度变化图表” |
 | `POST /api/refresh` | 立即主动查询，`{"auth_index": "<pin>"}` 只查一个账号；凭证已过期的账号先让 Magpie 刷新额度，见“与 Magpie 的接口”的“额度记录” |
 | `POST /api/ignite` | 立即点火，`{"target": "<额度组 key>"}` |
@@ -228,7 +228,7 @@ iframe 设置了 `sandbox allow-scripts`，页面服务的响应也带同样的 
 
 “高级”中的“对外访问”设置 `public_listen`、`web_enabled` 和 `admin_key`，状态读取 `status.public`（`listen`、`running`、`error`、`web`、`mcp`，`publicState`）；状态接口没有这个字段时退回读取 `status.mcp` 的 `listen`、`running` 和 `error`。开启 `web_enabled` 时没有管理密钥，页面用 `crypto.getRandomValues` 生成 32 字节随机数，以 `lladm_` 加 base64url 编码与开关一起保存；“生成新密钥”确认后替换它。“MCP”设置 `mcp_enabled` 和 `mcp_key`，监听状态读取 `status.mcp`；开启时没有有效密钥，同样生成 `llmcp_` 开头的密钥一起保存。两种密钥打码显示，可以显示和复制。保存这些字段后，对外监听的错误（`status.public.error`，没有 `status.public` 时为 `status.mcp.error`）显示为保存失败，页顶也显示提示。客户端配置中的地址取浏览器中保存的对外地址，没有时取对外监听地址。
 
-`status.magpie_warmup` 列出 Magpie 开启了预热的账号 pin，字段缺失时按空数组处理。列表非空时页顶提示这些账号需要在 Magpie 中关闭预热，以免与自动点火重复点火。账号按页面上的名称显示（`warmupNames`）：服务名加名称（`note`）或邮箱；状态中没有这个账号时显示 `account_names` 中的名称，再没有时显示 pin。
+`status.magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了预热的账号 pin（见“Magpie 的预热”），字段缺失时按空数组处理。列表非空时页顶提示这些账号需要在 Magpie 中关闭预热，以免与自动点火重复点火。账号按页面上的名称显示（`warmupNames`）：服务名加名称（`note`）或邮箱；状态中没有这个账号时显示 `account_names` 中的名称，再没有时显示 pin。
 
 页面标题旁的图标从 GitHub 加载仓库中的 `assets/logo.png`，更换图标不需要发布新版本。`raw.githubusercontent.com` 无法访问（例如在中国大陆）或 5 秒内没有加载完时，改经 `ghfast.top` 镜像加载；仍然失败时不显示。
 
@@ -515,7 +515,7 @@ Magpie 自带的预热（内置插件“Warm-up and check-in”的设置，由 M
 
 预热设为 `all` 或设置了时间点的账号会被 Magpie 开启 5 小时窗口；只设 `week` 不调度 5 小时窗口，不算冲突。文件不存在时视为没有预热；格式不符（不是 JSON 对象、字段类型不对、预热模式不是上述取值）时返回包装 `host.ErrFormat` 的错误。账号按 Magpie 服务 ID 和邮箱匹配。
 
-状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 监控的账号中开启了这类预热的 pin，按字符串排序，没有时为空数组（不为 `null`）。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
+状态接口的顶层字段 `magpie_warmup` 列出 Lamplighter 会点火、Magpie 也开启了这类预热的账号 pin，按字符串排序，没有时为空数组（不为 `null`）。Lamplighter 会点火的账号是：`ignition.enabled` 开启，且账号至少有一个额度组是点火目标（`groupIgnitable`：服务的 `ignite` 开启，`groups` 为空或包含该额度组的名称）。`ignition.enabled` 关闭时不读取设置，直接为空数组；还没有查询到额度组的账号不列出。引擎通过可选接口 `warmupReader` 调用它，不属于 `host.Host`：测试或其他宿主不实现时为空数组。每次读取状态都重新读取设置，用户在 Magpie 中改动后下一次刷新即生效；读取失败时为空数组，只记 debug 日志。页面据此提示关闭 Magpie 的预热。
 
 ### 失败分类和保护
 

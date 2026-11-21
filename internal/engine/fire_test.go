@@ -111,6 +111,42 @@ func TestStatusMagpieWarmup(t *testing.T) {
 	if claude == nil || claude.Provider != "claude" || claude.Email != "me@example.com" {
 		t.Fatalf("accounts handed over %+v", h.seen)
 	}
+	// Only accounts that Lamplighter ignites are listed.
+	setConfig := func(change func(*config.Config)) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		cfg := config.Default()
+		cfg.Timezone = "Asia/Shanghai"
+		change(&cfg)
+		e.cfg = cfg
+	}
+	setConfig(func(cfg *config.Config) { cfg.Ignition.Enabled = false })
+	h.seen = nil
+	if raw, _ := json.Marshal(e.Status()); !strings.Contains(string(raw), `"magpie_warmup":[]`) || h.seen != nil {
+		t.Fatalf("status with ignition off: %s, read with %+v", raw, h.seen)
+	}
+	setConfig(func(cfg *config.Config) {
+		codex := cfg.Providers["codex"]
+		codex.Ignite = false
+		cfg.Providers["codex"] = codex
+	})
+	if got := e.Status().MagpieWarmup; !slices.Equal(got, []string{"3"}) {
+		t.Fatalf("warm-up with Codex ignition off: %v", got)
+	}
+	for _, a := range h.seen {
+		if a.Pin == "1" || a.Pin == "2" {
+			t.Fatalf("an account that is not ignited was handed over: %+v", h.seen)
+		}
+	}
+	setConfig(func(cfg *config.Config) {
+		claude := cfg.Providers["claude"]
+		claude.Groups = []string{"Some other group"}
+		cfg.Providers["claude"] = claude
+	})
+	if got := e.Status().MagpieWarmup; !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("warm-up with the Claude group not selected: %v", got)
+	}
+	setConfig(func(*config.Config) {})
 	h.pins, h.err = nil, errors.New("unknown Magpie format")
 	if raw, _ := json.Marshal(e.Status()); !strings.Contains(string(raw), `"magpie_warmup":[]`) {
 		t.Fatalf("status after a failed read: %s", raw)

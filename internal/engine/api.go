@@ -355,8 +355,8 @@ type Status struct {
 	Events    []Event         `json:"events"`
 	// NextModels is the model automatic selection picks next, per provider.
 	NextModels map[string]string `json:"next_models,omitempty"`
-	// MagpieWarmup lists the pins of the monitored accounts whose 5-hour
-	// window Magpie's own warm-up starts; with Lamplighter's ignition they
+	// MagpieWarmup lists the pins of the accounts that Lamplighter ignites
+	// and whose 5-hour window Magpie's own warm-up starts too, so that they
 	// are ignited twice. Never null.
 	MagpieWarmup []string `json:"magpie_warmup"`
 	// Providers lists the supported providers in display order, for the
@@ -404,17 +404,31 @@ type warmupReader interface {
 	MagpieWarmup(accounts []host.Account) ([]string, error)
 }
 
-// magpieWarmup returns the pins of the monitored accounts that Magpie's
-// warm-up ignites, read on every call: the user can change the setting in
-// Magpie at any time. An unreadable setting gives an empty list.
+// magpieWarmup returns the pins of the accounts that both Lamplighter and
+// Magpie's warm-up ignite: ignition is on and a quota group of the account
+// is an ignition target (groupIgnitable), and Magpie's warm-up starts its
+// 5-hour window. The setting is read on every call: the user can change it
+// in Magpie at any time. An unreadable setting gives an empty list.
 func (e *Engine) magpieWarmup() []string {
 	reader, ok := e.host.(warmupReader)
 	if !ok {
 		return []string{}
 	}
 	e.mu.Lock()
-	accounts := make([]host.Account, 0, len(e.creds))
+	cfg := e.cfg
+	ignited := map[string]bool{}
+	if cfg.Ignition.Enabled {
+		for _, group := range e.groups {
+			if e.creds[group.AuthIndex] != nil && groupIgnitable(cfg, group.Provider, group.SourceLabel) {
+				ignited[group.AuthIndex] = true
+			}
+		}
+	}
+	accounts := make([]host.Account, 0, len(ignited))
 	for _, cred := range e.creds {
+		if !ignited[cred.AuthIndex] {
+			continue
+		}
 		provider := cred.HostProvider
 		if provider == "" {
 			provider = cred.Provider
@@ -422,12 +436,18 @@ func (e *Engine) magpieWarmup() []string {
 		accounts = append(accounts, host.Account{Pin: cred.AuthIndex, Provider: provider, Email: cred.Email, On: true})
 	}
 	e.mu.Unlock()
-	pins, err := reader.MagpieWarmup(accounts)
+	if len(accounts) == 0 {
+		return []string{}
+	}
+	found, err := reader.MagpieWarmup(accounts)
 	if err != nil {
 		e.logf("debug", "读取 Magpie 预热设置失败：%v", err)
 	}
-	if pins == nil {
-		pins = []string{}
+	pins := []string{}
+	for _, pin := range found {
+		if ignited[pin] {
+			pins = append(pins, pin)
+		}
 	}
 	sort.Strings(pins)
 	return pins
