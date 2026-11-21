@@ -198,7 +198,11 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 	}
 	resp.sentAt = e.now()
 	opened, err := e.host.OpenModelStream(reqCtx, req)
-	if admitted != nil && !admitted() {
+	// A response status means the headers arrived: the request reached the
+	// provider, and its outcome counts even when a withdrawal or a stop came
+	// at the same moment. The host no longer ends the request on reqCtx.
+	answered := opened.StatusCode != 0 || host.StatusOf(err) != 0
+	if admitted != nil && !admitted() && !answered {
 		if err == nil && opened.ID != "" {
 			_ = e.host.CloseModelStream(opened.ID)
 		}
@@ -209,14 +213,14 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 	streamID = opened.ID
 	if err != nil {
 		switch {
+		case answered:
+			reason = "http_error"
 		case ctx.Err() != nil || e.stopping():
 			reason = "canceled"
 			return resp, context.Canceled
 		case timedOut():
 			reason = "timeout"
 			return resp, errIgnitionTimeout
-		case host.StatusOf(err) != 0 || opened.StatusCode != 0:
-			reason = "http_error"
 		}
 		return resp, err
 	}

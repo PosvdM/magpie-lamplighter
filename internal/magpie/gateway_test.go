@@ -186,19 +186,142 @@ func TestCloseModelStreamCancelsBlockedRead(t *testing.T) {
 	}
 }
 
-func TestModelStreamContextCancels(t *testing.T) {
-	h, gone := blockingServer(t)
+// ctx cancels a request that waits for its response headers.
+func TestModelStreamContextCancelsBeforeHeaders(t *testing.T) {
+	gone := make(chan struct{})
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client going away once the body is read.
+		io.ReadAll(r.Body)
+		<-r.Context().Done()
+		close(gone)
+	})
 	ctx, cancel := context.WithCancel(context.Background())
-	opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "codex/a", Protocol: "openai", Body: []byte("{}")})
-	if err != nil {
-		t.Fatal(err)
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "codex/a", Protocol: "openai", Body: []byte("{}")}); err == nil || opened.StatusCode != 0 {
+		t.Fatalf("%+v %v", opened, err)
 	}
-	defer h.CloseModelStream(opened.ID)
-	cancel()
 	select {
 	case <-gone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("cancelling ctx did not cancel the request")
+	}
+}
+
+// headersSeen replaces the gateway client with one that reports when the
+// response headers of a request have arrived.
+func headersSeen(t *testing.T) <-chan struct{} {
+	t.Helper()
+	seen := make(chan struct{}, 1)
+	old := gatewayClient
+	gatewayClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp, err := gatewayTransport.RoundTrip(r)
+		if err == nil {
+			seen <- struct{}{}
+		}
+		return resp, err
+	})}
+	t.Cleanup(func() { gatewayClient = old })
+	return seen
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Once the headers have arrived, ctx no longer ends the request: the
+// stream stays readable until CloseModelStream.
+func TestModelStreamOutlivesContextAfterHeaders(t *testing.T) {
+	more := make(chan struct{})
+	gone := make(chan struct{})
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client going away once the body is read.
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-more:
+			io.WriteString(w, "data: {\"a\":1}\n\n")
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+		}
+		<-r.Context().Done()
+		close(gone)
+	})
+	seen := headersSeen(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "codex/a", Protocol: "openai", Body: []byte("{}")})
+	if err != nil || opened.StatusCode != 200 {
+		t.Fatalf("%+v %v", opened, err)
+	}
+	<-seen
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	close(more)
+	if chunk, err := h.ReadModelStream(opened.ID); err != nil || string(chunk.Payload) != "data: {\"a\":1}\n\n" {
+		t.Fatalf("after cancelling ctx: %q %v", chunk.Payload, err)
+	}
+	select {
+	case <-gone:
+		t.Fatal("cancelling ctx after the headers cut the request")
+	default:
+	}
+	if err := h.CloseModelStream(opened.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not cancel the request")
+	}
+}
+
+// The provider's error status counts when ctx is cancelled while its body
+// is read: the body is read within errorBodyWait regardless of ctx.
+func TestModelStreamErrorBodyOutlivesContext(t *testing.T) {
+	release := make(chan struct{})
+	h := testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client going away once the body is read.
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.(http.Flusher).Flush()
+		<-release
+		io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}`)
+	})
+	seen := headersSeen(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-seen
+		cancel()
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
+	opened, err := h.OpenModelStream(ctx, host.ModelRequest{Account: "claude/x", Protocol: "claude", Body: []byte("{}")})
+	if opened.StatusCode != 401 || host.StatusOf(err) != 401 || !strings.Contains(err.Error(), "OAuth token has expired") {
+		t.Fatalf("%+v %v", opened, err)
+	}
+
+	// A body that never ends is cut after errorBodyWait; the status stays.
+	defer func(was time.Duration) { errorBodyWait = was }(errorBodyWait)
+	errorBodyWait = 100 * time.Millisecond
+	stuck := make(chan struct{})
+	defer close(stuck)
+	h = testHost(t, func(w http.ResponseWriter, r *http.Request) {
+		// The server notices the client going away once the body is read.
+		io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-stuck:
+		case <-r.Context().Done():
+		}
+	})
+	started := time.Now()
+	opened, err = h.OpenModelStream(context.Background(), host.ModelRequest{Account: "claude/x", Protocol: "claude", Body: []byte("{}")})
+	if opened.StatusCode != 403 || host.StatusOf(err) != 403 || time.Since(started) > 5*time.Second {
+		t.Fatalf("%+v %v after %s", opened, err, time.Since(started))
 	}
 }
 

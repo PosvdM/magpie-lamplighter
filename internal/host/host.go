@@ -53,6 +53,13 @@ var ErrNotImplemented = errors.New("not implemented")
 // not know. Implementations wrap it and never guess a field.
 var ErrFormat = errors.New("unknown Magpie format")
 
+// ErrIdentity is wrapped by Credential when it cannot confirm that the
+// credential belongs to the account: agy's own sign-in of an agy-cli
+// account holds whichever Google account agy is signed in to, and the
+// gateway sends that account's requests with it. Ignition sends no request
+// for such an account; see docs/architecture.md.
+var ErrIdentity = errors.New("credential of another or an unconfirmed account")
+
 // Account is one subscription account that Magpie serves.
 type Account struct {
 	// Pin is Magpie's "<provider>/<id>" from GET /v1/magpie/accounts. It is
@@ -168,8 +175,11 @@ type Host interface {
 	// Models lists the model ids the gateway serves.
 	Models(ctx context.Context) ([]string, error)
 	// OpenModelStream sends an ignition request and returns once the
-	// response headers arrive. Cancelling ctx or CloseModelStream cancels
-	// the upstream request.
+	// response headers arrive. Cancelling ctx cancels the request only
+	// until then: a response the provider has started is not cut by it,
+	// and the body of an error status is read within a bounded wait of
+	// its own. After the headers only CloseModelStream ends the request,
+	// and the caller closes every stream it opened.
 	OpenModelStream(ctx context.Context, req ModelRequest) (ModelStream, error)
 	// ReadModelStream waits for the next chunk. CloseModelStream may run
 	// concurrently and unblocks it.

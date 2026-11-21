@@ -247,8 +247,9 @@ func TestConfigChangeWithdrawsAdmittedRequest(t *testing.T) {
 	}
 }
 
-// A stream opened just as the settings change is closed and withdrawn too.
-func TestConfigChangeClosesAStreamOpenedMeanwhile(t *testing.T) {
+// A stream whose headers arrived just as the settings change has reached
+// the provider: it is read and closed, and not withdrawn.
+func TestConfigChangeKeepsAStreamOpenedMeanwhile(t *testing.T) {
 	old := confirmDelays
 	confirmDelays = []time.Duration{time.Millisecond}
 	defer func() { confirmDelays = old }()
@@ -258,7 +259,7 @@ func TestConfigChangeClosesAStreamOpenedMeanwhile(t *testing.T) {
 		return host.ModelStream{ID: "late", StatusCode: 200}, nil
 	}
 	err := e.igniteTarget(context.Background(), e.config(), chosen, false)
-	if !errors.Is(err, errIgnitionWithdrawn) || !slices.Equal(h.closed, []string{"late"}) {
+	if errors.Is(err, errIgnitionWithdrawn) || len(h.executed) != 1 || !slices.Equal(h.closed, []string{"late"}) {
 		t.Fatalf("err = %v, closed %v", err, h.closed)
 	}
 }

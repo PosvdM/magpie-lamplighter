@@ -46,6 +46,12 @@ import (
 // account, the entry would otherwise read that account's quota. A home's
 // file belongs to its account alone; it is refused only when both emails
 // are known and differ.
+//
+// The refusals, and agy's own account in a keyring, wrap host.ErrIdentity:
+// the gateway would send the account's requests with whichever account
+// agy is signed in to, so the engine does not ignite it. The entry's email
+// is written only by a sign-in through Magpie; signing in to agy again
+// does not add it.
 
 const (
 	// googleTokenURL renews an access token with the OAuth client agy
@@ -76,9 +82,19 @@ var goos = runtime.GOOS
 
 var agyHomeID = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 
+// identityError is an error that wraps host.ErrIdentity: the credential
+// read for an agy-cli account cannot be told to be that account's.
+type identityError string
+
+func (e identityError) Error() string { return string(e) }
+
+func (identityError) Is(target error) bool { return target == host.ErrIdentity }
+
 // errAgyKeyring is returned for agy's own account where agy keeps its
-// sign-in in the system keyring.
-var errAgyKeyring = errors.New("这个 Antigravity 账号是 agy 自己登录的第一个账号，凭证在系统钥匙串中，Lamplighter 不读取钥匙串；可在 Magpie 中再添加一次该账号，或改用 Magpie 的额度显示")
+// sign-in in the system keyring. Without reading it, the account agy is
+// signed in to now cannot be confirmed. The plugin's "添加另一个 Google
+// 账号" signs in in a home of its own, whose file Lamplighter reads.
+var errAgyKeyring error = identityError("这个 Antigravity 账号是 agy 自己登录的账号，凭证在系统钥匙串中，Lamplighter 不读取钥匙串，无法确认 agy 当前登录的账号；在 Magpie 中用“添加另一个 Google 账号”重新添加该账号后即可查询额度和点火")
 
 // googleToken is an access token renewed in memory.
 type googleToken struct {
@@ -88,11 +104,11 @@ type googleToken struct {
 
 // errAgyOtherAccount is returned when agy's token file is signed in to
 // another Google account than the agy-cli account.
-var errAgyOtherAccount = errors.New("agy 的凭证属于另一个 Google 账号")
+var errAgyOtherAccount error = identityError("agy 的凭证属于另一个 Google 账号")
 
 // errAgyUnproven is returned when it cannot be told whether agy's default
 // token file is signed in to agy's own account.
-var errAgyUnproven = errors.New("无法确认 agy 当前登录的是这个 Google 账号")
+var errAgyUnproven error = identityError("无法确认 agy 当前登录的是这个 Google 账号")
 
 // agyFile is where agy keeps the sign-in of an agy-cli account.
 type agyFile struct {
@@ -188,7 +204,7 @@ func (f agyFile) belongs(signedIn string) error {
 	signedIn = strings.TrimSpace(signedIn)
 	if f.email != "" && signedIn != "" && !strings.EqualFold(f.email, signedIn) {
 		if f.own {
-			return fmt.Errorf("%w（%s）：agy 已改登其他账号，在 agy 中改回这个账号登录，或在 Magpie 中重新添加这个账号", errAgyOtherAccount, maskEmail(signedIn))
+			return fmt.Errorf("%w（%s）：agy 已改登其他账号，在 agy 中改回这个账号登录，或在 Magpie 中用“添加另一个 Google 账号”重新添加这个账号", errAgyOtherAccount, maskEmail(signedIn))
 		}
 		return fmt.Errorf("%w（%s）：需要在 Magpie 中重新登录这个账号", errAgyOtherAccount, maskEmail(signedIn))
 	}
@@ -197,9 +213,9 @@ func (f agyFile) belongs(signedIn string) error {
 	}
 	switch {
 	case f.email == "":
-		return fmt.Errorf("%w：Magpie 没有记下这个账号的邮箱，可在 Magpie 中重新添加这个账号", errAgyUnproven)
+		return fmt.Errorf("%w：Magpie 没有记下这个账号的邮箱，在 agy 中重新登录不能补上，需在 Magpie 中用“添加另一个 Google 账号”重新添加这个账号", errAgyUnproven)
 	case signedIn == "":
-		return fmt.Errorf("%w：agy 的凭证文件没有记下所属账号（id_token_email），可在 agy 中重新登录这个账号", errAgyUnproven)
+		return fmt.Errorf("%w：agy 的凭证文件没有记下所属账号（id_token_email），需在 Magpie 中用“添加另一个 Google 账号”重新添加这个账号", errAgyUnproven)
 	}
 	return nil
 }

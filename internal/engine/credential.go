@@ -3,11 +3,13 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/store"
@@ -128,14 +130,34 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 	e.logf("info", "%s 的凭证已更新，恢复自动点火", accountLabel(cred))
 }
 
-// credentialFingerprint reads the fingerprint of cred's credential, ""
-// when it cannot be read.
-func (e *Engine) credentialFingerprint(ctx context.Context, cred *Cred) string {
+// agyCLI is Magpie's provider id of the agy-cli plugin.
+const agyCLI = "agy-cli"
+
+// identityChecked reports whether ignition of cred reads its credential
+// first to confirm the account, manual ignition too. The gateway sends an
+// agy-cli account's requests through agy, which uses whichever Google
+// account it is signed in to now; the pin alone does not tell which. Codex
+// and Claude requests use the account's own credential.
+func identityChecked(cred *Cred) bool {
+	return strings.EqualFold(cred.HostProvider, agyCLI)
+}
+
+// errIdentityUnsent prefixes an ignition refused for host.ErrIdentity.
+const errIdentityUnsent = "没有发送点火请求"
+
+// ignitionCredential reads the fingerprint of cred's credential before an
+// ignition, "" when it cannot be read. It is an error only when the host
+// cannot confirm the account of the credential (host.ErrIdentity): the
+// request would go out with another account, so none is sent.
+func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
-	if err != nil {
-		return ""
+	if errors.Is(err, host.ErrIdentity) {
+		return "", fmt.Errorf("%s：%w", errIdentityUnsent, err)
 	}
-	return credential.Fingerprint
+	if err != nil {
+		return "", nil
+	}
+	return credential.Fingerprint, nil
 }
 
 // noteQueryFailure handles a failed quota query of cred. A suspended account

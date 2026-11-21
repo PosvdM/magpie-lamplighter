@@ -252,7 +252,9 @@ func TestAgyOwnAccount(t *testing.T) {
 	h, home := agyFixture(t, "{}")
 	defer func(was string) { goos = was }(goos)
 	goos = "darwin"
-	if _, err := h.Credential(context.Background(), agyOwn); !errors.Is(err, errAgyKeyring) {
+	// The account agy is signed in to cannot be confirmed, so ignition
+	// sends nothing (host.ErrIdentity).
+	if _, err := h.Credential(context.Background(), agyOwn); !errors.Is(err, errAgyKeyring) || !errors.Is(err, host.ErrIdentity) {
 		t.Fatalf("darwin: err = %v, want errAgyKeyring", err)
 	}
 	goos = "linux"
@@ -298,7 +300,7 @@ func TestAgyOwnAccountSwitched(t *testing.T) {
 		g := &googleFake{status: 200, body: `{"access_token":"ya29.renewed","expires_in":3599}`}
 		useGoogle(t, g)
 		got, err := h.Credential(context.Background(), account)
-		if !errors.Is(err, c.want) || errors.Is(err, host.ErrFormat) {
+		if !errors.Is(err, c.want) || !errors.Is(err, host.ErrIdentity) || errors.Is(err, host.ErrFormat) {
 			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
 		}
 		if got.AccessToken != "" || got.Fingerprint != "" || len(g.calls) != 0 {
@@ -324,7 +326,7 @@ func TestAgyOwnAccountSwitched(t *testing.T) {
 func TestAgyHomeOtherAccount(t *testing.T) {
 	h, _ := agyFixture(t, agySignIn("ya29.live", "1//refresh", testNow.Add(time.Hour), "someone.else@example.org"))
 	useGoogle(t, &googleFake{status: 500})
-	if got, err := h.Credential(context.Background(), agyAccount); !errors.Is(err, errAgyOtherAccount) || got.AccessToken != "" || strings.Contains(err.Error(), "@") {
+	if got, err := h.Credential(context.Background(), agyAccount); !errors.Is(err, errAgyOtherAccount) || !errors.Is(err, host.ErrIdentity) || got.AccessToken != "" || strings.Contains(err.Error(), "@") {
 		t.Fatalf("home signed in to another account: %+v, %v", got, err)
 	}
 	h, _ = agyFixture(t, agySignIn("ya29.live", "1//refresh", testNow.Add(time.Hour), ""))

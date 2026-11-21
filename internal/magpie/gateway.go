@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
@@ -132,10 +133,16 @@ func pinValue(pin string) string {
 	return pin
 }
 
+// errorBodyWait bounds reading the body of an error response. ctx no
+// longer applies once the headers have arrived, so that an error the
+// provider already sent is not lost to a cancellation.
+var errorBodyWait = 10 * time.Second
+
 // OpenModelStream sends one ignition request and returns once the response
-// headers arrive. The request lives until CloseModelStream or until ctx is
-// cancelled. An error status returns the stream's status and headers with
-// a host.Error built from the body, and no stream to read.
+// headers arrive. ctx cancels the request only until then; afterwards the
+// request lives until CloseModelStream. An error status returns the
+// stream's status and headers with a host.Error built from the body, read
+// within errorBodyWait, and no stream to read.
 func (h *Host) OpenModelStream(ctx context.Context, mr host.ModelRequest) (host.ModelStream, error) {
 	path, ok := modelPaths[mr.Protocol]
 	if !ok {
@@ -144,9 +151,13 @@ func (h *Host) OpenModelStream(ctx context.Context, mr host.ModelRequest) (host.
 	if strings.TrimSpace(mr.Account) == "" {
 		return host.ModelStream{}, errors.New("model stream: no account to pin")
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	// streamCtx follows ctx until the headers arrive (stopFollowing), and
+	// then only cancel.
+	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopFollowing := context.AfterFunc(ctx, cancel)
 	req, err := h.newGatewayRequest(streamCtx, http.MethodPost, path, bytes.NewReader(mr.Body))
 	if err != nil {
+		stopFollowing()
 		cancel()
 		return host.ModelStream{}, fmt.Errorf("model stream: %w", err)
 	}
@@ -158,12 +169,18 @@ func (h *Host) OpenModelStream(ctx context.Context, mr host.ModelRequest) (host.
 	}
 	resp, err := gatewayClient.Do(req)
 	if err != nil {
+		stopFollowing()
 		cancel()
 		return host.ModelStream{}, fmt.Errorf("model stream: %w", err)
 	}
+	// The request has reached the provider. A cancellation of ctx at the
+	// same moment may already have cut the body; the status still counts.
+	stopFollowing()
 	opened := host.ModelStream{StatusCode: resp.StatusCode, Header: resp.Header.Clone()}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limit := time.AfterFunc(errorBodyWait, cancel)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
+		limit.Stop()
 		resp.Body.Close()
 		cancel()
 		return opened, gatewayError("POST "+path, resp.StatusCode, body)

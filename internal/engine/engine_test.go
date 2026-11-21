@@ -32,8 +32,10 @@ type fakeHost struct {
 	kept    []host.KeptQuota
 	// listModels replaces the default model list when set.
 	listModels func() ([]string, error)
-	requests   []httpRequest
-	executed   []host.ModelRequest
+	// credErrs makes Credential fail for the pins it holds.
+	credErrs map[string]error
+	requests []httpRequest
+	executed []host.ModelRequest
 }
 
 func (f *fakeHost) Accounts(context.Context) ([]host.Account, error) {
@@ -45,6 +47,12 @@ func (f *fakeHost) Accounts(context.Context) ([]host.Account, error) {
 }
 
 func (f *fakeHost) Credential(_ context.Context, account host.Account) (host.Credential, error) {
+	f.mu.Lock()
+	credErr := f.credErrs[account.Pin]
+	f.mu.Unlock()
+	if credErr != nil {
+		return host.Credential{}, credErr
+	}
 	raw, ok := f.files[account.Pin]
 	if !ok {
 		return host.Credential{}, errors.New("auth not found")

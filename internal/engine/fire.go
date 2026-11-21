@@ -418,13 +418,23 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// rejection waits for another one. When it cannot be read, a rejection
 	// keeps it unknown: the file read after the request may already hold a
 	// new login the request did not use. See noteFingerprint.
+	//
+	// The gateway sends an agy-cli account's request with whichever Google
+	// account its agy is signed in to. Its credential is read before every
+	// ignition, manual ones too, and an account that cannot be confirmed
+	// (host.ErrIdentity) gets no request; see identityChecked.
 	fingerprint := ""
-	if !manual {
-		fingerprint = e.credentialFingerprint(ctx, t.cred)
+	var err error
+	if !manual || identityChecked(t.cred) {
+		fingerprint, err = e.ignitionCredential(ctx, t.cred)
 	}
 	base := e.ignitionBase(t.group.Key, start)
 
-	model, resp, err := e.execute(ctx, cfg, t, manual)
+	var model string
+	var resp sentResponse
+	if err == nil {
+		model, resp, err = e.execute(ctx, cfg, t, manual)
+	}
 	if err == nil {
 		// Confirmation needs a reading taken after the request that
 		// worked was sent; the model list and refused candidates before it
@@ -441,8 +451,21 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		e.logf("info", "%s：%v", t.group.Label, err)
 		return err
 	}
+	if e.stopping() && errors.Is(err, context.Canceled) {
+		// The process exits: the request, its stream or its confirmation
+		// was cut short by the stop and says nothing about the account. An
+		// error the provider had already answered is not context.Canceled
+		// and is handled below.
+		e.logf("info", "%s：退出时取消点火，不计为失败", t.group.Label)
+		return err
+	}
 	if err != nil {
 		d := failure.Diagnose(err)
+		if errors.Is(err, host.ErrIdentity) {
+			// A credential problem: retrying cannot help until the account
+			// can be confirmed, and no provider limited anything.
+			d.Reason = failure.ReasonAuth
+		}
 		if manual {
 			// Keep the automatic retry, circuit and credential state
 			// unchanged. manual=1 without retry_seconds tells the page that
