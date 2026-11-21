@@ -387,9 +387,13 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // credential first has Magpie refresh its quota (refreshKept). Scheduled
 // rounds never do: a Claude refresh runs Claude Code's /usage.
 //
-// The refreshes share renew, which ends keptRereadWait before the end of
-// the manual refresh (manualRefreshEnd): deadline is that of the request
-// that asked for the refresh, zero for none.
+// The whole round, the account list, the active queries and the
+// readings of Magpie's kept quota included, ends at the end of the manual
+// refresh (manualRefreshEnd): deadline is that of the request that asked
+// for the refresh, zero for none. The accounts not queried by then fail
+// with errManualTimeUp. The refreshes share renew, which ends
+// keptRereadWait before the end, so that the kept quota can still be read
+// after a refresh that ran out.
 //
 // It returns the error of the refresh: for one account, that account's
 // error, or errRefreshAccountGone when the account is not loaded; for all,
@@ -397,9 +401,11 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // Magpie could not refresh, or brought no new reading.
 func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string, deadline time.Time) error {
 	end := manualRefreshEnd(time.Now(), deadline)
-	renew, cancel := context.WithDeadline(ctx, end.Add(-keptRereadWait))
+	round, cancelRound := context.WithDeadlineCause(ctx, end, errManualTimeUp)
+	defer cancelRound()
+	renew, cancel := context.WithDeadlineCause(round, end.Add(-keptRereadWait), errManualTimeUp)
 	defer cancel()
-	errs, listErr := e.pollWith(ctx, cfg, e.now(), onlyAuth, true, renew)
+	errs, listErr := e.pollWith(round, cfg, e.now(), onlyAuth, true, renew)
 	switch {
 	case listErr != nil:
 		return listErr
@@ -434,6 +440,17 @@ func (f *refreshFailure) Error() string { return f.reason }
 func (f *refreshFailure) Unwrap() error { return f.err }
 
 var errRefreshAccountGone = &refreshFailure{reason: "没有找到这个账号：它在 Magpie 中已关闭或已删除，或所属服务未开启监控"}
+
+// errManualTimeUp is the cause of the contexts of a manual refresh that
+// reach its end (manualRefreshEnd), and the error of an account the
+// refresh had no time left to query.
+var errManualTimeUp = &refreshFailure{reason: "超过手动刷新的时限，未完成"}
+
+// timeUp reports whether ctx ended at the end of a manual refresh, not by
+// a stop.
+func timeUp(ctx context.Context) bool {
+	return ctx.Err() != nil && errors.Is(context.Cause(ctx), errManualTimeUp)
+}
 
 // refreshReasons are the reasons of the host.Error codes RefreshQuota
 // returns when Magpie cannot refresh the account.
@@ -476,11 +493,17 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 	errs := map[string]string{}
 	failed := map[string]error{}
 	for _, cred := range creds {
-		if ctx.Err() != nil {
-			return failed, nil
-		}
 		if onlyAuth != "" && cred.AuthIndex != onlyAuth {
 			continue
+		}
+		if timeUp(ctx) {
+			// A manual refresh has no time left for this account.
+			errs[cred.AuthIndex] = errManualTimeUp.Error()
+			failed[cred.AuthIndex] = errManualTimeUp
+			continue
+		}
+		if ctx.Err() != nil {
+			return failed, nil
 		}
 		now := e.now()
 		if !force && e.shouldSkipActive(cfg, cred, slot, now) {
@@ -504,7 +527,11 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 	}
 	e.mu.Unlock()
 	e.dirty = true
-	e.flushCredentialNotices(ctx, start)
+	if ctx.Err() == nil {
+		// A manual refresh out of time leaves the notices to the next
+		// round.
+		e.flushCredentialNotices(ctx, start)
+	}
 	return failed, nil
 }
 
@@ -570,7 +597,7 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 		refreshErr = staleRefresh(hostErr.Message, refreshErr)
 	case errors.As(refreshErr, &hostErr) && refreshReasons[hostErr.Code] != "":
 		refreshErr = &refreshFailure{reason: refreshReasons[hostErr.Code], err: refreshErr}
-	case refreshErr != nil && renew.Err() != nil && ctx.Err() == nil:
+	case refreshErr != nil && timeUp(renew):
 		refreshErr = fmt.Errorf("超过手动刷新的时限，未完成：%w", refreshErr)
 	}
 	var readAt time.Time

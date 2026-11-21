@@ -2,11 +2,16 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/magpie"
 )
 
@@ -66,5 +71,64 @@ func TestManualRefreshReasonsFromTheMagpieGateway(t *testing.T) {
 				t.Fatalf("refresh_quotas %#v", result)
 			}
 		})
+	}
+}
+
+// loggedGatewayHost is a gatewayRefreshHost that records the log.
+type loggedGatewayHost struct {
+	*gatewayRefreshHost
+	mu    sync.Mutex
+	lines []string
+}
+
+func (h *loggedGatewayHost) Log(level, message string, fields map[string]any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lines = append(h.lines, fmt.Sprint(level, " ", message, " ", fields))
+}
+
+// A manual refresh that runs out of time while Magpie's gateway has not
+// answered the refresh shows no part of its URL, whose query names the
+// account by email: not in the result of POST /api/refresh, the
+// account's error or the log.
+func TestManualRefreshTimeoutShowsNoEmail(t *testing.T) {
+	shortManualBudget(t, 800*time.Millisecond, 200*time.Millisecond)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/magpie/accounts":
+			w.Write([]byte(`{"object":"list","data":[{"provider":"claude","id":"3","pin":"claude/3","kind":"account","user":"carol.secret@example.com","on":true}]}`))
+		case "GET /v1/magpie/quotas":
+			w.Write([]byte(`{"object":"list","data":[]}`))
+		default:
+			io.ReadAll(r.Body)
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(gateway.Close)
+	e, h, renew, c := newRenewEngine(t)
+	h.kept = []host.KeptQuota{keptClaude("3", c.t, 50)}
+	logged := &loggedGatewayHost{gatewayRefreshHost: &gatewayRefreshHost{
+		expiredHost: renew.expiredHost,
+		gateway:     &magpie.Host{Addr: strings.TrimPrefix(gateway.URL, "http://"), ConfigDir: t.TempDir()},
+	}}
+	e.host = logged
+	err := manualRefresh(e, "3")
+	if err == nil || !strings.Contains(err.Error(), "超过手动刷新的时限") || !strings.Contains(err.Error(), "POST /v1/magpie/quotas/refresh") {
+		t.Fatalf("err = %v", err)
+	}
+	shown := []string{err.Error()}
+	for _, a := range e.Status().Accounts {
+		shown = append(shown, a.Error)
+	}
+	logged.mu.Lock()
+	shown = append(shown, logged.lines...)
+	logged.mu.Unlock()
+	for _, s := range shown {
+		for _, part := range []string{"carol", "example.com", "user=", "http://"} {
+			if strings.Contains(s, part) {
+				t.Fatalf("%q shows %q", s, part)
+			}
+		}
 	}
 }

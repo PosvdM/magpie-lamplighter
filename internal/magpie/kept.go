@@ -378,7 +378,9 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 // The time of the account's kept reading (GET ?kept=1) is read before the
 // refresh. When the card the refresh answers is no newer reading
 // (refreshStale), it returns a *host.Error with codeRefreshStale, and the
-// card when it has one.
+// card when it has one. A newer card that does not convert is settled by
+// keptAfter: an error that wraps host.ErrFormat, unless the kept quota has
+// a newer reading that does.
 //
 // The account list and the kept reading end within refreshLookTimeout,
 // and the refresh itself within refreshTimeout, so that a slow reading
@@ -460,25 +462,62 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	var card cardState
 	var k host.KeptQuota
 	usable := false
+	var convErr error
 	i := cardIndex(states, a)
 	if i >= 0 {
 		card = states[i]
-		c := (*resp.Data)[i]
-		// A card that does not convert is left to KeptQuotas, which
-		// reports its format.
-		k, usable, _ = keptOf(keptQuota{Provider: c.Provider, Kind: "subscription", User: c.User, Windows: c.Windows, ReadAt: c.ReadAt, AsOf: c.AsOf}, a.Pin, answered)
+		k, usable, convErr = (*resp.Data)[i].kept(a.Pin, answered)
 	}
 	if reason := refreshStale(card, i >= 0, before); reason != "" {
 		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: reason}
 	}
+	if convErr != nil {
+		return h.keptAfter(ctx, a, before, fmt.Errorf("%s: %s: %w", route, a.Pin, convErr))
+	}
 	return k, usable, nil
 }
 
-// refreshedCard is a card of POST /v1/magpie/quotas/refresh: its reading
-// state and its windows.
+// keptAfter reads Magpie's kept quota again after a refresh whose card
+// of the account a is a new reading that does not convert (failed, which
+// wraps host.ErrFormat). The kept card counts only when it is a new
+// reading as the refresh would be (refreshStale against before, the time
+// of the account's reading before the refresh) and converts; then it is
+// returned as the refresh's card. Otherwise, the kept card being the old
+// reading or none, it returns failed: neither success nor a stale refresh
+// can be told.
+func (h *Host) keptAfter(ctx context.Context, a listedAccount, before *time.Time, failed error) (host.KeptQuota, bool, error) {
+	var kept struct {
+		Data *[]refreshedCard `json:"data"`
+	}
+	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &kept); err != nil || kept.Data == nil {
+		return host.KeptQuota{}, false, failed
+	}
+	states := make([]cardState, len(*kept.Data))
+	for i, c := range *kept.Data {
+		states[i] = c.cardState
+	}
+	i := cardIndex(states, a)
+	if i < 0 || refreshStale(states[i], true, before) != "" {
+		return host.KeptQuota{}, false, failed
+	}
+	k, usable, err := (*kept.Data)[i].kept(a.Pin, now())
+	if err != nil || !usable {
+		return host.KeptQuota{}, false, failed
+	}
+	return k, true, nil
+}
+
+// refreshedCard is a card of POST /v1/magpie/quotas/refresh, or of GET
+// /v1/magpie/quotas?kept=1: its reading state and its windows.
 type refreshedCard struct {
 	cardState
 	Windows []keptWindow `json:"windows"`
+}
+
+// kept converts c, the card of the account pin, as keptOf does with at
+// the time of the answer.
+func (c refreshedCard) kept(pin string, at time.Time) (host.KeptQuota, bool, error) {
+	return keptOf(keptQuota{Provider: c.Provider, Kind: "subscription", User: c.User, Windows: c.Windows, ReadAt: c.ReadAt, AsOf: c.AsOf}, pin, at)
 }
 
 // refreshAllowed returns ErrRefreshLimited when a refresh of a was sent

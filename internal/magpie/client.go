@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -90,7 +91,8 @@ func (h *Host) newGatewayRequest(ctx context.Context, method, path string, body 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
-		return nil, err
+		// The error would quote the URL, query included.
+		return nil, errors.New("MAGPIE_ADDR 不是可用的网关地址")
 	}
 	req.Header.Set("User-Agent", "magpie-lamplighter")
 	return req, nil
@@ -98,8 +100,9 @@ func (h *Host) newGatewayRequest(ctx context.Context, method, path string, body 
 
 // gatewayJSON sends one request without a body to the gateway and decodes
 // its JSON answer into out. An unreachable gateway or a status other than
-// 2xx is a *host.Error; an answer that is not JSON of out's shape wraps
-// host.ErrFormat.
+// 2xx is a *host.Error (errors.As); an answer that is not JSON of out's
+// shape wraps host.ErrFormat. A request that fails without an answer, or
+// whose answer cannot be read, names no URL (failedRequest).
 func (h *Host) gatewayJSON(ctx context.Context, method, path string, out any) error {
 	route := method + " " + routeOf(path)
 	req, err := h.newGatewayRequest(ctx, method, path, nil)
@@ -109,12 +112,13 @@ func (h *Host) gatewayJSON(ctx context.Context, method, path string, out any) er
 	req.Header.Set("Accept", "application/json")
 	resp, err := gatewayClient.Do(req)
 	if err != nil {
-		return &host.Error{Method: route, Code: "gateway_unreachable", Message: err.Error()}
+		failed := failedRequest(route, err)
+		return &unreachable{err: &host.Error{Method: route, Code: "gateway_unreachable", Message: failed.text}, cause: failed.cause}
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGatewayBody))
 	if err != nil {
-		return fmt.Errorf("%s: %w", route, err)
+		return failedRequest(route, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return gatewayError(route, resp.StatusCode, body)
@@ -126,6 +130,68 @@ func (h *Host) gatewayJSON(ctx context.Context, method, path string, out any) er
 		return fmt.Errorf("%s: %w: %v", route, host.ErrFormat, err)
 	}
 	return nil
+}
+
+// requestFailed is a gateway request that got no answer, or whose answer
+// could not be read. Its text names the method, the route without its
+// query and the kind of failure (failureOf), never the URL: the query of
+// a request can name the account, such as the user of a quota refresh,
+// and *url.Error quotes the whole URL. A request ended by its context
+// wraps context.Canceled or context.DeadlineExceeded.
+type requestFailed struct {
+	text  string
+	cause error
+}
+
+func (f *requestFailed) Error() string { return f.text }
+func (f *requestFailed) Unwrap() error { return f.cause }
+
+// failedRequest is requestFailed for err of the request route, such as
+// "POST /v1/magpie/quotas/refresh".
+func failedRequest(route string, err error) *requestFailed {
+	kind, cause := failureOf(err)
+	return &requestFailed{text: route + ": " + kind, cause: cause}
+}
+
+// failureOf is the kind of a failed request, and the context error that
+// ended it, nil for none.
+func failureOf(err error) (string, error) {
+	var netErr net.Error
+	var opErr *net.OpError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "request canceled", context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out", context.DeadlineExceeded
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "request timed out", nil
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused", nil
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset", nil
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "connection closed", nil
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "connection failed", nil
+	}
+	return "request failed", nil
+}
+
+// unreachable is the *host.Error of a gateway that gave no answer
+// (gateway_unreachable, with the text of failedRequest), and wraps the
+// context error that ended the request, if any.
+type unreachable struct {
+	err   *host.Error
+	cause error
+}
+
+func (u *unreachable) Error() string { return u.err.Error() }
+
+func (u *unreachable) Unwrap() []error {
+	if u.cause == nil {
+		return []error{u.err}
+	}
+	return []error{u.err, u.cause}
 }
 
 // gatewayError turns an error response into a host.Error. Message keeps

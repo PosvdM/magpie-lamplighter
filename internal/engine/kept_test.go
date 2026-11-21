@@ -198,8 +198,8 @@ func TestRefreshesShareTheManualBudget(t *testing.T) {
 	h.kept = []host.KeptQuota{keptClaude("3", c.t, 50)}
 	renew.refresh = func(ctx context.Context, _ string) error { return ctx.Err() }
 	cfg := e.config()
-	renewCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+	renewCtx, cancel := context.WithCancelCause(context.Background())
+	cancel(errManualTimeUp)
 	// A refresh whose budget has run out still applies the kept reading.
 	err := e.queryCredWith(context.Background(), cfg, e.creds["3"], true, renewCtx)
 	if err == nil || !strings.Contains(err.Error(), "超过") {
