@@ -105,10 +105,22 @@ func watchStream(ctx context.Context, stop <-chan struct{}, first <-chan time.Ti
 	}
 }
 
+// sentResponse is an ignition response with sentAt, when its request
+// entered OpenModelStream; confirmation compares readings with it.
+type sentResponse struct {
+	host.ModelResponse
+	sentAt time.Time
+}
+
 // executeStream retains headers for quota confirmation. A deliberate cutoff
 // returns no execution error, so it cannot cause a model fallback. It does not
 // establish ignition success: the caller must still confirm the quota window.
-func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequest, outputWindow time.Duration) (resp host.ModelResponse, err error) {
+//
+// The request of an automatic ignition (t.automatic) passes admit right
+// before it is opened, and returns errIgnitionWithdrawn when the target no
+// longer qualifies or a configuration change withdraws it before its
+// response headers arrive.
+func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequest, outputWindow time.Duration) (resp sentResponse, err error) {
 	started := time.Now()
 	correlation := rand.Text()
 	var firstOutput time.Time
@@ -166,7 +178,29 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 	timedOut := func() bool {
 		return ctx.Err() == nil && errors.Is(streamCtx.Err(), context.DeadlineExceeded)
 	}
-	opened, err := e.host.OpenModelStream(streamCtx, req)
+	// reqCtx carries the request; withdrawing an admitted request cancels
+	// it. It ends with streamCtx.
+	reqCtx := streamCtx
+	var admitted func() bool
+	if t.automatic {
+		var ok bool
+		reqCtx, admitted, ok = e.admit(streamCtx, t)
+		if !ok {
+			reason = "withdrawn"
+			return resp, errIgnitionWithdrawn
+		}
+		// Ends the admission also when OpenModelStream panics.
+		defer admitted()
+	}
+	resp.sentAt = e.now()
+	opened, err := e.host.OpenModelStream(reqCtx, req)
+	if admitted != nil && !admitted() {
+		if err == nil && opened.ID != "" {
+			_ = e.host.CloseModelStream(opened.ID)
+		}
+		reason = "withdrawn"
+		return resp, errIgnitionWithdrawn
+	}
 	resp.StatusCode, resp.Header = opened.StatusCode, opened.Header
 	streamID = opened.ID
 	if err != nil {
@@ -200,7 +234,7 @@ func (e *Engine) executeStream(ctx context.Context, t target, req host.ModelRequ
 	}
 	first := make(chan time.Time, 1)
 	end := &streamEnd{done: make(chan struct{})}
-	finish := func(why string, failure error) (host.ModelResponse, error) {
+	finish := func(why string, failure error) (sentResponse, error) {
 		end.claim(why, failure)
 		return resp, failure
 	}

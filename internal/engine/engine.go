@@ -110,6 +110,8 @@ type Engine struct {
 	// credProblems is the reason of the credential problem per auth index,
 	// a copy of state.Credentials.
 	credProblems map[string]string
+	// admission is the automatic ignition request being opened; see admit.
+	admission *admission
 
 	// Owned by the loop goroutine.
 	state *store.State
@@ -192,6 +194,8 @@ func New(opts Options) *Engine {
 
 // Configure 接收有效配置并返回实例内接收序号，后台循环负责运行时应用。
 // 解析失败时保留上一份配置、记录状态错误并返回 0。
+// 新配置在同一临界区内撤销已准入、尚未收到响应头的自动点火请求，
+// 前提是新配置下它的目标不再满足点火条件；见 admit。
 func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	e.mu.Lock()
 	if parseErr != nil {
@@ -203,6 +207,7 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	revision := e.cfgRevision
 	e.cfg = cfg
 	e.cfgErr = ""
+	e.withdrawLocked()
 	e.mu.Unlock()
 	e.wake()
 	return revision

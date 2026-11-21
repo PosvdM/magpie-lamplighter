@@ -739,12 +739,16 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 }
 
 // refreshReason is the error of a failed refresh as refresh_quotas gives
-// it: the reason when Magpie could not refresh (refreshFailure), otherwise
-// a pointer to list_quotas. Other error texts can carry provider responses
-// and account names, so they are not passed on.
+// it: the reason when Magpie could not refresh or brought no new reading
+// (refreshFailure), otherwise a pointer to list_quotas. Other error texts
+// can carry provider responses and account names, so they are not passed
+// on.
 func refreshReason(err error) string {
 	var failure *refreshFailure
-	if errors.As(err, &failure) {
+	switch {
+	case errors.As(err, &failure) && failure.stale:
+		return failure.reason
+	case failure != nil:
 		return "Magpie 刷新额度失败：" + failure.reason
 	}
 	return "额度刷新失败，各账号的状态见 list_quotas"

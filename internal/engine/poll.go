@@ -365,7 +365,7 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // It returns the error of the refresh: for one account, that account's
 // error, or errRefreshAccountGone when the account is not loaded; for all,
 // only a failed account list. A refreshFailure in it gives the reason
-// Magpie could not refresh.
+// Magpie could not refresh, or brought no new reading.
 func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string) error {
 	renew, cancel := context.WithTimeout(ctx, manualRefreshBudget)
 	defer cancel()
@@ -391,9 +391,13 @@ func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth str
 // refreshFailure is a manual refresh that Magpie could not run, with a
 // reason that the results of POST /api/refresh and refresh_quotas show as
 // it is: a short sentence without account names, emails or Magpie's text.
+// A stale refresh ran but brought no new reading; its reason is a whole
+// sentence ("Magpie 这次没有读到新额度：…") and may end with the short
+// cause that package magpie gives with refresh_stale.
 type refreshFailure struct {
 	reason string
 	err    error
+	stale  bool
 }
 
 func (f *refreshFailure) Error() string { return f.reason }
@@ -407,6 +411,22 @@ var refreshReasons = map[string]string{
 	"account_off":         "账号在 Magpie 中已关闭",
 	"account_not_found":   "Magpie 中找不到这个账号",
 	"gateway_unavailable": "Magpie 网关不可用",
+}
+
+// refreshStaleCode is the host.Error code of a refresh that Magpie ran
+// without a new reading: the account's quota card has an error, is
+// deferred, or was not read again. Its Message is a short cause without
+// emails or keys.
+const refreshStaleCode = "refresh_stale"
+
+// staleRefresh returns the refreshFailure of a refresh that brought no new
+// reading, with cause when there is one.
+func staleRefresh(cause string, err error) *refreshFailure {
+	reason := "Magpie 这次没有读到新额度"
+	if cause = truncateText(cause, 120); cause != "" {
+		reason += "：" + cause
+	}
+	return &refreshFailure{reason: reason, err: err, stale: true}
 }
 
 // pollWith is poll; a non-nil renew lets an expired credential have Magpie
@@ -461,9 +481,17 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 // keptFallback applies Magpie's kept quota of cred, for an account whose
 // token has expired. It is an error when Magpie has none.
 func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred) error {
+	_, err := e.applyKept(ctx, cred)
+	return err
+}
+
+// applyKept applies Magpie's kept quota of cred when it is newer than the
+// last one applied, and returns when Magpie took it. It is an error when
+// Magpie has none.
+func (e *Engine) applyKept(ctx context.Context, cred *Cred) (time.Time, error) {
 	kept, err := e.host.KeptQuotas(ctx)
 	if err != nil {
-		return fmt.Errorf("凭证已过期，读取 Magpie 额度记录失败：%w", err)
+		return time.Time{}, fmt.Errorf("凭证已过期，读取 Magpie 额度记录失败：%w", err)
 	}
 	for _, k := range kept {
 		if k.Pin != cred.AuthIndex {
@@ -473,28 +501,45 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 			e.keptAt[k.Pin] = k.ReadAt
 			e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
 		}
-		return nil
+		return k.ReadAt, nil
 	}
-	return errors.New("凭证已过期，Magpie 也没有这个账号的额度记录")
+	return time.Time{}, errors.New("凭证已过期，Magpie 也没有这个账号的额度记录")
 }
 
 // refreshKept asks Magpie to read the quota of cred again, for an account
-// whose token has expired, and then applies Magpie's new reading. When the
-// refresh fails, Magpie's last reading still applies (keptFallback) and the
-// refresh error is returned with the outcome of that fallback.
+// whose token has expired, and then applies Magpie's new reading. Magpie's
+// last reading applies in any case, for display, but the refresh only
+// counts when it brought a new one: a failed refresh returns its error,
+// and a refresh without a new reading (refresh_stale, or a kept reading no
+// newer than the one applied before) a stale refreshFailure, each with the
+// outcome of applying the last reading.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
+	before := e.keptAt[cred.AuthIndex]
 	refreshErr := e.host.RefreshQuota(renew, cred.AuthIndex)
 	var hostErr *host.Error
 	switch {
+	case errors.As(refreshErr, &hostErr) && hostErr.Code == refreshStaleCode:
+		refreshErr = staleRefresh(hostErr.Message, refreshErr)
 	case errors.As(refreshErr, &hostErr) && refreshReasons[hostErr.Code] != "":
 		refreshErr = &refreshFailure{reason: refreshReasons[hostErr.Code], err: refreshErr}
 	case refreshErr != nil && renew.Err() != nil && ctx.Err() == nil:
 		refreshErr = fmt.Errorf("超过 %s 未完成：%w", manualRefreshBudget, refreshErr)
 	}
-	err := e.keptFallback(ctx, cfg, cred)
+	readAt, err := e.applyKept(ctx, cred)
+	if refreshErr == nil && err == nil && !readAt.After(before) {
+		// Magpie reported the refresh as done, but its reading is the one
+		// applied before.
+		refreshErr = staleRefresh("", nil)
+	}
+	var failure *refreshFailure
+	stale := errors.As(refreshErr, &failure) && failure.stale
 	switch {
 	case refreshErr == nil:
 		return err
+	case stale && err != nil:
+		return fmt.Errorf("%w；%w", refreshErr, err)
+	case stale:
+		return fmt.Errorf("%w；已显示 Magpie 记下的读数", refreshErr)
 	case err != nil:
 		return fmt.Errorf("Magpie 刷新额度失败：%w；%w", refreshErr, err)
 	default:

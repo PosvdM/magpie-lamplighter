@@ -209,7 +209,7 @@ quotas.example.com {
 
 **Magpie 的额度记录**：Magpie 转发请求时会记下各账号的额度，插件每 60 秒读取一次，不额外向厂商发请求。Codex 和 Claude 有这类数据，Antigravity 只能主动查询。某个账号在整点前 60 秒内刚有过新读数时，这一轮跳过对它的主动查询；同一账号最多连续跳过 30 分钟，到时一定主动查询一次。
 
-**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度。刷新单个账号失败时，页面和 `refresh_quotas` 给出原因，例如账号在 Magpie 中已关闭、Magpie 中找不到这个账号或 Magpie 网关不可用；`refresh_quotas` 不返回上游的错误原文，其他错误提示用 `list_quotas` 查看各账号的状态。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
+**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度。刷新单个账号失败时，页面和 `refresh_quotas` 给出原因，例如账号在 Magpie 中已关闭、Magpie 中找不到这个账号或 Magpie 网关不可用；Magpie 这次没有读到新额度时，页面显示 Magpie 记下的旧读数，刷新仍报告失败，原因以“Magpie 这次没有读到新额度”开头；`refresh_quotas` 不返回上游的错误原文，其他错误提示用 `list_quotas` 查看各账号的状态。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
 
 **网络出口**：主动查询和 Magpie 对同一账号的请求使用同一个出口：Magpie 中为该账号或该服务设置的代理，其次是 Magpie 的全局代理，再次是 Magpie 使用的系统代理，都没有时直连。代理无法解析时，插件跳过这次查询，不改用直连。见[网络出口](./docs/architecture.md#网络出口)。
 
@@ -224,7 +224,7 @@ Claude 和 Codex 的额度精确到 1%，Antigravity 的额度带小数。窗口
 - 请求经 Magpie 网关发送，用请求头锁定到这个账号，网关不会改用其他账号。Claude 的请求在 Magpie 中由 Claude Code 转发，带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。
 - 请求只要求模型回复 `OK`，不带工具。收到首次输出后 2 秒关闭请求；每次点火从发出请求到结束最长 2 分钟。
 - 点火模型自动选择：ChatGPT 用最新的 Luna，Claude 用最新的 Haiku，Antigravity 的 Gemini 组用最新的 Flash。Magpie 列出新模型后，下一次点火就会使用它；账号不能使用这个模型时，这次点火改用下一个候选模型，被上游拒绝的模型 24 小时内不再尝试。也可以在配置中指定。
-- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 和 Antigravity 的点火靠之后几次主动查询确认，最长约 75 秒。
+- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 和 Antigravity 的点火靠之后几次主动查询确认：分多次确认，间隔合计约 75 秒，另计每次查询的耗时。
 
 每次点火的模型、回复、usage 和耗时写入 Magpie 的日志，见[调用日志](./docs/architecture.md#调用日志)。
 
@@ -317,10 +317,10 @@ Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重�
 
 | 配置项 | 说明 |
 | --- | --- |
-| `monitor` | 是否监控，默认开启 |
+| `monitor` | 是否监控，默认开启；关闭后这个服务也不点火 |
 | `ignite` | 是否自动点火；`codex` 和 `claude` 默认开启，`antigravity` 默认关闭 |
 | `model` | 指定点火模型，留空时自动选择；必须出现在 Magpie 中该服务的模型列表中，可以写模型名或带服务前缀的完整 ID，例如 `agy-cli/gemini-3-flash` |
-| `groups` | 仅 Antigravity：允许点火的额度组，默认 `["Gemini"]` |
+| `groups` | 仅 Antigravity：允许点火的额度组，默认 `["Gemini"]`；空数组 `[]` 表示一个都不点，省略时使用默认值 |
 | `models` | 仅 Antigravity：按额度组指定模型，例如 `{"Gemini": "gemini-3-flash"}` |
 
 `codex_reset_updates` 控制 Did Codex Reset 转发：`enabled`（默认 `false`）、`poll_seconds`（默认 `300`，最小 300）、`notify_current_pending`（默认 `true`，第一次开启时推送当前尚未生效的排期）。只转发尚未到期的排期和 48 小时内的完成记录；同一次排期有多条帖子时，只在置信度、时间或范围变化时作为排期更新再推送。Did Codex Reset 是第三方监测站，它的信号不代表 OpenAI 官方确认。

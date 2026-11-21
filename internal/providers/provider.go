@@ -62,7 +62,10 @@ type Ignition struct {
 	HintGroup string
 	// Groups are the quota groups the settings offer as checkboxes, with
 	// GroupsHint below them, and DefaultGroups those ignited by default.
-	// Without Groups, every group of the provider is ignited.
+	// With Groups, the configured groups list names the checked ones: an
+	// empty list ignites none, and an absent one keeps DefaultGroups.
+	// Without Groups, an empty or absent list ignites every group of the
+	// provider.
 	Groups        []string
 	GroupsHint    Text
 	DefaultGroups []string
