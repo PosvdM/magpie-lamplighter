@@ -144,10 +144,21 @@ func agyFixture(t *testing.T, token string) (*Host, string) {
 	return h, home
 }
 
+// agyToken is a sign-in of c@example.com, the account with a home.
 func agyToken(access, refresh string, expiry time.Time) string {
-	return mustJSON(map[string]any{"token": map[string]any{
+	return agySignIn(access, refresh, expiry, "c@example.com")
+}
+
+// agySignIn is agy's token file signed in to email; "" leaves out
+// id_token_email.
+func agySignIn(access, refresh string, expiry time.Time, email string) string {
+	v := map[string]any{"token": map[string]any{
 		"access_token": access, "token_type": "Bearer", "refresh_token": refresh, "expiry": expiry.Format(time.RFC3339Nano),
-	}, "auth_method": "consumer", "id_token_email": "c@example.com"})
+	}, "auth_method": "consumer"}
+	if email != "" {
+		v["id_token_email"] = email
+	}
+	return mustJSON(v)
 }
 
 // googleFake answers the token renewals.
@@ -233,21 +244,92 @@ func TestAgyRefused(t *testing.T) {
 	}
 }
 
+var agyOwn = host.Account{Pin: "agy-cli/" + nameID("agy-cli", "d@example.com"), Provider: "agy-cli"}
+
 // agy's own account is in the keyring on macOS and Windows, and in
 // ~/.gemini on Linux without one.
 func TestAgyOwnAccount(t *testing.T) {
 	h, home := agyFixture(t, "{}")
-	own := host.Account{Pin: "agy-cli/" + nameID("agy-cli", "d@example.com"), Provider: "agy-cli"}
 	defer func(was string) { goos = was }(goos)
 	goos = "darwin"
-	if _, err := h.Credential(context.Background(), own); !errors.Is(err, errAgyKeyring) {
+	if _, err := h.Credential(context.Background(), agyOwn); !errors.Is(err, errAgyKeyring) {
 		t.Fatalf("darwin: err = %v, want errAgyKeyring", err)
 	}
 	goos = "linux"
-	writeFiles(t, home, map[string]string{".gemini/antigravity-cli/antigravity-oauth-token": agyToken("ya29.own", "1//own", testNow.Add(time.Hour))})
-	got, err := h.Credential(context.Background(), own)
-	if err != nil || got.AccessToken != "ya29.own" {
-		t.Fatalf("linux: %+v, %v", got, err)
+	for _, email := range []string{"d@example.com", " D@Example.COM "} {
+		writeFiles(t, home, map[string]string{".gemini/antigravity-cli/antigravity-oauth-token": agySignIn("ya29.own", "1//own", testNow.Add(time.Hour), email)})
+		got, err := h.Credential(context.Background(), agyOwn)
+		if err != nil || got.AccessToken != "ya29.own" || got.Fingerprint != fingerprint("1//own") {
+			t.Fatalf("linux, signed in to %q: %+v, %v", email, got, err)
+		}
+	}
+}
+
+// agy's default file holds whichever account agy is signed in to now.
+// After agy signs in to another Google account, or when the file or the
+// entry does not say whose it is, agy's own account reads no token from
+// it, and the error names neither email in full.
+func TestAgyOwnAccountSwitched(t *testing.T) {
+	defer func(was string) { goos = was }(goos)
+	goos = "linux"
+	for _, c := range []struct {
+		name, signedIn string
+		entry          map[string]any
+		want           error
+	}{
+		{"agy signed in to another account", "someone.else@example.org", nil, errAgyOtherAccount},
+		{"file without id_token_email", "", nil, errAgyUnproven},
+		{"entry without email", "d@example.com", map[string]any{"type": "api", "key": "agy"}, errAgyUnproven},
+	} {
+		h, home := agyFixture(t, "{}")
+		if c.entry != nil {
+			writeFiles(t, h.ConfigDir, map[string]string{
+				"logins.json":      `[{"agent":"plugin:agy-cli","user":"Signed in","home":"agy-cli"}]`,
+				"plugin-auth.json": mustJSON(map[string]any{"agy-cli": c.entry}),
+			})
+		}
+		account := agyOwn
+		if c.entry != nil {
+			account = host.Account{Pin: "agy-cli/" + nameID("agy-cli", "Signed in"), Provider: "agy-cli"}
+		}
+		// An ended access token would be renewed with the other account's
+		// refresh token.
+		writeFiles(t, home, map[string]string{".gemini/antigravity-cli/antigravity-oauth-token": agySignIn("ya29.other", "1//other", testNow.Add(-time.Hour), c.signedIn)})
+		g := &googleFake{status: 200, body: `{"access_token":"ya29.renewed","expires_in":3599}`}
+		useGoogle(t, g)
+		got, err := h.Credential(context.Background(), account)
+		if !errors.Is(err, c.want) || errors.Is(err, host.ErrFormat) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+		if got.AccessToken != "" || got.Fingerprint != "" || len(g.calls) != 0 {
+			t.Errorf("%s: credential %+v, renewals %d", c.name, got, len(g.calls))
+		}
+		if err != nil && (strings.Contains(err.Error(), "@") || strings.Contains(err.Error(), "someone")) {
+			t.Errorf("%s: error names an email: %v", c.name, err)
+		}
+		if c.want == errAgyOtherAccount && !strings.Contains(err.Error(), "***se") {
+			t.Errorf("%s: error does not tell the other account: %v", c.name, err)
+		}
+	}
+	// Magpie lists the account by its email when metadata has none.
+	h, home := agyFixture(t, "{}")
+	writeFiles(t, h.ConfigDir, map[string]string{"plugin-auth.json": `{"agy-cli":{"type":"api","key":"agy"}}`})
+	writeFiles(t, home, map[string]string{".gemini/antigravity-cli/antigravity-oauth-token": agySignIn("ya29.own", "1//own", testNow.Add(time.Hour), "d@example.com")})
+	if got, err := h.Credential(context.Background(), agyOwn); err != nil || got.AccessToken != "ya29.own" {
+		t.Fatalf("email from logins.json: %+v, %v", got, err)
+	}
+}
+
+// An account's own home is checked as far as both emails are known.
+func TestAgyHomeOtherAccount(t *testing.T) {
+	h, _ := agyFixture(t, agySignIn("ya29.live", "1//refresh", testNow.Add(time.Hour), "someone.else@example.org"))
+	useGoogle(t, &googleFake{status: 500})
+	if got, err := h.Credential(context.Background(), agyAccount); !errors.Is(err, errAgyOtherAccount) || got.AccessToken != "" || strings.Contains(err.Error(), "@") {
+		t.Fatalf("home signed in to another account: %+v, %v", got, err)
+	}
+	h, _ = agyFixture(t, agySignIn("ya29.live", "1//refresh", testNow.Add(time.Hour), ""))
+	if got, err := h.Credential(context.Background(), agyAccount); err != nil || got.AccessToken != "ya29.live" {
+		t.Fatalf("home file without id_token_email: %+v, %v", got, err)
 	}
 }
 

@@ -132,7 +132,8 @@ func TestRefreshQuota(t *testing.T) {
 	t.Cleanup(func() { now = time.Now })
 	g, h := newGateway(t, map[string]string{
 		"GET /v1/magpie/accounts":        claudeOn,
-		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
+		"GET /v1/magpie/quotas":          cardsBefore,
+		"POST /v1/magpie/quotas/refresh": cardsAfter,
 	})
 	ctx := context.Background()
 	if err := h.RefreshQuota(ctx, "claude/0f0e0d0c0b0a0908"); err != nil {
@@ -168,6 +169,17 @@ func TestRefreshQuota(t *testing.T) {
 // claudeOn is accountsJSON with the Claude account switched on.
 var claudeOn = strings.Replace(accountsJSON, `"plan":"max","on":false`, `"plan":"max","on":true`, 1)
 
+// cardsBefore and cardsAfter are the cards of GET /v1/magpie/quotas?kept=1
+// and of a refresh that read the Codex and Claude accounts again.
+const (
+	cardsBefore = `{"object":"list","data":[
+ {"provider":"codex","kind":"subscription","user":"a@example.com · Team","readAt":"2026-11-21T07:00:00Z","windows":[]},
+ {"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"2026-11-21T07:00:00Z","windows":[]}]}`
+	cardsAfter = `{"object":"list","data":[
+ {"provider":"codex","name":"Codex","user":"a@example.com · Team","readAt":"2026-11-21T08:00:00Z","windows":[]},
+ {"provider":"claude","name":"Claude Code","user":"B@example.com","readAt":"2026-11-21T08:00:00Z","windows":[]}]}`
+)
+
 // RefreshQuota checks the account again right before it asks the gateway,
 // and tells why it did not.
 func TestRefreshQuotaChecksAccount(t *testing.T) {
@@ -182,7 +194,8 @@ func TestRefreshQuotaChecksAccount(t *testing.T) {
 	} {
 		g, h := newGateway(t, map[string]string{
 			"GET /v1/magpie/accounts":        c.accounts,
-			"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
+			"GET /v1/magpie/quotas":          cardsBefore,
+			"POST /v1/magpie/quotas/refresh": cardsAfter,
 		})
 		err := h.RefreshQuota(context.Background(), c.pin)
 		var hostErr *host.Error
@@ -202,6 +215,70 @@ func TestRefreshQuotaChecksAccount(t *testing.T) {
 				t.Errorf("%s: refresh once switched on: %v", c.name, err)
 			}
 		}
+	}
+}
+
+// The gateway answers the cards it has when it reads none again: within
+// its 30 seconds for a card, when the reading failed or when Magpie puts
+// it off. Such a card is refresh_stale, with Magpie's reason told without
+// emails or secrets.
+func TestRefreshQuotaStale(t *testing.T) {
+	const before = `{"object":"list","data":[
+ {"provider":"codex","kind":"subscription","user":"a@example.com · Team","readAt":"2026-11-21T07:00:00Z","windows":[]},
+ {"provider":"codex","kind":"subscription","user":"a@example.com · Team","from":"office","readAt":"2026-11-21T06:00:00Z","windows":[]}]}`
+	card := func(fields string) string {
+		return `{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T09:00:00Z"},` +
+			`{"provider":"codex","user":"a@example.com · Team","from":"office","readAt":"2026-11-21T09:00:00Z"},` +
+			`{"provider":"codex","user":"a@example.com · Team",` + fields + `}]}`
+	}
+	secret := "ya29." + strings.Repeat("A1b2", 12)
+	for _, c := range []struct {
+		name, before, after, want string
+	}{
+		{"read in the last 30 seconds", before, card(`"readAt":"2026-11-21T07:00:00Z"`), "仍是 2026-11-21 07:00:00 UTC 的读数"},
+		{"older reading", before, card(`"readAt":"2026-11-21T06:59:00Z"`), "仍是"},
+		{"reading failed, last one shown", before, card(`"readAt":"2026-11-21T07:00:00Z","asOf":"2026-11-21T07:00:00Z","readError":"HTTP 401 for alice.work@example.com: token ` + secret + ` revoked"`), "读取失败：HTTP 401 for ***rk: token … revoked"},
+		{"reading failed, none shown", before, card(`"error":"usage endpoint said 503"`), "读取失败：usage endpoint said 503"},
+		{"failure despite a new time", before, card(`"readAt":"2026-11-21T08:00:00Z","readError":"timeout"`), "读取失败：timeout"},
+		{"put off", before, card(`"readAt":"2026-11-21T07:00:00Z","readDeferred":true`), "暂不读取"},
+		{"no time", before, card(`"windows":[]`), "没有给出读取时间"},
+		{"no card", before, `{"object":"list","data":[{"provider":"codex","user":"a@example.com · Team","from":"office","readAt":"2026-11-21T09:00:00Z"}]}`, "没有这个账号的额度"},
+	} {
+		_, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts":        accountsJSON,
+			"GET /v1/magpie/quotas":          c.before,
+			"POST /v1/magpie/quotas/refresh": c.after,
+		})
+		err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b")
+		var hostErr *host.Error
+		if !errors.As(err, &hostErr) || hostErr.Code != codeRefreshStale || !strings.Contains(hostErr.Message, c.want) {
+			t.Errorf("%s: err = %v, want refresh_stale with %q", c.name, err, c.want)
+			continue
+		}
+		if strings.Contains(hostErr.Message, "@") || strings.Contains(hostErr.Message, "A1b2") {
+			t.Errorf("%s: message tells an email or a secret: %s", c.name, hostErr.Message)
+		}
+	}
+	// A reading newer than the kept one, or the first one, is new.
+	for name, kept := range map[string]string{"newer": before, "first": `{"object":"list","data":[]}`} {
+		_, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts":        accountsJSON,
+			"GET /v1/magpie/quotas":          kept,
+			"POST /v1/magpie/quotas/refresh": card(`"readAt":"2026-11-21T07:00:01Z"`),
+		})
+		if err := h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b"); err != nil {
+			t.Errorf("%s reading: %v", name, err)
+		}
+	}
+}
+
+func TestShortReason(t *testing.T) {
+	long := strings.Repeat("长", reasonLimit+10)
+	if got := shortReason(long); []rune(got)[reasonLimit] != '…' || len([]rune(got)) != reasonLimit+1 {
+		t.Errorf("long reason: %q", got)
+	}
+	if got := shortReason("line one\n  <\"a.b@x.io\">  sk-ant-oat01-" + strings.Repeat("x", 40)); got != `line one <"***.b"> …` {
+		t.Errorf("reason = %q", got)
 	}
 }
 
@@ -290,8 +367,8 @@ func TestGatewayCallsEndOnStall(t *testing.T) {
 	shortDeadlines(t)
 	bodies := map[string]string{
 		"GET /v1/magpie/accounts":        claudeOn,
-		"GET /v1/magpie/quotas":          `{"object":"list","data":[]}`,
-		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[]}`,
+		"GET /v1/magpie/quotas":          cardsBefore,
+		"POST /v1/magpie/quotas/refresh": cardsAfter,
 		"GET /v1/models":                 modelsSample,
 	}
 	calls := []struct {
@@ -304,6 +381,7 @@ func TestGatewayCallsEndOnStall(t *testing.T) {
 		{"KeptQuotas' account list", "GET /v1/magpie/accounts", func(h *Host) error { _, err := h.KeptQuotas(context.Background()); return err }},
 		{"RefreshQuota", "POST /v1/magpie/quotas/refresh", func(h *Host) error { return h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b") }},
 		{"RefreshQuota's account list", "GET /v1/magpie/accounts", func(h *Host) error { return h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b") }},
+		{"RefreshQuota's kept reading", "GET /v1/magpie/quotas", func(h *Host) error { return h.RefreshQuota(context.Background(), "codex/1a2b3c4d5e6f7a8b") }},
 		{"Models", "GET /v1/models", func(h *Host) error { _, err := h.Models(context.Background()); return err }},
 	}
 	for _, c := range calls {

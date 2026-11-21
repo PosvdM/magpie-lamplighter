@@ -473,6 +473,7 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 
 - Lamplighter 随 Magpie 的插件宿主运行。Magpie 只在启动时和有插件调用时启动插件宿主；安装、更新插件或修改插件选项后，以及插件宿主因内存占用过高被替换后，Lamplighter 随旧宿主停止，要等到下一次插件调用才重新启动，期间不查询、不点火、不通知。打开 Lamplighter 的页面、调用它的工具，或经 agy-cli 等插件服务发送请求都会启动插件宿主，所以安装插件或修改选项后请打开一次页面。常驻后台需要 Magpie 支持，已向上游提出（[yetone/magpie#7114](https://github.com/yetone/magpie/issues/7114)）。
 - macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中，Lamplighter 不读取，会显示错误。在 Magpie 中再添加一次该账号即可。
+- Linux 上，agy 自己登录的第一个 Antigravity 账号读 agy 的默认凭证文件，其中存放的是 agy 当前登录的账号。agy 改登其他 Google 账号，或文件、Magpie 没有记下账号邮箱时，Lamplighter 不使用这个文件，该账号显示错误。在 agy 中改回原账号登录，或在 Magpie 中再添加一次该账号即可。
 - Antigravity 账号的凭证中 `auth_method` 不为空、也不是 `consumer`（个人 Google 账号）时，查询额度会显示错误。
 - Magpie 的 `MAGPIE_ADDR` 设为局域网地址时，网关要求网关密钥，Lamplighter 无法访问网关。
 

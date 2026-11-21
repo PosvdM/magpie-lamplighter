@@ -40,7 +40,12 @@ import (
 //
 // Any other entry wraps host.ErrFormat: the default token file is read only
 // for an entry known to be agy's own, as it holds whichever account agy
-// itself is signed in to.
+// itself is signed in to. Its tokens are used only when the file's
+// id_token_email, which agy writes at sign-in (emailOf in the plugin's
+// signin.mjs), is the entry's email: after agy signs in to another Google
+// account, the entry would otherwise read that account's quota. A home's
+// file belongs to its account alone; it is refused only when both emails
+// are known and differ.
 
 const (
 	// googleTokenURL renews an access token with the OAuth client agy
@@ -81,22 +86,42 @@ type googleToken struct {
 	expires time.Time
 }
 
-// agyTokenFile is where agy keeps the sign-in of the agy-cli account
-// kept at key in plugin-auth.json.
-func (h *Host) agyTokenFile(key string) (string, error) {
+// errAgyOtherAccount is returned when agy's token file is signed in to
+// another Google account than the agy-cli account.
+var errAgyOtherAccount = errors.New("agy 的凭证属于另一个 Google 账号")
+
+// errAgyUnproven is returned when it cannot be told whether agy's default
+// token file is signed in to agy's own account.
+var errAgyUnproven = errors.New("无法确认 agy 当前登录的是这个 Google 账号")
+
+// agyFile is where agy keeps the sign-in of an agy-cli account.
+type agyFile struct {
+	path string
+	// own is agy's own account: path is agy's default file, which holds
+	// whichever account agy is signed in to now.
+	own bool
+	// email is the account's Google email as Magpie keeps it, "" when
+	// Magpie has none.
+	email string
+}
+
+// agyTokenFile is where agy keeps the sign-in of the agy-cli account l,
+// kept at l.Home in plugin-auth.json.
+func (h *Host) agyTokenFile(l savedLogin) (agyFile, error) {
 	var auth map[string]json.RawMessage
 	if err := h.readJSONFile("plugin-auth.json", &auth); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", errors.New("Magpie 配置目录中没有 plugin-auth.json")
+			return agyFile{}, errors.New("Magpie 配置目录中没有 plugin-auth.json")
 		}
-		return "", err
+		return agyFile{}, err
 	}
+	key := l.Home
 	if key == "" {
-		return "", fmt.Errorf("logins.json 的 agy-cli 账号：%w: no home", host.ErrFormat)
+		return agyFile{}, fmt.Errorf("logins.json 的 agy-cli 账号：%w: no home", host.ErrFormat)
 	}
 	raw, ok := auth[key]
 	if !ok {
-		return "", fmt.Errorf("plugin-auth.json 中没有 agy-cli 账号 %q", key)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 中没有 agy-cli 账号 %q", key)
 	}
 	var entry struct {
 		Type     string         `json:"type"`
@@ -104,47 +129,93 @@ func (h *Host) agyTokenFile(key string) (string, error) {
 		Metadata map[string]any `json:"metadata"`
 	}
 	if !isJSONObject(raw) {
-		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: not an object", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: not an object", key, host.ErrFormat)
 	}
 	if err := json.Unmarshal(raw, &entry); err != nil {
-		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: %v", key, host.ErrFormat, err)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: %v", key, host.ErrFormat, err)
 	}
 	if entry.Type != "api" {
-		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: type is %q, not api", key, host.ErrFormat, entry.Type)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: type is %q, not api", key, host.ErrFormat, entry.Type)
 	}
 	home := ""
 	if v, ok := entry.Metadata["agyHome"]; ok {
 		s, isString := v.(string)
 		if !isString || !agyHomeID.MatchString(s) {
-			return "", fmt.Errorf("plugin-auth.json 的 %s：%w: agyHome is not a home id", key, host.ErrFormat)
+			return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: agyHome is not a home id", key, host.ErrFormat)
 		}
 		home = s
 	}
 	switch {
 	case home != "" && entry.Key != "agy:"+home:
-		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: key does not name agyHome", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: key does not name agyHome", key, host.ErrFormat)
 	case home == "" && entry.Key != "agy":
-		return "", fmt.Errorf("plugin-auth.json 的 %s：%w: neither agy's own account nor one with an agyHome", key, host.ErrFormat)
+		return agyFile{}, fmt.Errorf("plugin-auth.json 的 %s：%w: neither agy's own account nor one with an agyHome", key, host.ErrFormat)
+	}
+	// The plugin names the account by its email in metadata, and Magpie
+	// lists it by that name.
+	email, _ := entry.Metadata["email"].(string)
+	email = strings.TrimSpace(email)
+	if email == "" {
+		email = emailOf(l.User)
 	}
 	if home != "" {
 		state := os.Getenv("XDG_STATE_HOME")
 		if !filepath.IsAbs(state) {
 			userHome, err := os.UserHomeDir()
 			if err != nil {
-				return "", err
+				return agyFile{}, err
 			}
 			state = filepath.Join(userHome, ".local", "state")
 		}
-		return filepath.Join(state, "magpie-agy-bridge", "accounts", home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), nil
+		return agyFile{path: filepath.Join(state, "magpie-agy-bridge", "accounts", home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), email: email}, nil
 	}
 	if goos == "darwin" || goos == "windows" {
-		return "", errAgyKeyring
+		return agyFile{}, errAgyKeyring
 	}
 	userHome, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return agyFile{}, err
 	}
-	return filepath.Join(userHome, ".gemini", "antigravity-cli", "antigravity-oauth-token"), nil
+	return agyFile{path: filepath.Join(userHome, ".gemini", "antigravity-cli", "antigravity-oauth-token"), own: true, email: email}, nil
+}
+
+// belongs checks that the sign-in in f, whose id_token_email is signedIn,
+// is f's account. agy's default file must name the account's email; a
+// home's file is refused only when it names another one. Emails are told
+// apart case-insensitively, and an error shows only the last two
+// characters of the other account's name.
+func (f agyFile) belongs(signedIn string) error {
+	signedIn = strings.TrimSpace(signedIn)
+	if f.email != "" && signedIn != "" && !strings.EqualFold(f.email, signedIn) {
+		if f.own {
+			return fmt.Errorf("%w（%s）：agy 已改登其他账号，在 agy 中改回这个账号登录，或在 Magpie 中重新添加这个账号", errAgyOtherAccount, maskEmail(signedIn))
+		}
+		return fmt.Errorf("%w（%s）：需要在 Magpie 中重新登录这个账号", errAgyOtherAccount, maskEmail(signedIn))
+	}
+	if !f.own {
+		return nil
+	}
+	switch {
+	case f.email == "":
+		return fmt.Errorf("%w：Magpie 没有记下这个账号的邮箱，可在 Magpie 中重新添加这个账号", errAgyUnproven)
+	case signedIn == "":
+		return fmt.Errorf("%w：agy 的凭证文件没有记下所属账号（id_token_email），可在 agy 中重新登录这个账号", errAgyUnproven)
+	}
+	return nil
+}
+
+// maskEmail keeps the last two characters of the local part of email,
+// such as "***rk", as the MCP tools name an account.
+func maskEmail(email string) string {
+	local := email
+	if at := strings.LastIndexByte(email, '@'); at >= 0 {
+		local = email[:at]
+	}
+	runes := []rune(strings.ReplaceAll(local, "\"", ""))
+	if len(runes) > 2 {
+		runes = runes[len(runes)-2:]
+	}
+	return "***" + string(runes)
 }
 
 // agyStored is agy's stored sign-in, as go-keyring writes it.
@@ -157,6 +228,9 @@ type agyStored struct {
 		Expiry *string `json:"expiry"`
 	} `json:"token"`
 	AuthMethod string `json:"auth_method"`
+	// IDTokenEmail is the Google account agy signed in to, which agy
+	// takes from the sign-in's ID token.
+	IDTokenEmail string `json:"id_token_email"`
 }
 
 // parseAgyStored reads agy's token file: JSON, or JSON behind
@@ -193,15 +267,16 @@ func parseAgyStored(b []byte) (agyStored, error) {
 	return s, nil
 }
 
-// agyCredential reads the sign-in of an agy-cli account. An access token
-// that has ended, or ends within googleRenewLead, is renewed in memory
-// through proxy.
+// agyCredential reads the sign-in of an agy-cli account. A sign-in of
+// another account is refused before its tokens are used (agyFile.belongs).
+// An access token that has ended, or ends within googleRenewLead, is
+// renewed in memory through proxy.
 func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (host.Credential, error) {
-	file, err := h.agyTokenFile(l.Home)
+	file, err := h.agyTokenFile(l)
 	if err != nil {
 		return host.Credential{}, err
 	}
-	b, err := os.ReadFile(file)
+	b, err := os.ReadFile(file.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return host.Credential{}, errors.New("找不到 agy 的凭证文件，账号可能已在 Magpie 中退出登录")
@@ -215,6 +290,9 @@ func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (h
 	t := s.Token
 	if t.AccessToken == "" && t.RefreshToken == "" {
 		return host.Credential{}, errors.New("agy 没有登录这个账号")
+	}
+	if err := file.belongs(s.IDTokenEmail); err != nil {
+		return host.Credential{}, err
 	}
 	method := strings.TrimSpace(s.AuthMethod)
 	if method != "" && method != "consumer" {
