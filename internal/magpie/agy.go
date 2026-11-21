@@ -217,11 +217,10 @@ func (h *Host) agyCredential(ctx context.Context, l savedLogin, proxy string) (h
 // renewGoogle is an access token for refresh, renewed at Google when the
 // one kept in memory ends within googleRenewLead.
 func (h *Host) renewGoogle(ctx context.Context, refresh, proxy string) (string, error) {
-	st := h.state()
 	key := fingerprint(refresh)
-	st.mu.Lock()
-	kept, ok := st.google[key]
-	st.mu.Unlock()
+	h.mu.Lock()
+	kept, ok := h.google[key]
+	h.mu.Unlock()
 	if ok && now().Add(googleRenewLead).Before(kept.expires) {
 		return kept.access, nil
 	}
@@ -254,8 +253,11 @@ func (h *Host) renewGoogle(ctx context.Context, refresh, proxy string) (string, 
 	if body.ExpiresIn <= 0 {
 		expires = start.Add(time.Hour)
 	}
-	st.mu.Lock()
-	st.google[key] = googleToken{access: body.AccessToken, expires: expires}
-	st.mu.Unlock()
+	h.mu.Lock()
+	if h.google == nil {
+		h.google = map[string]googleToken{}
+	}
+	h.google[key] = googleToken{access: body.AccessToken, expires: expires}
+	h.mu.Unlock()
 	return body.AccessToken, nil
 }

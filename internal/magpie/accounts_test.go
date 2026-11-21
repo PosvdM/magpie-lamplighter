@@ -96,7 +96,9 @@ func TestGatewayError(t *testing.T) {
 	_, h := newGateway(t, map[string]string{})
 	_, err := h.Accounts(context.Background())
 	var hostErr *host.Error
-	if !errors.As(err, &hostErr) || hostErr.Status != http.StatusNotFound || hostErr.Message != "no route" {
+	// The error keeps the body, which failure.Diagnose reads.
+	if !errors.As(err, &hostErr) || hostErr.Status != http.StatusNotFound || hostErr.Code != "gateway_http_error" ||
+		hostErr.Method != "GET /v1/magpie/accounts" || hostErr.Message != `{"error":{"message":"no route"}}` {
 		t.Fatalf("err = %#v", err)
 	}
 	h = &Host{}
@@ -157,5 +159,10 @@ func TestRefreshQuota(t *testing.T) {
 	}
 	if err := h.RefreshQuota(ctx, "codex/unknown"); err == nil {
 		t.Fatal("refresh of an unknown pin succeeded")
+	}
+	// The limit belongs to the Host: another Host refreshes at once.
+	other := &Host{Addr: h.Addr}
+	if err := other.RefreshQuota(ctx, "claude/0f0e0d0c0b0a0908"); err != nil {
+		t.Fatalf("refresh on another Host: %v", err)
 	}
 }

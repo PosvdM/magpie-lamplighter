@@ -67,7 +67,11 @@ Magpie 的文件和响应格式没有公开承诺。格式与预期不符时，�
 
 ### 网关请求
 
-`internal/magpie` 直接连接 `MAGPIE_ADDR`（`0.0.0.0:<端口>` 和 `:<端口>` 改为 `127.0.0.1:<端口>`，与插件宿主相同），不经过环境变量中的代理。网关对来自本机回环地址的请求不要求密钥；带有转发头（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`Cf-Connecting-IP` 等）或浏览器特征（`Origin`、`Sec-Fetch-*`、以 `Mozilla/` 开头的 User-Agent）的请求按其他机器的请求处理，需要网关密钥（Magpie 的 `internal/gateway/lan.go`），因此请求中不带这些头。`MAGPIE_ADDR` 设为局域网地址时，请求不算来自本机，网关会拒绝，Lamplighter 不处理这种情况。网关返回非 2xx 时得到 `host.Error`，`Message` 取响应中的 `error.message`。
+`internal/magpie` 直接连接 `MAGPIE_ADDR`（`0.0.0.0:<端口>` 和 `:<端口>` 改为 `127.0.0.1:<端口>`，与插件宿主相同），不经过环境变量中的代理。网关对来自本机回环地址的请求不要求密钥；带有转发头（`X-Forwarded-For`、`Forwarded`、`X-Real-IP`、`Cf-Connecting-IP` 等）或浏览器特征（`Origin`、`Sec-Fetch-*`、以 `Mozilla/` 开头的 User-Agent）的请求按其他机器的请求处理，需要网关密钥（Magpie 的 `internal/gateway/lan.go`），因此请求中不带这些头。`MAGPIE_ADDR` 设为局域网地址时，请求不算来自本机，网关会拒绝，Lamplighter 不处理这种情况。
+
+所有网关请求共用 `internal/magpie/client.go` 中的 HTTP 客户端（不用代理，连接超时 10 秒，每个请求通过自己的 context 限时）和辅助函数：`gatewayURL` 拼出地址，`newGatewayRequest` 加上 User-Agent `magpie-lamplighter`，`gatewayJSON` 发送请求并解析 JSON 响应。连不上网关时得到 `Code` 为 `gateway_unreachable` 的 `host.Error`。网关返回非 2xx 时 `gatewayError` 给出 `host.Error`：`Code` 为 `gateway_http_error`，`Method` 为请求方法和路径，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
+
+`magpie.Host` 自己保存运行中的状态：在内存中刷新的 Google token、每个账号上次调用 `RefreshQuota` 的时间和打开的模型流，都是 `Host` 的字段，不同的 `Host` 互不影响。
 
 ### 凭证
 
@@ -431,11 +435,10 @@ Antigravity 的响应头里没有额度。
 Reply with only OK. Do not think, do not use tools, do not do anything else.
 ```
 
-`internal/magpie` 的网关请求（`gateway.go`）：
+`internal/magpie` 的点火请求（`gateway.go`）经“网关请求”一节所述的客户端发送：
 
-- **鉴权**：网关对来自回环地址、且不带转发头的请求不要求密钥（Magpie 源码 `internal/gateway/lan.go` 的 `local`、`proxied`）。请求因此不带 `Authorization`，也不带 `Origin`、`Sec-Fetch-*` 和 `Mozilla/` 开头的 User-Agent（这些会被当作浏览器请求）。HTTP 客户端不使用代理：本机代理会加上 `X-Forwarded-For` 等转发头，网关会把请求当作来自其他机器并要求网关密钥。`MAGPIE_ADDR` 是局域网地址时网关同样按外部请求处理，暂不支持。
 - **锁定账号**：请求头 `X-Magpie-Account: <pin>`。pin 含非 ASCII 字符时按百分号编码发送，Magpie 会解码。锁定后网关只尝试这个账号，不换账号重试；账号不能接受时由网关直接回答，见“失败分类和保护”。
-- **错误状态码**：网关返回非 2xx 时，`OpenModelStream` 返回该状态码和响应头，以及 `host.Error`：`Code` 为 `gateway_http_error`，`Message` 为响应正文的前 4096 字节（按 UTF-8 字符截断），即客户端格式的错误对象：`/v1/messages` 为 `{"type":"error","error":{"type","message"}}`，其余为 `{"error":{"message","type","code","param"}}`（Magpie `writeErrorAs`）。`failure.Diagnose` 和 `ignite.Classify` 从中读取状态码和错误代码。
+- **错误状态码**：网关返回非 2xx 时，`OpenModelStream` 返回该状态码和响应头，以及 `gatewayError` 给出的 `host.Error`。
 - **模型列表**：`Models` 读 `GET /v1/models` 的 `data[].id`，最多读 16 MiB，20 秒超时。没有服务前缀的 ID（用户在 Magpie 中开启了只列出模型名）按 `owned_by` 补上前缀；`data` 缺失或某项没有 `id` 时返回包装 `host.ErrFormat` 的错误。
 
 Claude 账号的请求在 Magpie 中由本机的 Claude Code 转发（Magpie 文档 `docs/subsystems/claude-subscription-bridge.md`，源码 `serveClaudeSubscription`）。`X-Magpie-Account` 在选择候选账号时生效（`pinTo` 在转发之前执行），Claude Code 随后在该账号保存的配置目录中运行，所以锁定对这条路径同样有效。Claude Code 向 Anthropic 发送真实的模型请求，按 Anthropic 的规则这会开始 5 小时窗口；请求带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。网关把 Claude Code 报告的额度写回响应头 `anthropic-ratelimit-unified-{5h,7d,7d_oi}-{utilization,reset}`（`limitHeaders`），在请求到达时和回复开始时各写一次；网关在等待 Claude Code 启动期间可能提前发出响应头，这时响应头里还没有新窗口，由“确认”中的主动查询确认。以上来自 Magpie 源码和文档，尚未用真实账号验证。

@@ -236,15 +236,17 @@ func (h *Host) RefreshQuota(ctx context.Context, pin string) error {
 	if a.Provider == "claude" {
 		gap = claudeRefreshGap
 	}
-	st := h.state()
-	st.mu.Lock()
-	last := st.refreshed[a.Pin]
+	h.mu.Lock()
+	last := h.refreshed[a.Pin]
 	if t := now(); !last.IsZero() && t.Sub(last) < gap {
-		st.mu.Unlock()
+		h.mu.Unlock()
 		return fmt.Errorf("%w：%s 在 %s 后才能再次刷新", ErrRefreshLimited, a.Pin, (gap - t.Sub(last)).Round(time.Second))
 	}
-	st.refreshed[a.Pin] = now()
-	st.mu.Unlock()
+	if h.refreshed == nil {
+		h.refreshed = map[string]time.Time{}
+	}
+	h.refreshed[a.Pin] = now()
+	h.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 	query := url.Values{"provider": {a.Provider}}

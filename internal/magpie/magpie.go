@@ -22,6 +22,8 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 )
@@ -35,6 +37,16 @@ type Host struct {
 	ConfigDir string
 	// Logger receives the log entries; nil writes to standard error.
 	Logger *log.Logger
+
+	// mu guards google and refreshed, which live as long as the Host.
+	mu sync.Mutex
+	// google holds the Google access tokens renewed in memory, by the
+	// fingerprint of their refresh token.
+	google map[string]googleToken
+	// refreshed is the last RefreshQuota attempt of each account pin.
+	refreshed map[string]time.Time
+	// streams holds the open model streams.
+	streams streams
 }
 
 // FromEnv returns a Host for the Magpie that started this process:
