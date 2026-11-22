@@ -2186,7 +2186,7 @@ const STATE_RANGES = {
   "5h": [["1h"], ["3h"], ["6h"], ["12h"], ["24h"], ["26h"]],
   "7d": [["24h"], ["4d"], ["8d"], ["15d"], ["1mo"], ["36d"]],
 };
-const stateFunctions = ["writePageState", "sendPageState", "restorePageState", "rememberChart", "rememberExpanded",
+const stateFunctions = ["writePageState", "sendPageState", "forgetStores", "restorePageState", "rememberChart", "rememberExpanded",
   "currentChartView", "saveChartFilters", "expandedGroups", "saveChartExpanded", "saveChartSwitch", "rangeFor", "restoreChartState"];
 
 // The page state functions with a settings form of two switches and a
@@ -2218,6 +2218,7 @@ function pageStateContext(switches = {}, globals = {}) {
     },
     ...globals,
   });
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES"), ctx);
   return { ctx, form, writes, results, pressed, pending };
 }
 const settle = () => new Promise(setImmediate);
@@ -2326,11 +2327,14 @@ test("a saved chart choice that is not offered falls back to the defaults", () =
 test("a saved window that only the history still has is restored once its history is read, or falls back", async () => {
   const now = Date.now() / 1000;
   // With samples in the range, without, and when the history cannot be read
-  // in LOAD_TIMEOUT.
-  for (const [answer, want] of [["samples", "7d"], ["empty", "5h"], ["failed", "5h"]]) {
+  // in LOAD_TIMEOUT; for 7d with accounts that report 5h, and for 5h, the
+  // window the chart starts with, with accounts that report 7d.
+  for (const [saved, answer, want, wantRange] of [["7d", "samples", "7d", "15d"], ["7d", "empty", "5h", "12h"], ["7d", "failed", "5h", "12h"],
+    ["5h", "samples", "5h", "12h"], ["5h", "empty", "7d", "15d"], ["5h", "failed", "7d", "15d"]]) {
+    const other = saved === "7d" ? "5h" : "7d";
     const requested = [], timeouts = [];
     const { ctx, pressed } = pageStateContext({ filters: true }, {
-      status: { accounts: [{ groups: [{ windows: [{ kind: "5h" }] }] }] },
+      status: { accounts: [{ groups: [{ windows: [{ kind: other }] }] }] },
       historyCache: {}, historyPending: {}, historySeq: 0, API: "api", pendingOrder: null, LOAD_TIMEOUT: 15000,
       $: (id) => id === "settings" ? { elements: { remember_chart_filters: { checked: true }, remember_chart_expanded: { checked: false } } }
         : { querySelectorAll: () => [] },
@@ -2339,22 +2343,24 @@ test("a saved window that only the history still has is restored once its histor
         timeouts.push(timeout);
         if (answer === "failed") throw new Error("request_timed_out");
         const from = new Date((now - 15 * 86400) * 1000).toISOString();
-        return { from, series: answer === "samples" ? [{ kind: "7d", points: [[now - 600, 50]] }] : [] };
+        return { from, series: answer === "samples" ? [{ kind: saved, points: [[now - 600, 50]] }] : [] };
       },
     });
     for (const name of ["windowKinds", "recentSamples", "windowKind", "historyKey", "fetchHistory", "renderWindowButtons"]) {
       vm.runInContext(source.match(new RegExp("  function " + name + "\\([^]*?\\n  }"))[0], ctx);
     }
-    const restored = ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: "7d", sort: "low", ranges: { "7d": "15d" } } });
+    const restored = ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: saved, sort: "low", ranges: { "7d": "15d", "5h": "12h" } } });
     // Nothing is drawn until the window is chosen; the sort is restored at once.
     assert.ok(restored && typeof restored.then === "function");
     assert.equal(ctx.chartSort, "low");
     assert.equal(ctx.chartWindow, "5h");
     await restored;
-    assert.deepEqual(requested, ["api/history?range=15d&window=7d"]);
+    assert.deepEqual(requested, ["api/history?range=" + (saved === "7d" ? "15d" : "12h") + "&window=" + saved]);
     assert.deepEqual(timeouts, [15000]);
-    assert.equal(ctx.chartWindow, want);
-    assert.equal(ctx.range, want === "7d" ? "15d" : "6h");
+    // The page then shows the window buttons (renderStatus).
+    ctx.renderWindowButtons();
+    assert.equal(ctx.chartWindow, want, saved + " " + answer);
+    assert.equal(ctx.range, wantRange, saved + " " + answer);
     assert.equal(pressed["window-buttons"], want);
   }
   // The app stays hidden until then: preparePage waits for the restore.
@@ -2467,7 +2473,50 @@ test("masking and the 5-hour resets come from the first config only", async () =
   assert.equal(ctx.showFiveHourResets, true);
   assert.match(source, /writePageState\("mask_accounts", \{ mask_accounts: masked \|\| null \}\);/);
   assert.match(source, /writePageState\("events_show_5h_resets", \{ events_show_5h_resets: showFiveHourResets \|\| null \}\);/);
-  assert.doesNotMatch(source, /MASK_STORE|EVENTS_STORE|MCP_URL_STORE|CHART_STORE|lamplighter-chart-filters|pageStateTouched/);
+  assert.doesNotMatch(source, /\bMASK_STORE|EVENTS_STORE|MCP_URL_STORE|CHART_STORE|pageStateTouched/);
+});
+
+test("the masking switch of an earlier version moves to the config once, and the other old keys go", async () => {
+  const OLD = { "lamplighter-mask-accounts": "1", "lamplighter-events-5h": "1", "lamplighter-chart-filters": "{}", "lamplighter-mcp-url": "x", "lamplighter-view": "settings" };
+  const setup = (old, globals) => {
+    const stored = { ...old };
+    const state = pageStateContext({}, {
+      localStorage: { getItem: (k) => k in stored ? stored[k] : null, removeItem: (k) => { delete stored[k]; } },
+      ...globals,
+    });
+    return { ...state, stored };
+  };
+  // No mask_accounts in the config and the old switch on: masked at once,
+  // saved quietly, and the old key goes once saved.
+  let { ctx, writes, results, pending, stored } = setup(OLD, { hold: true });
+  ctx.restorePageState({});
+  assert.equal(ctx.masked, true);
+  assert.deepEqual(writes, [{ mask_accounts: true }]);
+  assert.deepEqual(Object.keys(stored).sort(), ["lamplighter-mask-accounts", "lamplighter-view"]);
+  pending.shift().resolve("");
+  await settle();
+  assert.deepEqual(Object.keys(stored), ["lamplighter-view"], "the view stays in the browser");
+  assert.deepEqual(results, []);
+  // A failed save keeps the old key, so the next opening moves it again.
+  ({ ctx, writes, pending, stored } = setup(OLD, { hold: true, pageStateSaved: () => {} }));
+  ctx.restorePageState({});
+  pending.shift().reject(new Error("down"));
+  await settle();
+  assert.equal(ctx.masked, true);
+  assert.equal(stored["lamplighter-mask-accounts"], "1");
+  // The config wins when it has mask_accounts; the old switch goes either way.
+  for (const [cfg, old, want] of [[{ mask_accounts: false }, "1", false], [{ mask_accounts: true }, "0", true], [{}, "0", false], [{}, null, false]]) {
+    ({ ctx, writes, stored } = setup(old === null ? {} : { "lamplighter-mask-accounts": old }));
+    ctx.restorePageState(cfg);
+    assert.equal(ctx.masked, want, JSON.stringify([cfg, old]));
+    assert.deepEqual(writes, []);
+    assert.deepEqual(stored, {});
+  }
+  // Without localStorage, as in Magpie, only the config counts.
+  ({ ctx, writes } = setup({}, { localStorage: undefined }));
+  ctx.restorePageState({});
+  assert.equal(ctx.masked, false);
+  assert.deepEqual(writes, []);
 });
 
 // loadPage with its real gate and the real api: the app, the loading
@@ -2477,11 +2526,12 @@ function loadPageContext(globals = {}) {
   const nodes = {}, calls = [], timers = [], requests = [], stored = {};
   const node = (id) => nodes[id] || (nodes[id] = { id, hidden: true, textContent: "", value: "" });
   const ctx = context(["loadPage", "preparePage", "showPage", "hideContent", "showContent", "setLoadState", "renderLoadCard", "keyAsked",
-    "askForKey", "cancelLoad", "submitKey", "restorePageState", "api", "fetchStatus", "fetchConfig"], {
-    pageLoad: null, pageShown: false, pageStateReady: false, contentReady: false,
+    "askForKey", "cancelLoad", "submitKey", "forgetStores", "restorePageState", "api", "fetchStatus", "fetchConfig"], {
+    pageLoad: null, pagePrepared: false, pageStateReady: false, contentReady: false,
     loadState: { state: "", message: "" }, loadCardTimer: null, LOAD_TIMEOUT: 15000, LOAD_CARD_DELAY: 300,
     key: "", KEY_STORE: "k", history: null, masked: false, showFiveHourResets: false, reloads: 0,
-    localStorage: { setItem: (k, v) => { stored[k] = v; }, removeItem: (k) => { delete stored[k]; } },
+    localStorage: { getItem: (k) => k in stored ? stored[k] : null, setItem: (k, v) => { stored[k] = v; }, removeItem: (k) => { delete stored[k]; } },
+    writePageState: (group, patch, say) => { calls.push("write:" + JSON.stringify(patch)); say("saved"); },
     location: { reload: () => { ctx.reloads++; } },
     API: "api", CONFIG_API: "api/config", PAGE_TOKEN: "", window: { AbortController }, AbortController, rawConfig: {},
     $: node, translate: (k, a) => a ? k + ":" + a : k,
@@ -2505,14 +2555,16 @@ function loadPageContext(globals = {}) {
     loadHistory: async () => { calls.push("history"); return false; }, prefetchHistory: () => {},
     ...globals,
   });
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES"), ctx);
   for (const id of ["app", "key-section", "key-input", "key-error", "load-section", "load-text", "load-retry"]) node(id);
   // The requests of the latest load: [status, config].
   const last = () => [requests.findLast((r) => r.url === "api/status"), requests.findLast((r) => r.url === "api/config")];
-  // A key entered in the form; resolves as the load it starts.
+  // A key entered in the form; resolves as the load it starts on this
+  // page, if any.
   const enterKey = (secret) => {
     nodes["key-input"].value = " " + secret + " ";
     ctx.submitKey({ preventDefault: () => {} });
-    return ctx.pageLoad.promise;
+    return ctx.pageLoad && ctx.pageLoad.promise;
   };
   return { ctx, nodes, calls, timers, requests, stored, last, enterKey };
 }
@@ -2550,7 +2602,7 @@ test("the app shows only once a valid config has set the masking and the chart s
   assert.equal(await load, true);
   assert.equal(nodes.app.hidden, false);
   assert.equal(nodes["load-section"].hidden, true);
-  assert.equal(ctx.pageShown, true);
+  assert.equal(ctx.pagePrepared, true);
   assert.equal(ctx.pageLoad, null);
   await settle();
   assert.deepEqual(calls.slice(4), ["renderStatus:shown:true", "fill", "history"], "the first chart loads after the page shows");
@@ -2621,8 +2673,8 @@ test("a config that is not an object, such as a proxy's page, keeps the app hidd
   assert.match(pageHtml(), /<button id="load-retry"[^>]*data-i18n="retry"/);
 });
 
-test("before the page has shown, a 401 asks for the key, and the key entered starts a load of its own", async () => {
-  const { ctx, nodes, calls, stored, last, enterKey } = loadPageContext();
+test("a 401 before any answers asks for the key, and the key entered is stored and loads the page anew", async () => {
+  const { ctx, nodes, calls, requests, stored, last, enterKey } = loadPageContext();
   // Opened without a key: the status answers 401, the config is still on
   // its way and will not stop when cancelled.
   ctx.holdOn = true;
@@ -2636,12 +2688,44 @@ test("before the page has shown, a 401 asks for the key, and the key entered sta
   assert.equal(nodes["load-section"].hidden, true, "the key form shows without a failure");
   assert.equal(ctx.pageLoad, null);
   assert.equal(config.opts.signal.aborted, true, "the load is cancelled");
-  // The key entered is stored and loads anew; the old config arriving then
-  // changes nothing.
-  const load = enterKey("right");
+  assert.equal(ctx.reloads, 0);
+  // The key entered is stored and the page loads anew with it.
+  assert.equal(enterKey("right"), null);
   assert.equal(stored.k, "right");
+  assert.equal(ctx.reloads, 1);
+  assert.equal(requests.length, 2, "this page sends nothing with the key");
+  config.answer({ mask_accounts: false });
+  assert.equal(await keyless, false);
+  assert.deepEqual(calls, []);
+  // The reloaded page sends the stored key; a wrong one asks again, with
+  // the reason, and does not reload.
+  const other = loadPageContext();
+  other.ctx.key = other.stored.k = "wrong";
+  const wrong = other.ctx.loadPage();
+  other.last()[0].answer({}, 401);
+  assert.equal(await wrong, false);
+  assert.equal(other.nodes["key-error"].textContent, "key_invalid");
+  assert.equal(other.nodes["key-error"].hidden, false);
+  assert.equal(other.nodes.app.hidden, true);
+  assert.equal(other.stored.k, undefined);
+  assert.equal(other.ctx.reloads, 0);
+});
+
+test("without localStorage the key entered loads on the page, which has taken nothing", async () => {
+  const { ctx, nodes, calls, last, enterKey } = loadPageContext();
+  ctx.localStorage = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); }, removeItem: () => { throw new Error("denied"); } };
+  ctx.holdOn = true;
+  const keyless = ctx.loadPage();
+  ctx.holdOn = false;
+  const [status, config] = last();
+  status.answer({}, 401);
+  await settle();
+  assert.equal(nodes["key-section"].hidden, false);
+  const load = enterKey("right");
+  assert.equal(ctx.reloads, 0);
   assert.equal(nodes["key-section"].hidden, true);
   assert.deepEqual(last().map((r) => r.key), ["Bearer right", "Bearer right"]);
+  // The old config arriving then changes nothing.
   config.answer({ mask_accounts: false });
   assert.equal(await keyless, false);
   assert.deepEqual(calls, []);
@@ -2650,34 +2734,58 @@ test("before the page has shown, a 401 asks for the key, and the key entered sta
   assert.equal(await load, true);
   assert.equal(nodes.app.hidden, false);
   assert.equal(ctx.masked, true);
-  // A wrong key asks again, with the reason.
-  const other = loadPageContext();
-  other.ctx.key = "old";
-  const wrong = other.ctx.loadPage();
-  other.last()[0].answer({}, 401);
-  assert.equal(await wrong, false);
-  assert.equal(other.nodes["key-error"].textContent, "key_invalid");
-  assert.equal(other.nodes["key-error"].hidden, false);
-  assert.equal(other.nodes.app.hidden, true);
 });
 
-test("once the page has shown, a 401 reloads the page and keeps the stored key, so it asks with the reason", async () => {
+test("once the page has taken the answers of a key, a 401 reloads it and keeps the stored key, so it asks with the reason", async () => {
+  // Before it shows: the chart state is still being restored when a
+  // request of the page, such as the language report, answers 401.
+  let restored;
+  const early = loadPageContext({ restoreChartState: () => new Promise((resolve) => { restored = resolve; }) });
+  early.ctx.key = early.stored.k = "old";
+  const loading = early.ctx.loadPage();
+  early.last()[0].answer({});
+  early.last()[1].answer({ mask_accounts: false });
+  await settle();
+  const report = early.ctx.api("POST", "api/language", {});
+  early.requests.at(-1).answer({ error: "unauthorized" }, 401);
+  await assert.rejects(report, /unauthorized/);
+  assert.equal(early.ctx.reloads, 1);
+  assert.equal(early.stored.k, "old");
+  assert.equal(early.nodes["key-section"].hidden, true, "the reloaded page asks for the key");
+  // The load is dropped: it does not show the page while it reloads.
+  restored();
+  assert.equal(await loading, false);
+  assert.equal(early.nodes.app.hidden, true);
+  assert.equal(early.calls.some((c) => c.startsWith("renderStatus")), false);
+
+  // After it has shown.
   const { ctx, nodes, requests, stored, last } = loadPageContext();
   ctx.key = stored.k = "old";
   const load = ctx.loadPage();
   last()[0].answer({});
   last()[1].answer({ mask_accounts: false });
   assert.equal(await load, true);
-  // The key is rotated elsewhere: a request of the page answers 401.
-  const report = ctx.api("POST", "api/language", {});
+  const again = ctx.api("POST", "api/language", {});
   requests.at(-1).answer({ error: "unauthorized" }, 401);
-  await assert.rejects(report, /unauthorized/);
+  await assert.rejects(again, /unauthorized/);
   assert.equal(ctx.reloads, 1);
   assert.equal(nodes.app.hidden, true);
-  assert.equal(nodes["key-section"].hidden, true, "the reloaded page asks for the key");
+  assert.equal(nodes["key-section"].hidden, true);
   assert.equal(stored.k, "old");
-  // After the reload the stored key answers 401 before the page shows,
-  // which asks with the reason (see the test above).
+  // After the reload the stored key answers 401 before any answers, which
+  // asks with the reason (see the tests above).
+});
+
+test("the old masking switch masks before the page shows", async () => {
+  const { ctx, calls, stored, last } = loadPageContext();
+  stored["lamplighter-mask-accounts"] = "1";
+  const load = ctx.loadPage();
+  last()[0].answer({});
+  last()[1].answer({});
+  assert.equal(await load, true);
+  await settle();
+  assert.deepEqual(calls.slice(0, 6), ["useStatus", "useConfig", "mask:true", 'write:{"mask_accounts":true}', "restoreChart:{}", "renderStatus:shown:true"]);
+  assert.equal(stored["lamplighter-mask-accounts"], undefined);
 });
 
 test("nothing that names an account is drawn while the content is not ready", () => {

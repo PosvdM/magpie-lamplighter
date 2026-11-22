@@ -688,22 +688,22 @@
     try { localStorage.setItem(KEY_STORE, secret); } catch (err) {}
   }
 
-  // Before the page has shown, the key form asks for the key and the load
-  // starts again with it (submitKey). Once it has shown, the page loads
-  // anew instead: the reload drops the requests of the old key still under
-  // way, with all they could change, such as the masking and the history.
-  // The stored key stays, so the reloaded page asks with the reason; a key
-  // that was not stored is asked for without it.
+  // A page that has taken anything from a key (pagePrepared) never takes
+  // another one: it loads anew, which drops the requests of the old key
+  // still under way with all they could change, such as the masking, the
+  // page state and the history. The stored key stays, so the reloaded page
+  // asks with the reason; a key that was not stored is asked for without
+  // it. A page that has taken nothing shows the key form. Either way the
+  // load under way is cancelled, so it does not show the page meanwhile.
   function askForKey(message) {
-    if (pageShown) {
-      hideContent();
+    cancelLoad();
+    hideContent();
+    if (pagePrepared) {
       location.reload();
       return;
     }
-    cancelLoad();
     key = "";
     try { localStorage.removeItem(KEY_STORE); } catch (err) {}
-    hideContent();
     setLoadState("");
     $("key-section").hidden = false;
     $("key-error").hidden = !message;
@@ -3827,12 +3827,36 @@
     }
   }
 
+  // An earlier version kept the page state in the browser's localStorage.
+  // Only the masking moves to the config, so that a browser that blurred
+  // the accounts does not show them after the upgrade; the other keys are
+  // dropped.
+  var OLD_MASK_STORE = "lamplighter-mask-accounts";
+  var OLD_STORES = ["lamplighter-events-5h", "lamplighter-chart-filters", "lamplighter-mcp-url"];
+
+  function forgetStores(names) {
+    names.forEach(function (name) {
+      try { localStorage.removeItem(name); } catch (err) {}
+    });
+  }
+
   // Applies mask_accounts and events_show_5h_resets of cfg, the first
-  // valid config.
+  // valid config. Without mask_accounts in cfg, the old masking switch of
+  // this browser, when on, masks and is saved to the config; its key goes
+  // once saved, and at once when cfg has mask_accounts.
   function restorePageState(cfg) {
     if (pageStateReady) return;
     pageStateReady = true;
-    setMasked(cfg.mask_accounts === true);
+    var oldMask = null;
+    try { oldMask = localStorage.getItem(OLD_MASK_STORE); } catch (err) {}
+    var migrate = cfg.mask_accounts == null && oldMask === "1";
+    forgetStores(migrate ? OLD_STORES : OLD_STORES.concat(OLD_MASK_STORE));
+    setMasked(migrate || cfg.mask_accounts === true);
+    if (migrate) {
+      writePageState("mask_accounts", { mask_accounts: true }, function (state) {
+        if (state === "saved") forgetStores([OLD_MASK_STORE]);
+      });
+    }
     showFiveHourResets = cfg.events_show_5h_resets === true;
   }
 
@@ -3910,7 +3934,8 @@
   // Restores the chart switches, chart_view and chart_expanded of cfg, the
   // first valid config, while the app is hidden (see preparePage). The
   // switches are set from cfg too, so they and the state come from one
-  // config. A saved window that no account reports is offered while its
+  // config. A saved window that no account reports, the default one
+  // included, is offered while its
   // history has samples in the range (windowKinds), which is not loaded
   // yet: its history is read first, for LOAD_TIMEOUT at most, and the
   // promise returned resolves once the window is chosen: the saved window
@@ -3932,7 +3957,7 @@
         if (RANGES[kind].some(function (r) { return r[0] === value; })) ranges[kind] = value;
       });
       if (windowKinds().indexOf(saved.window) >= 0) chartWindow = saved.window;
-      else if (saved.window !== chartWindow && Object.keys(RANGES).indexOf(saved.window) >= 0) unknown = saved.window;
+      else if (Object.keys(RANGES).indexOf(saved.window) >= 0) unknown = saved.window;
       if (saved.sort === "default" || saved.sort === "low") chartSort = saved.sort;
       chartView = { window: chartWindow, sort: chartSort, ranges: ranges };
       range = rangeFor(chartWindow);
@@ -5123,11 +5148,11 @@
   // The app shows once a valid config has set the masking and the chart
   // state is restored (contentReady); until then a card says the page is
   // loading or why it failed, with a button to try again. The card shows
-  // only after LOAD_CARD_DELAY, so a quick start does not flash it. The app
-  // shows once in the life of the page (pageShown): a request that asks for
-  // the admin key afterwards reloads the page (askForKey).
+  // only after LOAD_CARD_DELAY, so a quick start does not flash it. Once a
+  // load has its answers, the page takes them (pagePrepared), and a request
+  // that asks for the admin key afterwards reloads the page (askForKey).
   var contentReady = false;
-  var pageShown = false;
+  var pagePrepared = false;
   // The load under way: {cancel, promise}; see loadPage.
   var pageLoad = null;
   var loadState = { state: "", message: "" };
@@ -5142,7 +5167,6 @@
 
   function showContent() {
     contentReady = true;
-    pageShown = true;
     setLoadState("");
     $("app").hidden = false;
   }
@@ -5184,8 +5208,8 @@
   // while the app is still hidden (preparePage), then shows the page
   // (showPage). One load runs at a time: it holds pageLoad until it ends.
   // Each request gives up after LOAD_TIMEOUT, and the first failure cancels
-  // the other. A load that asks for the admin key is cancelled (cancelLoad)
-  // and ends without changing the page; the key entered starts a new one.
+  // the other. A load that asks for the admin key before it has its
+  // answers is cancelled (cancelLoad) and ends without changing the page.
   // Resolves to whether the page was shown.
   function loadPage() {
     if (pageLoad) return pageLoad.promise;
@@ -5228,6 +5252,7 @@
   // and before anything can be clicked. Resolves once the chart state is
   // restored.
   function preparePage(data, cfg) {
+    pagePrepared = true;
     useStatus(data);
     useConfig(cfg);
     restorePageState(cfg);
@@ -5248,14 +5273,20 @@
   }
 
   // Magpie's sandbox blocks form submission without a submit event, so the
-  // key is also taken on Enter and on a click of the button. Without
-  // localStorage the key lasts until the page reloads.
+  // key is also taken on Enter and on a click of the button. The key is
+  // stored and the page loads anew with it. Without localStorage the page
+  // loads with the key, which lasts until the page reloads: the key form
+  // shows only on a page that has taken nothing (see askForKey).
   function submitKey(e) {
     e.preventDefault();
     var entered = $("key-input").value.trim();
     if (!entered) return;
+    try {
+      localStorage.setItem(KEY_STORE, entered);
+      location.reload();
+      return;
+    } catch (err) {}
     key = entered;
-    try { localStorage.setItem(KEY_STORE, key); } catch (err) {}
     start();
   }
   $("key-form").addEventListener("submit", submitKey);
