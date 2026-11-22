@@ -682,9 +682,10 @@
     }).catch(timedOut).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
   }
 
-  // A key a request header can carry: visible ASCII. The browser refuses
-  // to send others, such as one pasted with Chinese text, without a 401.
-  function validKey(value) { return /^[\x21-\x7e]+$/.test(value); }
+  // A key a request header can carry: printable ASCII, spaces inside
+  // included (the ends are trimmed). The browser refuses to send others,
+  // such as one pasted with Chinese text, without a 401.
+  function validKey(value) { return /^[\x20-\x7e]+$/.test(value); }
 
   // After the page saves a new admin key, a page that sends a key sends the
   // new one.

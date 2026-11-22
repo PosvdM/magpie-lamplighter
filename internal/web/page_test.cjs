@@ -2798,7 +2798,7 @@ test("once the page has taken the answers of a key, a 401 reloads it and keeps t
 test("a key a header cannot carry is not taken, and a stored one is asked for again at once", async () => {
   const { ctx, nodes, requests, stored, enterKey } = loadPageContext();
   ctx.askForKey("");
-  for (const bad of ["密钥abc", "abc😀", "ab c", "abcé"]) {
+  for (const bad of ["密钥abc", "abc😀", "ab\tc", "abcé", "ab\x7fc"]) {
     assert.equal(enterKey(bad), null);
     assert.equal(stored.k, undefined, bad);
     assert.equal(ctx.reloads, 0);
@@ -2807,8 +2807,9 @@ test("a key a header cannot carry is not taken, and a stored one is asked for ag
     assert.equal(nodes["key-section"].hidden, false);
   }
   assert.equal(requests.length, 0);
-  enterKey("llad_A-z0~!");
-  assert.equal(stored.k, "llad_A-z0~!");
+  // Spaces inside a key, as in a hand-written admin_key, are kept.
+  enterKey("llad_A-z0~! b");
+  assert.equal(stored.k, "llad_A-z0~! b");
   assert.equal(ctx.reloads, 1);
   // A bad key stored earlier, such as by an older page: asked for with
   // the reason, without a request, a failure card or a retry.
@@ -2822,10 +2823,13 @@ test("a key a header cannot carry is not taken, and a stored one is asked for ag
   assert.equal(other.nodes["key-error"].textContent, "key_invalid");
   assert.equal(other.nodes["load-section"].hidden, true);
   // A good stored key starts the load with it.
-  const good = loadPageContext();
-  good.stored.k = "good";
-  good.ctx.begin();
-  assert.deepEqual(good.requests.map((r) => r.key), ["Bearer good", "Bearer good"]);
+  for (const stored of ["good", "my admin key"]) {
+    const good = loadPageContext();
+    good.stored.k = stored;
+    good.ctx.begin();
+    assert.deepEqual(good.requests.map((r) => r.key), ["Bearer " + stored, "Bearer " + stored]);
+    assert.equal(good.nodes["key-section"].hidden, true);
+  }
   assert.match(source, /\n  begin\(\);\n\}\)\(\);\s*$/);
 });
 
