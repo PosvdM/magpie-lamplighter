@@ -21,10 +21,6 @@
   var PAGE_TOKEN = pageToken(document);
 
   var key = "";
-  // The admin keys the page has used, counted: asking for a key and
-  // entering one start a new one (newAuthEpoch). api drops the answers to
-  // requests sent with an earlier one.
-  var authEpoch = 0;
   var status = null;
   var settingsFilled = false;
   var rawConfig = {};
@@ -640,13 +636,10 @@
   }
 
   // timeout, in milliseconds, aborts a request that takes longer; so does
-  // signal, an AbortSignal, when it aborts. The answer to a request sent
-  // before the admin key changed (authEpoch) fails as "unauthorized", like
-  // the answers of the old key, whatever it was: it changes nothing on the
-  // page and asks for no key.
+  // signal, an AbortSignal, when it aborts.
   function api(method, path, body, timeout, signal) {
     var opts = { method: method, headers: { "Accept": "application/json" } };
-    var sentKey = key, sentEpoch = authEpoch;
+    var sentKey = key;
     if (key) opts.headers.Authorization = "Bearer " + key;
     if (PAGE_TOKEN) opts.headers["X-Lamplighter-Page"] = PAGE_TOKEN;
     if (body !== undefined) {
@@ -661,10 +654,7 @@
       if (signal && signal.aborted) abort.abort();
       else if (signal) signal.addEventListener("abort", function () { abort.abort(); });
     }
-    var current = function () {
-      if (sentEpoch !== authEpoch) throw new Error("unauthorized");
-    };
-    var done = function () { clearTimeout(timer); current(); };
+    var done = function () { clearTimeout(timer); };
     var timedOut = function (err) {
       throw expired ? new Error(translate("request_timed_out")) : err;
     };
@@ -677,7 +667,6 @@
         return {};
       }).then(function (data) {
         if (!data || typeof data !== "object") data = res.ok ? null : {};
-        current();
         if (!data) throw new Error(translate("bad_response"));
         if (res.status === 401) {
           // A request sent before this page saved a new admin key does not
@@ -699,10 +688,19 @@
     try { localStorage.setItem(KEY_STORE, secret); } catch (err) {}
   }
 
-  // The app hides until a request with the new key reads a valid config
-  // again (see loadPage): it still shows what the old key could read.
+  // Before the page has shown, the key form asks for the key and the load
+  // starts again with it (submitKey). Once it has shown, the page loads
+  // anew instead: the reload drops the requests of the old key still under
+  // way, with all they could change, such as the masking and the history.
+  // The stored key stays, so the reloaded page asks with the reason; a key
+  // that was not stored is asked for without it.
   function askForKey(message) {
-    newAuthEpoch();
+    if (pageShown) {
+      hideContent();
+      location.reload();
+      return;
+    }
+    cancelLoad();
     key = "";
     try { localStorage.removeItem(KEY_STORE); } catch (err) {}
     hideContent();
@@ -1322,8 +1320,8 @@
       return patchConfig({ account_order: names }).then(function (token) {
         showApplied(say, token);
         if (pendingOrder && pendingOrder.join("\n") === names.join("\n")) pendingOrder = null;
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         if (pendingOrder && pendingOrder.join("\n") === names.join("\n")) pendingOrder = null;
         say("failed", err.message);
         if (err.message !== "unauthorized") toast(translate("order_failed", err.message));
@@ -2203,9 +2201,7 @@
     var latest = rawConfig.account_names;
     var names = latest && typeof latest === "object" ? JSON.parse(JSON.stringify(latest)) : {};
     if (name) names[account.auth_index] = name; else delete names[account.auth_index];
-    return patchConfig({ account_names: Object.keys(names).length ? names : null }).then(function () {
-      return loadConfig();
-    }).then(function () {
+    return patchConfig({ account_names: Object.keys(names).length ? names : null }).then(rereadConfig).then(function () {
       (status.accounts || []).forEach(function (a) { if (a.auth_index === account.auth_index) a.note = name; });
       return api("POST", API + "/refresh", { auth_index: account.auth_index }).then(function (data) {
         if (data.status) { status = data.status; renderStatus(); }
@@ -2245,7 +2241,7 @@
       if (answer === "") delete weights[account.name]; else weights[account.name] = value;
       return patchConfig({ account_weights: Object.keys(weights).length ? weights : null }).then(function (token) {
         showApplied(say, token);
-        return loadConfig();
+        return rereadConfig();
       });
     }).then(function () {
       input = binding.input;
@@ -3806,10 +3802,6 @@
     });
   }
 
-  function writingPageState(group) {
-    return !!(pageStateWrites[group] && pageStateWrites[group].running);
-  }
-
   // A write made without a switch shows only a failure: the first one in a
   // row in a toast and, for the chart, at the legend of its switch until
   // the state saves again. A switch shows its own result.
@@ -3916,14 +3908,14 @@
   }
 
   // Restores the chart switches, chart_view and chart_expanded of cfg, the
-  // first valid config, after the settings are filled and before the first
-  // chart is drawn. The switches are set from cfg too, so they and the
-  // state come from one config. A saved window that no account reports is
-  // offered while its history has samples in the range (windowKinds), which
-  // is not loaded yet: its history is read first, and the promise returned
-  // resolves once the window is chosen, so the first chart draws the saved
-  // window or, without samples, the one offered. Returns null when nothing
-  // is to be read.
+  // first valid config, while the app is hidden (see preparePage). The
+  // switches are set from cfg too, so they and the state come from one
+  // config. A saved window that no account reports is offered while its
+  // history has samples in the range (windowKinds), which is not loaded
+  // yet: its history is read first, for LOAD_TIMEOUT at most, and the
+  // promise returned resolves once the window is chosen: the saved window
+  // or, without samples, or when the history cannot be read, the one
+  // offered. Returns null when nothing is to be read.
   function restoreChartState(cfg) {
     if (chartRestored) return null;
     chartRestored = true;
@@ -3954,10 +3946,8 @@
       });
     }
     if (!unknown) return null;
-    var before = chartWindow;
-    return fetchHistory(unknown, rangeFor(unknown)).catch(function () {}).then(function () {
-      // A window picked meanwhile stays.
-      if (chartWindow !== before || windowKinds().indexOf(unknown) < 0) return;
+    return fetchHistory(unknown, rangeFor(unknown), false, LOAD_TIMEOUT).catch(function () {}).then(function () {
+      if (windowKinds().indexOf(unknown) < 0) return;
       chartWindow = chartView.window = unknown;
       range = rangeFor(unknown);
       renderWindowButtons();
@@ -3982,15 +3972,15 @@
   function historyKey(kind, name) { return kind + "|" + name; }
 
   // Requests a history, or joins the request for it that is under way unless
-  // fresh is set. The cache keeps the response of the latest request, and
-  // the promise resolves to it.
-  function fetchHistory(kind, name, fresh) {
+  // fresh is set; timeout is that of api. The cache keeps the response of
+  // the latest request, and the promise resolves to it.
+  function fetchHistory(kind, name, fresh, timeout) {
     var key = historyKey(kind, name);
     if (historyPending[key] && !fresh) return historyPending[key].promise;
     var seq = ++historySeq;
     var entry = { seq: seq };
     var done = function () { if (historyPending[key] === entry) delete historyPending[key]; };
-    entry.promise = api("GET", API + "/history?range=" + name + "&window=" + kind).then(function (data) {
+    entry.promise = api("GET", API + "/history?range=" + name + "&window=" + kind, undefined, timeout).then(function (data) {
       var cached = historyCache[key];
       if (!cached || cached.seq < seq) historyCache[key] = { seq: seq, data: data };
       done();
@@ -4693,8 +4683,8 @@
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
         showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -4927,30 +4917,32 @@
 
   // mcp_public_url as clients use it: https:// in front of an address
   // without a scheme. "" when value is empty, null when it is not an http or
-  // https address. The two expressions are those of config.MCPPublicURLValid,
-  // and the ends are trimmed of the white space strings.TrimSpace trims, so
+  // https address. PUBLIC_URL_FORM is the expression of
+  // config.MCPPublicURLValid, and the ends are trimmed of the white space strings.TrimSpace trims, so
   // the page and the plugin accept the same addresses; both are tested with
   // internal/config/testdata/public_urls.json.
   var PUBLIC_URL_TRIM = /^[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
-  var PUBLIC_URL_REFUSED = /[\u0000-\u0020\u007f-\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff?#\\]/;
-  var PUBLIC_URL_FORM = /^[Hh][Tt][Tt][Pp][Ss]?:\/\/(?:\[[0-9A-Fa-f:.]+\]|(?:[A-Za-z0-9._-]|[^\x00-\x7f])+)(?::([0-9]{1,5}))?(?:\/.*)?$/;
+  var PUBLIC_URL_FORM = /^[Hh][Tt][Tt][Pp][Ss]?:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::([0-9]{1,5}))?(\/[\x21\x22\x24-\x3e\x40-\x5b\x5d-\x7e]*)?$/;
   function publicUrl(value) {
     var text = String(value || "").replace(PUBLIC_URL_TRIM, "");
     if (!text) return "";
-    if (PUBLIC_URL_REFUSED.test(text)) return null;
     var full = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text) ? text : "https://" + text;
     var m = PUBLIC_URL_FORM.exec(full);
     return m && !(m[1] && Number(m[1]) > 65535) ? full : null;
   }
 
-  // The address clients use: the public address in the field (mcp_public_url,
-  // as typed, before it is saved) while it is valid, or http:// and the
-  // listen address. A listen address without a host or on all interfaces is
+  // The address clients use, without the path /mcp: the public address in
+  // the field (mcp_public_url, as typed, before it is saved) while it is
+  // valid, with /mcp and trailing slashes taken off its path, or http:// and
+  // the listen address. A listen address without a host or on all interfaces is
   // reached through the host of this page.
   function mcpBaseUrl() {
     var field = $("settings").elements["mcp_public_url"];
     var stored = publicUrl(field && field.value);
-    if (stored) return stored.replace(/\/+$/, "").replace(/\/mcp$/, "");
+    if (stored) {
+      var path = PUBLIC_URL_FORM.exec(stored)[2] || "";
+      return stored.slice(0, stored.length - path.length) + path.replace(/\/+$/, "").replace(/\/mcp$/, "");
+    }
     var input = $("settings").elements["public_listen"];
     var state = publicState(status);
     var listen = (input && input.value.trim()) || (state && state.listen) || MCP_LISTEN;
@@ -5042,8 +5034,8 @@
     saveQueue = saveQueue.then(function () {
       return patchConfig({ mcp_key: secret }).then(function (token) {
         showApplied(say, token, true);
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -5059,8 +5051,8 @@
       return patchConfig({ admin_key: secret }).then(function (token) {
         useKey(secret);
         showApplied(say, token, true);
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -5110,6 +5102,13 @@
     });
   }
 
+  // Reads the config again after a save. The save stands when this read
+  // fails: rawConfig already holds what was saved (see patchConfig), and
+  // the next read catches up.
+  function rereadConfig() {
+    return loadConfig().catch(function () {});
+  }
+
   // Opening the page also checks for a newer release, after the first status
   // so that this status does not replace the result. The plugin reads GitHub
   // at most once a minute; failures stay silent like the periodic check.
@@ -5121,14 +5120,15 @@
 
   // ---- Startup ----
 
-  // The app shows once a valid config for the current key has set the
-  // masking (contentReady); until then a card says the page is loading or
-  // why it failed, with a button to try again. The card shows only after
-  // LOAD_CARD_DELAY, so a quick start does not flash it. A request that
-  // asks for the admin key hides the app again (askForKey).
+  // The app shows once a valid config has set the masking and the chart
+  // state is restored (contentReady); until then a card says the page is
+  // loading or why it failed, with a button to try again. The card shows
+  // only after LOAD_CARD_DELAY, so a quick start does not flash it. The app
+  // shows once in the life of the page (pageShown): a request that asks for
+  // the admin key afterwards reloads the page (askForKey).
   var contentReady = false;
-  // The load of the status and the config under way: {epoch, cancel,
-  // promise}; see loadPage.
+  var pageShown = false;
+  // The load under way: {cancel, promise}; see loadPage.
   var pageLoad = null;
   var loadState = { state: "", message: "" };
   var loadCardTimer = null;
@@ -5142,6 +5142,7 @@
 
   function showContent() {
     contentReady = true;
+    pageShown = true;
     setLoadState("");
     $("app").hidden = false;
   }
@@ -5162,11 +5163,10 @@
 
   function keyAsked() { return !$("key-section").hidden; }
 
-  // A new admin key: the answers to the old one's requests are dropped
-  // (api), and its page load is cancelled.
-  function newAuthEpoch() {
-    authEpoch++;
+  // Cancels the load under way; it then ends without changing the page.
+  function cancelLoad() {
     if (pageLoad) pageLoad.cancel();
+    pageLoad = null;
   }
 
   function start() {
@@ -5180,18 +5180,18 @@
     }, 30000);
   }
 
-  // Reads the status and the config with the current admin key, then shows
-  // the page (showPage). One load per key runs at a time: it holds pageLoad
-  // until both requests have ended, each after LOAD_TIMEOUT at the latest,
-  // and the first failure cancels the other request. A new key cancels the
-  // load too (newAuthEpoch) and starts its own; the old load then ends
-  // without changing the page. The page takes the answers only when both
-  // succeed under the key they were sent with. Resolves to whether the page
-  // was shown; the history loads after that, outside the load.
+  // Reads the status and the config, restores the page state from them
+  // while the app is still hidden (preparePage), then shows the page
+  // (showPage). One load runs at a time: it holds pageLoad until it ends.
+  // Each request gives up after LOAD_TIMEOUT, and the first failure cancels
+  // the other. A load that asks for the admin key is cancelled (cancelLoad)
+  // and ends without changing the page; the key entered starts a new one.
+  // Resolves to whether the page was shown.
   function loadPage() {
-    if (pageLoad && pageLoad.epoch === authEpoch) return pageLoad.promise;
+    if (pageLoad) return pageLoad.promise;
     var abort = window.AbortController ? new AbortController() : null;
-    var round = { epoch: authEpoch, failure: null, answers: [] };
+    var round = { failure: null, answers: [] };
+    var current = function () { return pageLoad === round; };
     round.cancel = function () { if (abort) abort.abort(); };
     pageLoad = round;
     setLoadState("loading");
@@ -5205,41 +5205,44 @@
       });
     };
     round.promise = Promise.all([request(fetchStatus, 0), request(fetchConfig, 1)]).then(function () {
-      if (pageLoad === round) pageLoad = null;
-      if (round.epoch !== authEpoch) return false;
+      if (!current()) return false;
       if (round.failure) {
+        pageLoad = null;
         setLoadState("failed", round.failure.message);
         return false;
       }
-      showPage(round.answers[0], round.answers[1]);
-      return true;
+      return preparePage(round.answers[0], round.answers[1]).then(function () {
+        if (!current()) return false;
+        pageLoad = null;
+        showPage();
+        return true;
+      });
     });
     return round.promise;
   }
 
-  // Shows the page with the status and the config cfg of a load and the
-  // page state of cfg: the masking applies before any account name is
-  // drawn, and the chart state before the first chart. The page state is
-  // restored from the first valid config only; after the admin key is
-  // entered again, the masking follows the config read with it, unless a
-  // change of it is being saved.
-  function showPage(data, cfg) {
-    var first = !pageStateReady, epoch = authEpoch;
+  // Takes the status and the config cfg of a load and restores the page
+  // state of cfg, the first valid config, while the app is hidden: the
+  // masking applies before any account name shows, and the chart state,
+  // with the history of a saved window it may need, before the first chart
+  // and before anything can be clicked. Resolves once the chart state is
+  // restored.
+  function preparePage(data, cfg) {
     useStatus(data);
     useConfig(cfg);
-    if (first) restorePageState(cfg);
-    else if (!writingPageState("mask_accounts")) setMasked(cfg.mask_accounts === true);
+    restorePageState(cfg);
+    return Promise.resolve(restoreChartState(cfg));
+  }
+
+  // Shows the page, then loads the chosen chart.
+  function showPage() {
     checkUpdate();
     // Shown before drawing, since the chart measures its width; nothing
     // is painted before the drawing below.
     showContent();
     renderStatus();
     fillSettings();
-    var restored = first ? restoreChartState(cfg) : null;
-    if (!first && history) renderChart();
-    Promise.resolve(restored).then(function () {
-      return epoch === authEpoch && loadHistory();
-    }).then(function (loaded) {
+    loadHistory().then(function (loaded) {
       if (loaded) prefetchHistory();
     });
   }
@@ -5251,7 +5254,6 @@
     e.preventDefault();
     var entered = $("key-input").value.trim();
     if (!entered) return;
-    newAuthEpoch();
     key = entered;
     try { localStorage.setItem(KEY_STORE, key); } catch (err) {}
     start();

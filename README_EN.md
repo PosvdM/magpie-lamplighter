@@ -144,7 +144,7 @@ The public listener lets other devices reach Lamplighter in a browser or over MC
 
 With both the page and MCP off, nothing listens. The two keys do not stand in for each other: the admin key cannot reach `/mcp`, and the MCP key cannot reach the page and API. The two keys must differ: the page refuses to save equal keys, and when equal keys are written into `config.json` by hand, the public listener serves neither the page and API nor `/mcp`, and the top of the page shows why.
 
-The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. Page preferences such as blurring accounts and the chart choices are kept in the Lamplighter config and shared by every device; the last **Quota | Settings** view is kept per browser.
+The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. When the admin key is replaced elsewhere, an open page reloads and asks for it again. Page preferences such as blurring accounts and the chart choices are kept in the Lamplighter config and shared by every device; the last **Quota | Settings** view is kept per browser.
 
 Listening on the public internet directly is not recommended. Keep the public listener on loopback, let a reverse proxy on the same host terminate TLS, and add a firewall or allow-list as needed. The proxy must pass the `Authorization` and `MCP-Protocol-Version` headers; `/mcp` refuses browser requests whose `Origin` is not local, which ordinary MCP agents do not send.
 
@@ -292,7 +292,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
 | `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
 | `public_listen`, `web_enabled`, `admin_key`, `mcp_enabled`, `mcp_key` | | See [Public access](#public-access) |
-| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and it takes the form `host[:port][/path]`, without spaces, `?`, `#`, `\` or a user name. Empty uses the public listen address. See [MCP](#mcp) |
+| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and it takes the form `host[:port][/path]`. The host name contains only ASCII letters, digits, `.` and `-`; bracketed IPv6 addresses are not supported. The whole address contains only printable ASCII characters, without spaces, `?`, `#`, `\` or a user name. Empty uses the public listen address. See [MCP](#mcp) |
 | `config_token` | empty | A confirmation token the page generates when it saves settings; no need to set it. Saves of page state only (the keys written by the page above, the two remember settings and `mcp_public_url`) leave it as it is, and the plugin does not apply the config again |
 
 The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.

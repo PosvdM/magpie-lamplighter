@@ -460,24 +460,19 @@ func (c Config) Check() error {
 // page tells whether to put https:// in front.
 var hasScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
 
-// publicURLRefused matches the characters mcp_public_url must not contain:
-// white space as JavaScript's \s and Go's unicode.IsSpace know it, control
-// characters, ?, # and \. publicURLForm is the form of the address once it
-// has a scheme: http or https, a host name of letters, digits, ., _ and -
-// (any non-ASCII character
-// counts, for names such as 例え.jp) or a bracketed IP address, an optional port
-// and an optional path. Both are written out, not taken from a URL parser,
-// so that the page's publicUrl, which uses the same two expressions, accepts
-// exactly the same addresses; testdata/public_urls.json holds the cases
-// both are tested with.
-var (
-	publicURLRefused = regexp.MustCompile(`[\x00-\x20\x7f-\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}?#\\]`)
-	publicURLForm    = regexp.MustCompile(`^[Hh][Tt][Tt][Pp][Ss]?://(?:\[[0-9A-Fa-f:.]+\]|(?:[A-Za-z0-9._-]|[^\x00-\x7f])+)(?::([0-9]{1,5}))?(?:/.*)?$`)
-)
+// publicURLForm is the form of mcp_public_url once it has a scheme: http
+// or https, a host name of ASCII letters, digits and - in labels joined by
+// ., an optional port and an optional path of printable ASCII characters
+// (\x21-\x7e) other than # (\x23), ? (\x3f) and \ (\x5c). Bracketed IPv6
+// addresses are not accepted. The expression is written out, not taken
+// from a URL parser, so that the page's publicUrl, which uses the same
+// expression, accepts exactly the same addresses;
+// testdata/public_urls.json holds the cases both are tested with. The
+// first group is the port, the second the path.
+var publicURLForm = regexp.MustCompile(`^[Hh][Tt][Tt][Pp][Ss]?://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::([0-9]{1,5}))?(/[\x21\x22\x24-\x3e\x40-\x5b\x5d-\x7e]*)?$`)
 
 // MCPPublicURLValid reports whether mcp_public_url is empty or an http or
-// https address of the form of publicURLForm without the characters of
-// publicURLRefused. An address without a scheme counts as https, as the
+// https address of the form of publicURLForm. An address without a scheme counts as https, as the
 // page shows it. The page copies the address into shell commands, quoted;
 // the check keeps a value shared by every device a plain address. Parse
 // has already trimmed the value with strings.TrimSpace.
@@ -485,9 +480,6 @@ func (c Config) MCPPublicURLValid() bool {
 	value := c.MCPPublicURL
 	if value == "" {
 		return true
-	}
-	if publicURLRefused.MatchString(value) {
-		return false
 	}
 	if !hasScheme.MatchString(value) {
 		value = "https://" + value
