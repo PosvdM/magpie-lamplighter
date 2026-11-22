@@ -2477,13 +2477,12 @@
   // An account without a recent sample keeps its share as estimated, or the
   // total would jump to the mean of the others, such as to 100% for a pair
   // whose other account is full. Only accounts with no sample yet are left
-  // out.
+  // out. The total has points only at the samples of its accounts, so it
+  // covers only the times some account has data for; a reset within an
+  // account's gap shows at the next sample of another account.
   function pooled(rows, limit, key) {
     var times = [];
-    rows.forEach(function (r) {
-      r[key].forEach(function (p) { times.push(p[0]); });
-      gapResets(r[key], r.resets, limit).forEach(function (t) { times.push(t); });
-    });
+    rows.forEach(function (r) { r[key].forEach(function (p) { times.push(p[0]); }); });
     times.sort(function (a, b) { return a - b; });
     var out = [];
     times.forEach(function (t, i) {
@@ -2542,19 +2541,6 @@
     return { value: value, estimated: true };
   }
 
-  // The resets due within an account's gaps, and after its last sample up
-  // to now: the pooled total takes a point there, where gapValue returns to
-  // 100%.
-  function gapResets(points, resets, limit) {
-    var out = [], now = Date.now() / 1000;
-    points.forEach(function (p, i) {
-      var next = points[i + 1], end = next ? next[0] : now;
-      if (end - p[0] <= limit) return;
-      var reset = resetAsOf(resets, p[0]);
-      if (reset > p[0] + limit && reset < end) out.push(reset);
-    });
-    return out;
-  }
 
   // The lowest remaining so far in each cycle. Response headers report a
   // point more than active queries (51 against 50), which near a threshold
@@ -3262,10 +3248,12 @@
   // ends, now; for a 5-hour window whose rate does not yet hold the latest
   // value until now, at the latest sample, so the line does not level off
   // before a projection that still falls. Null without a reset ahead on the
-  // axis, without current data, with nothing left or without a rate.
+  // axis, without current data, with nothing left, without a rate, or for
+  // a total whose latest value is estimated.
   function projection(row, g, lastRun, limit) {
     var last = row.points[row.points.length - 1];
     if (g.to <= g.now || !lastRun || lastRun.end < g.now - limit || !(last[1] > 0)) return null;
+    if (last[5]) return null;
     var rate, t0 = lastRun.end;
     if (historyWindow === "7d") rate = cycleRate(row, g.now);
     else {
@@ -3668,6 +3656,7 @@
   function drawChart() {
     var overview = $("chart"), head = $("chart-detail-head"), detail = $("chart-detail");
     chartBehind = false;
+    $("legend-estimated").hidden = true;
     overview.classList.toggle("loading", historyLoading !== "" && historyLoading !== historyKey(historyWindow, historyRange));
     clear(overview); clear(head); clear(detail);
     clear($("chart-table"));

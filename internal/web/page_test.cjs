@@ -2099,7 +2099,7 @@ test("a redraw reads the font once and sets the canvas font only when it changes
 });
 
 function pooledContext() {
-  return context(["valueAt", "pooled", "resetAsOf", "gapValue", "gapResets", "estimatedRuns"], { RESET_JUMP: 5 });
+  return context(["valueAt", "pooled", "resetAsOf", "gapValue", "estimatedRuns"], { RESET_JUMP: 5 });
 }
 
 test("a pooled total estimates an account missing data rather than leaving it out", () => {
@@ -2124,6 +2124,17 @@ test("a pooled total estimates an account missing data rather than leaving it ou
   const both = ctx.pooled([{ weight: 1, resets: [], points: [[t0, 50, 0], [t0 + 2 * H, 40, 0]] },
     { weight: 1, resets: [], points: [[t0, 70, 0], [t0 + 2 * H, 60, 0]] }], limit, "points");
   assert.deepEqual(JSON.parse(JSON.stringify(both.map((p) => p[0]))), [t0, t0 + 2 * H]);
+
+  // A reset within the gap shows at the next sample of a fresh account;
+  // the total gets no point of its own there, so a stretch without any
+  // fresh account stays a gap.
+  const resetB = { weight: 1, resets: [[t0, t0 + H + 1800]], points: [[t0, 20, 0], [t0 + 3 * H, 100, 0]] };
+  const fresh = { weight: 1, resets: [], points: every(t0, t0 + 3 * H, 50) };
+  const total = ctx.pooled([resetB, fresh], limit, "points");
+  assert.deepEqual(JSON.parse(JSON.stringify(total.filter((p) => p[0] === t0 + H + 1800).map((p) => p[1]))), [75]);
+  assert.deepEqual(JSON.parse(JSON.stringify(total.filter((p) => p[0] === t0 + H + 1500).map((p) => p[1]))), [35]);
+  const lone = ctx.pooled([resetB, { weight: 1, resets: [], points: [[t0, 50, 0], [t0 + 3 * H, 50, 0]] }], limit, "points");
+  assert.deepEqual(JSON.parse(JSON.stringify(lone.map((p) => p[0]))), [t0, t0 + 3 * H]);
 });
 
 test("an estimate falls between the samples around a gap and returns to full at a reset", () => {
@@ -2150,10 +2161,6 @@ test("an estimate falls between the samples around a gap and returns to full at 
   // After the last sample: the last value until the reset, then 100%.
   assert.equal(ctx.gapValue([[t0, 30, 0]], [[t0, t0 + 2000]], t0 + 1500, limit).value, 30);
   assert.equal(ctx.gapValue([[t0, 30, 0]], [[t0, t0 + 2000]], t0 + 2500, limit).value, 100);
-  // The pooled total takes a point at the resets within a gap, the one
-  // after the last sample included.
-  assert.deepEqual(plain(ctx.gapResets(across, resets, limit)), [t0 + 2000, t0 + 20000]);
-  assert.deepEqual(plain(ctx.gapResets([[t0, 10, 0], [t0 + 600, 9, 0]], [[t0, t0 + 300]], limit)), []);
 });
 
 test("estimated stretches of a line are split off and share their ends", () => {

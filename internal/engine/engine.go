@@ -145,6 +145,9 @@ type Engine struct {
 	// renewedAt is when a scheduled round last had Magpie refresh the
 	// quota of an account whose token had expired (renewDue).
 	renewedAt map[string]time.Time
+	// roundRenewed is set once a scheduled round has had Magpie refresh
+	// one account (renewDue).
+	roundRenewed bool
 	// refused holds when the provider refused a model for a quota group,
 	// keyed by group key and model.
 	refused map[string]time.Time

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -81,15 +82,20 @@ func TestExpiredTokenFallsBackToTheKeptQuota(t *testing.T) {
 	}
 }
 
-// expiredHost reports the credential of pin as expired.
+// expiredHost reports the credential of pin, and of the pins in also, as
+// expired: an OAuth sign-in that a quota refresh renews, or with setup a
+// token that it does not.
 type expiredHost struct {
 	*fakeHost
-	pin string
+	pin   string
+	also  []string
+	setup bool
 }
 
 func (h *expiredHost) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
 	cred, err := h.fakeHost.Credential(ctx, account)
-	cred.Expired = account.Pin == h.pin
+	cred.Expired = account.Pin == h.pin || slices.Contains(h.also, account.Pin)
+	cred.RenewedByRefresh = cred.Expired && !h.setup
 	return cred, err
 }
 
@@ -206,6 +212,31 @@ func TestScheduledRoundsRenewAnExpiredCredentialAtMostOncePerGap(t *testing.T) {
 	}
 	if len(renew.refreshed) != 2 {
 		t.Fatalf("refreshed %v outside a scheduled round", renew.refreshed)
+	}
+	// A token the refresh does not renew, such as a Claude setup-token,
+	// only reads the kept quota.
+	renew.setup = true
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 2 {
+		t.Fatalf("refreshed %v for a setup-token", renew.refreshed)
+	}
+}
+
+func TestScheduledRoundsRenewOneAccountPerRound(t *testing.T) {
+	e, h, renew, c := newRenewEngine(t)
+	ctx := context.Background()
+	renew.also = []string{"1"}
+	h.kept = []host.KeptQuota{keptClaude("3", c.t, 60)}
+	renew.refresh = func(context.Context, string) error { return nil }
+	c.add(time.Minute)
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 1 {
+		t.Fatalf("refreshed %v in one round, want one account", renew.refreshed)
+	}
+	c.add(5 * time.Minute)
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 2 || renew.refreshed[0] == renew.refreshed[1] {
+		t.Fatalf("refreshed %v, want each account once over two rounds", renew.refreshed)
 	}
 }
 
