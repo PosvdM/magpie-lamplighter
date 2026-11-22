@@ -290,7 +290,7 @@ Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重�
 | `account_weights` | 空 | 多账号合计中各账号的权重，键同上，值为大于 0 的数字；未设置的账号使用套餐的默认权重 |
 | `account_order` | 空 | 账号顺序，按账号标识排列；未列出的账号按默认顺序排在后面 |
 | `public_listen`、`web_enabled`、`admin_key`、`mcp_enabled`、`mcp_key` | | 见[对外访问](#对外访问) |
-| `mcp_public_url` | 空 | MCP 的对外地址，例如反向代理的 HTTPS 地址，页面的客户端配置用它；只接受 http 或 https 地址，没写协议时按 `https://` 处理，不能含空格、`?` 或 `#`；为空时用对外监听地址，见 [MCP](#mcp) |
+| `mcp_public_url` | 空 | MCP 的对外地址，例如反向代理的 HTTPS 地址，页面的客户端配置用它；只接受 http 或 https 地址，没写协议时按 `https://` 处理，形式为 `主机[:端口][/路径]`，不能含空格、`?`、`#`、`\` 或用户名；为空时用对外监听地址，见 [MCP](#mcp) |
 | `config_token` | 空 | 页面保存设置时生成的确认令牌，不需要手动设置；只保存页面状态（上面页面自动写入的各项、两个“记住”开关和 `mcp_public_url`）时不更新，插件也不重新应用配置 |
 
 提醒阈值按 `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0` 规整，后两档不能高于前一档。

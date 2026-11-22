@@ -110,26 +110,18 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 		}
 		next[key] = value
 	}
+	// The state a remember switch keeps is not kept while the switch is
+	// off: a page opened before the switch was turned off elsewhere may
+	// still write it. It is dropped before parsing, so that a state the
+	// switch would not keep cannot fail the patch either.
+	for state, on := range rememberSwitches {
+		if next[state] != nil && !switchOn(next[on]) {
+			delete(next, state)
+		}
+	}
 	cfg, err := parseKeys(next)
 	if err != nil {
 		return Config{}, err
-	}
-	// The state a remember switch keeps is not kept while the switch is
-	// off: a page opened before the switch was turned off elsewhere may
-	// still write it.
-	dropped := false
-	if !cfg.RememberChartFilters && next["chart_view"] != nil {
-		delete(next, "chart_view")
-		dropped = true
-	}
-	if !cfg.RememberChartExpanded && next["chart_expanded"] != nil {
-		delete(next, "chart_expanded")
-		dropped = true
-	}
-	if dropped {
-		if cfg, err = parseKeys(next); err != nil {
-			return Config{}, err
-		}
 	}
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
@@ -143,6 +135,20 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	}
 	s.raw = next
 	return cfg, nil
+}
+
+// rememberSwitches maps the page state kept by a remember switch to the
+// switch.
+var rememberSwitches = map[string]string{
+	"chart_view":     "remember_chart_filters",
+	"chart_expanded": "remember_chart_expanded",
+}
+
+// switchOn reports whether the raw value of a switch is true. A value that
+// is not a boolean counts as off; parsing the config then refuses it.
+func switchOn(raw json.RawMessage) bool {
+	var on bool
+	return raw != nil && json.Unmarshal(raw, &on) == nil && on
 }
 
 func parseKeys(keys map[string]json.RawMessage) (Config, error) {

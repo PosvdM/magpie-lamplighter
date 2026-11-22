@@ -292,7 +292,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
 | `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
 | `public_listen`, `web_enabled`, `admin_key`, `mcp_enabled`, `mcp_key` | | See [Public access](#public-access) |
-| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and spaces, `?` and `#` are refused. Empty uses the public listen address. See [MCP](#mcp) |
+| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and it takes the form `host[:port][/path]`, without spaces, `?`, `#`, `\` or a user name. Empty uses the public listen address. See [MCP](#mcp) |
 | `config_token` | empty | A confirmation token the page generates when it saves settings; no need to set it. Saves of page state only (the keys written by the page above, the two remember settings and `mcp_public_url`) leave it as it is, and the plugin does not apply the config again |
 
 The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.

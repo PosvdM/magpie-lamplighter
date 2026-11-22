@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 func TestParseEmptyUsesDefaults(t *testing.T) {
@@ -121,6 +123,16 @@ func TestStoreDropsTheStateOfASwitchThatIsOff(t *testing.T) {
 	if raw := store.Raw(); raw["chart_view"] != nil || raw["chart_expanded"] != nil {
 		t.Fatalf("raw %s", raw)
 	}
+	// A state the switch would not keep is dropped before it is parsed, so
+	// a value of the wrong type does not fail the patch; with the switch on
+	// it does.
+	bad := json.RawMessage(`{"claude|Claude": true}`)
+	if cfg, err := store.Patch(map[string]json.RawMessage{"chart_expanded": bad, "chart_view": json.RawMessage(`"7d"`)}); err != nil || cfg.ChartExpanded != nil {
+		t.Fatalf("wrong type with the switch off: %+v %v", cfg, err)
+	}
+	if _, err := store.Patch(map[string]json.RawMessage{"remember_chart_expanded": json.RawMessage(`true`), "chart_expanded": bad}); err == nil {
+		t.Fatal("wrong type with the switch on saved")
+	}
 	cfg, err = store.Patch(map[string]json.RawMessage{"remember_chart_filters": json.RawMessage(`true`), "chart_view": view,
 		"remember_chart_expanded": json.RawMessage(`true`), "chart_expanded": json.RawMessage(`["claude|Claude"]`)})
 	if err != nil || cfg.ChartView == nil || len(cfg.ChartExpanded) != 1 {
@@ -134,28 +146,31 @@ func TestStoreDropsTheStateOfASwitchThatIsOff(t *testing.T) {
 	}
 }
 
+// The page's publicUrl is tested with the same cases, so both accept the
+// same addresses.
 func TestMCPPublicURLValid(t *testing.T) {
-	for value, want := range map[string]bool{
-		"":                                true,
-		"https://mcp.example.com":         true,
-		"http://10.0.0.2:8318":            true,
-		"mcp.example.com/lamplighter/mcp": true,
-		"HTTPS://MCP.example.com/":        true,
-		"ftp://mcp.example.com":           false,
-		"javascript:alert(1)":             false,
-		"javascript://x.com":              false,
-		"https://":                        false,
-		"https://x.com/a b":               false,
-		"https://x.com/\nrm -rf ~":        false,
-		"https://x.com/a\u00a0b":          false,
-		"https://x.com/'$(id)'":           true,
-		"https://x.com/?a=1":              false,
-		"https://x.com/#a":                false,
-		"https://x.com:port":              false,
-	} {
-		cfg := Config{MCPPublicURL: value}
-		if got := cfg.MCPPublicURLValid(); got != want {
-			t.Errorf("%q: valid %v, want %v", value, got, want)
+	data, err := os.ReadFile(filepath.Join("testdata", "public_urls.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases [][2]*string
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		// Escaped, since YAML, which Parse also reads, refuses some
+		// control characters in its input.
+		value := `"`
+		for _, u := range utf16.Encode([]rune(*c[0])) {
+			value += fmt.Sprintf(`\u%04x`, u)
+		}
+		value += `"`
+		cfg, err := Parse([]byte(`{"mcp_public_url": ` + value + `}`))
+		if err != nil {
+			t.Fatalf("%q: %v", *c[0], err)
+		}
+		if got, want := cfg.Check() == nil, c[1] != nil; got != want {
+			t.Errorf("%q: valid %v, want %v", *c[0], got, want)
 		}
 	}
 	store, _, err := Open(filepath.Join(t.TempDir(), FileName))
