@@ -139,8 +139,7 @@ func (a *Alerts) windowLine(w quota.Window, now time.Time) string {
 	if w.Reset.IsZero() {
 		return T(a.Lang, "window_line", label, value)
 	}
-	local := w.Reset.In(a.Cfg.Location())
-	return T(a.Lang, "window_line_reset", label, value, CompactDuration(w.Reset.Sub(now), a.Lang), local.Format("01/02 15:04"))
+	return T(a.Lang, "window_line_reset", label, value, CompactDuration(w.Reset.Sub(now), a.Lang), FormatTime(w.Reset, a.Cfg.Location(), a.Lang))
 }
 
 func (a *Alerts) body(g Group, now time.Time) string {
@@ -577,7 +576,7 @@ func CircuitMessage(lang, label string, until time.Time, summary string, loc *ti
 	return Message{
 		Kind:  KindCircuit,
 		Title: T(lang, "circuit_title", label),
-		Body:  T(lang, "circuit_body", until.In(loc).Format("01/02 15:04"), truncate(redact.Text(summary), 220)),
+		Body:  T(lang, "circuit_body", FormatTime(until, loc, lang), truncate(redact.Text(summary), 220)),
 		Level: LevelTimeSensitive,
 		Label: label,
 	}
@@ -622,7 +621,7 @@ func CredentialMessage(lang, label string, p Problem, loc *time.Location) Messag
 		}
 	case KindRateLimited:
 		title = T(lang, "rate_limited_title", label)
-		lines = append(lines, joinNonEmpty(" · ", head, summary), T(lang, "rate_limited_until", p.Until.In(loc).Format("01/02 15:04")))
+		lines = append(lines, joinNonEmpty(" · ", head, summary), T(lang, "rate_limited_until", FormatTime(p.Until, loc, lang)))
 	default:
 		title = T(lang, "credential_title", label)
 		lines = append(lines, joinNonEmpty(" · ", head, summary), T(lang, "line_source", source), T(lang, "credential_fix"))

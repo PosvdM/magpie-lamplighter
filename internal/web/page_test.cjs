@@ -2171,3 +2171,239 @@ test("estimated stretches of a line are split off and share their ends", () => {
     [[true, [1, 2, 3, 4]], [false, [4, 5]]]);
   assert.deepEqual(plain(ctx.estimatedRuns([[1, 50, 0]]).map((r) => [r.estimated, r.pts.length])), [[false, 1]]);
 });
+
+// ---- Page state kept in the config ----
+
+const STATE_RANGES = {
+  "5h": [["1h"], ["3h"], ["6h"], ["12h"], ["24h"], ["26h"]],
+  "7d": [["24h"], ["4d"], ["8d"], ["15d"], ["1mo"], ["36d"]],
+};
+const stateFunctions = ["writePageState", "sendPageState", "changePageState", "restorePageState",
+  "rememberChart", "rememberExpanded", "saveChartFilters", "expandedGroups", "saveChartExpanded", "rangeFor", "restoreChartState"];
+
+// The page state functions with a settings form of two switches and a
+// config endpoint that records each PATCH and answers when told to.
+function pageStateContext(config = {}, switches = {}) {
+  const writes = [], toasts = [], pressed = {}, pending = [];
+  const form = {
+    remember_chart_filters: { checked: !!switches.filters },
+    remember_chart_expanded: { checked: !!switches.expanded },
+  };
+  const ctx = context(stateFunctions, {
+    RANGES: STATE_RANGES, DEFAULT_RANGE: { "5h": "6h", "7d": "8d" },
+    rawConfig: config, chartWindow: "5h", range: "6h", chartSort: "default", chartExpanded: {}, chartView: null,
+    pageStateReady: false, chartRestored: false, pageStateTouched: {}, pageStateWrites: {}, pageStateFailed: {},
+    masked: false, showFiveHourResets: false,
+    $: (id) => { assert.equal(id, "settings"); return { elements: form }; },
+    windowKinds: () => ["5h", "7d"],
+    pressSegment: (id, value) => { pressed[id] = value; },
+    renderRangeButtons: () => { pressed.ranges = ctx.range; },
+    setMasked: (on) => { ctx.masked = on; },
+    pageStateSaved: (key, err) => { if (err) toasts.push(key + ":" + err.message); },
+    patchConfig: (patch) => {
+      writes.push(plain(patch));
+      if (!ctx.hold) return Promise.resolve("token");
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    },
+  });
+  return { ctx, form, writes, toasts, pressed, pending };
+}
+
+test("the chart switch saves the current choice in chart_view, which the next page restores", async () => {
+  const { ctx, form, writes } = pageStateContext({}, {});
+  ctx.restoreChartState();
+  // Off: changes are not saved.
+  ctx.chartWindow = "7d"; ctx.range = "15d"; ctx.saveChartFilters();
+  assert.equal(writes.length, 0);
+  // On: the current choice is saved at once, then every change.
+  form.remember_chart_filters.checked = true;
+  ctx.saveChartFilters();
+  ctx.chartSort = "low"; ctx.saveChartFilters();
+  ctx.chartWindow = "5h"; ctx.range = "12h"; ctx.saveChartFilters();
+  await new Promise(setImmediate);
+  assert.deepEqual(writes.at(-1), { chart_view: { window: "5h", sort: "low", ranges: { "7d": "15d", "5h": "12h" } } });
+  // Each window keeps its own range.
+  assert.equal(ctx.rangeFor("7d"), "15d");
+
+  const next = pageStateContext({ remember_chart_filters: true, chart_view: writes.at(-1).chart_view }, { filters: true });
+  next.ctx.restoreChartState();
+  assert.equal(next.ctx.chartWindow, "5h");
+  assert.equal(next.ctx.chartSort, "low");
+  assert.equal(next.ctx.range, "12h");
+  assert.equal(next.ctx.rangeFor("7d"), "15d");
+  assert.deepEqual(next.pressed, { "window-buttons": "5h", "sort-buttons": "low", ranges: "12h" });
+  assert.equal(next.writes.length, 0, "restoring writes nothing");
+});
+
+test("a saved chart choice that is not offered falls back to the defaults", () => {
+  const { ctx } = pageStateContext({ chart_view: { window: "30d", sort: "random", ranges: { "5h": "8d", "7d": 3 } } }, { filters: true });
+  ctx.restoreChartState();
+  assert.equal(ctx.chartWindow, "5h");
+  assert.equal(ctx.chartSort, "default");
+  assert.equal(ctx.range, "6h");
+  assert.equal(ctx.rangeFor("7d"), "8d");
+  // With the switch off the saved choice is ignored.
+  const off = pageStateContext({ chart_view: { window: "7d", sort: "low", ranges: { "7d": "15d" } } }, {});
+  off.ctx.restoreChartState();
+  assert.equal(off.ctx.chartWindow, "5h");
+  assert.equal(off.ctx.rangeFor("7d"), "8d");
+});
+
+test("a choice made before the config arrives wins over the saved one and is saved", async () => {
+  const { ctx, writes, pressed } = pageStateContext({ chart_view: { window: "5h", sort: "low", ranges: { "5h": "24h", "7d": "1mo" } }, chart_expanded: ["Codex"] }, { filters: true, expanded: true });
+  ctx.chartWindow = "7d"; ctx.range = "8d"; ctx.saveChartFilters();
+  ctx.chartExpanded["group:Claude"] = true; ctx.saveChartExpanded();
+  assert.equal(writes.length, 0);
+  ctx.restoreChartState();
+  await new Promise(setImmediate);
+  assert.equal(ctx.chartWindow, "7d");
+  assert.equal(ctx.range, "8d");
+  assert.deepEqual(pressed, {}, "the chart does not move");
+  assert.deepEqual(writes, [
+    { chart_view: { window: "7d", sort: "default", ranges: { "5h": "24h", "7d": "8d" } } },
+    { chart_expanded: ["Claude"] },
+  ]);
+  assert.deepEqual(plain(ctx.chartExpanded), { "group:Claude": true });
+});
+
+test("expanded groups are saved by name, an empty list deletes the key, and unknown names are kept quietly", async () => {
+  const { ctx, form, writes } = pageStateContext({ chart_expanded: ["Claude", "Gone", 7] }, { expanded: true });
+  ctx.restoreChartState();
+  assert.deepEqual(plain(ctx.chartExpanded), { "group:Claude": true, "group:Gone": true });
+  ctx.chartExpanded["group:Codex"] = true; ctx.saveChartExpanded();
+  await new Promise(setImmediate);
+  assert.deepEqual(writes.at(-1), { chart_expanded: ["Claude", "Gone", "Codex"] });
+  ["group:Claude", "group:Gone", "group:Codex"].forEach((id) => { ctx.chartExpanded[id] = false; });
+  ctx.saveChartExpanded();
+  await new Promise(setImmediate);
+  assert.deepEqual(writes.at(-1), { chart_expanded: null });
+  // Off: nothing is restored or saved.
+  form.remember_chart_expanded.checked = false;
+  ctx.chartExpanded["group:Claude"] = true; ctx.saveChartExpanded();
+  await new Promise(setImmediate);
+  assert.equal(writes.length, 2);
+  const off = pageStateContext({ chart_expanded: ["Claude"] }, {});
+  off.ctx.restoreChartState();
+  assert.deepEqual(plain(off.ctx.chartExpanded), {});
+});
+
+test("quick changes save one key at a time and the last value is saved last", async () => {
+  const { ctx, form, writes, pending } = pageStateContext({}, { filters: true });
+  ctx.restoreChartState();
+  ctx.hold = true;
+  for (const r of ["1h", "3h", "12h", "24h"]) { ctx.range = r; ctx.saveChartFilters(); }
+  assert.equal(writes.length, 1, "one write is under way");
+  pending.shift().resolve("token");
+  await new Promise(setImmediate);
+  assert.equal(writes.length, 2, "the waiting values collapse into the last one");
+  assert.equal(writes[1].chart_view.ranges["5h"], "24h");
+  // Turning the switch off while a write is under way deletes the key last.
+  form.remember_chart_filters.checked = false;
+  ctx.chartView = null;
+  ctx.writePageState("chart_view", null);
+  pending.shift().reject(new Error("offline"));
+  await new Promise(setImmediate);
+  assert.deepEqual(writes.at(-1), { chart_view: null });
+  pending.shift().resolve("token");
+  await new Promise(setImmediate);
+  assert.equal(writes.length, 3);
+  assert.equal(ctx.pageStateWrites.chart_view.running, null);
+});
+
+test("masking and the 5-hour resets come from the first config, or from the user before it", async () => {
+  const { ctx, writes } = pageStateContext({ mask_accounts: true, events_show_5h_resets: true });
+  ctx.restorePageState();
+  assert.equal(ctx.masked, true);
+  assert.equal(ctx.showFiveHourResets, true);
+  assert.equal(writes.length, 0);
+  ctx.changePageState("mask_accounts", null);
+  await new Promise(setImmediate);
+  assert.deepEqual(writes, [{ mask_accounts: null }]);
+  // A later config does not change them back.
+  ctx.rawConfig = { mask_accounts: false };
+  ctx.restorePageState();
+  assert.equal(ctx.showFiveHourResets, true);
+
+  const early = pageStateContext({ mask_accounts: false, events_show_5h_resets: true });
+  early.ctx.masked = true; early.ctx.changePageState("mask_accounts", true);
+  early.ctx.showFiveHourResets = false; early.ctx.changePageState("events_show_5h_resets", null);
+  assert.equal(early.writes.length, 0);
+  early.ctx.restorePageState();
+  await new Promise(setImmediate);
+  assert.equal(early.ctx.masked, true);
+  assert.equal(early.ctx.showFiveHourResets, false);
+  assert.deepEqual(early.writes, [{ mask_accounts: true }, { events_show_5h_resets: null }]);
+});
+
+test("nothing that names an account is drawn before the first config, so masking never comes late", () => {
+  for (const name of ["renderStatus", "renderChart"]) {
+    const body = source.match(new RegExp("  function " + name + "\\(\\) \\{\\n([^]*?)\\n  }"))[1];
+    assert.match(body.split("\n").filter((l) => !/^\s*\/\//.test(l))[0], /^\s*if \(!pageStateReady\) return;$/, name);
+  }
+  // Status that arrives first is kept but not drawn.
+  let drawn = 0;
+  const ctx = context(["renderStatus"], { pageStateReady: false, sortAccounts: () => { drawn++; } });
+  ctx.renderStatus();
+  assert.equal(drawn, 0);
+  // The page draws the status only after restoring the masking, and keeps
+  // asking for the config while it has none (such as before the admin key).
+  const load = source.match(/  function loadPage\(\) \{[^]*?\n  }/)[0];
+  assert.ok(load.indexOf("restorePageState()") < load.indexOf("renderStatus()"));
+  assert.ok(load.indexOf("restoreChartState()") < load.indexOf("loadHistory()"));
+  assert.match(source, /if \(!pageStateReady\) loadPage\(\)/);
+  assert.match(source, /if \(status && pageStateReady\) renderEvents\(\);/);
+  assert.doesNotMatch(source, /MASK_STORE|EVENTS_STORE|MCP_URL_STORE|CHART_STORE|lamplighter-chart-filters/);
+});
+
+test("a failed page state shows once in a toast and stays at the chart switch until it saves", () => {
+  const toasts = [];
+  const heading = saveNode("LEGEND");
+  const input = saveNode("INPUT", { name: "remember_chart_filters" });
+  const ctx = stateContext(["pageStateSaved"], {
+    PAGE_STATE_SWITCH: { chart_view: "remember_chart_filters" }, pageStateFailed: {},
+    $: () => ({ elements: { remember_chart_filters: input } }),
+    toast: (text) => toasts.push(text),
+  });
+  ctx.saveHost = () => heading;
+  ctx.translate = ((base) => (key, ...args) => key === "state_save_failed" ? "not saved: " + args[0] : base(key, ...args))(ctx.translate);
+  // The switch's own save succeeded; the state then fails twice.
+  ctx.setSaveState(heading, "saved", "applied", input);
+  ctx.pageStateSaved("chart_view", new Error("offline"));
+  ctx.pageStateSaved("chart_view", new Error("offline"));
+  assert.deepEqual(toasts, ["not saved: offline"]);
+  assert.match(heading.textContent, /remember_chart_filters save failed: offline/);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  // A later save of the switch keeps the failure; a saved state clears it.
+  ctx.setSaveState(heading, "saved", "applied", input);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  ctx.pageStateSaved("chart_view", null);
+  assert.equal(input.getAttribute("aria-invalid"), null);
+  assert.equal(heading.textContent, "applied");
+  // Masking and the resets have no switch: a toast only.
+  ctx.pageStateSaved("mask_accounts", new Error("offline"));
+  assert.equal(toasts.length, 2);
+  ctx.pageStateSaved("mask_accounts", new Error("unauthorized"));
+  assert.equal(toasts.length, 2);
+});
+
+test("the public MCP address is a setting: an empty field deletes it and the configs follow the field", () => {
+  const ctx = context(["topKey", "setPath", "buildPatch", "mcpKey"], {
+    rawConfig: { mcp_public_url: "https://old.example.com" }, status: { config: {} },
+    $: () => ({ elements: [{ name: "mcp_public_url", value: "  ", getAttribute: () => null, type: "text" }] }),
+  });
+  assert.deepEqual(plain(ctx.buildPatch("mcp_public_url")), { mcp_public_url: null });
+  const field = { name: "mcp_public_url", value: "mcp.example.com/mcp/", getAttribute: () => null, type: "text" };
+  const url = context(["mcpBaseUrl"], {
+    $: () => ({ elements: { mcp_public_url: field, public_listen: { value: "0.0.0.0:8318" } } }),
+    status: null, publicState: () => null, MCP_LISTEN: "127.0.0.1:8318", location: { hostname: "nas" },
+  });
+  assert.equal(url.mcpBaseUrl(), "https://mcp.example.com");
+  field.value = "";
+  assert.equal(url.mcpBaseUrl(), "http://nas:8318");
+  const html = fs.readFileSync(path.join(__dirname, "page.html"), "utf8");
+  assert.match(html, /<input id="mcp-public-url" name="mcp_public_url"/);
+  const effective = context(["effectiveConfig"], { status: { config: {} }, rawConfig: { mcp_public_url: "https://mcp.example.com" }, MCP_LISTEN: "x" });
+  assert.equal(effective.effectiveConfig().mcp_public_url, "https://mcp.example.com");
+  // Its save does not wait for the public listener.
+  assert.match(source, /showApplied\(say, token, \/\^\(mcp_enabled\|mcp_key\|public_listen\|web_enabled\|admin_key\)\$\/\.test\(top\)\)/);
+});

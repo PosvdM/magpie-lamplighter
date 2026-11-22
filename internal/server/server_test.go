@@ -78,6 +78,30 @@ func TestConfigPatchIsSavedAndApplied(t *testing.T) {
 	}
 }
 
+func TestPageStateRoundTrip(t *testing.T) {
+	s, _ := newServer(t)
+	h := s.Handler()
+	body := `{"config_token":"t1","chart_view":{"window":"7d","sort":"low","ranges":{"7d":"15d"}},"chart_expanded":["Claude"],` +
+		`"mcp_public_url":"https://mcp.example.com","mask_accounts":true,"events_show_5h_resets":true}`
+	if code, _ := do(t, h, http.MethodPatch, "/api/config", body); code != http.StatusOK {
+		t.Fatalf("patch: %d", code)
+	}
+	_, raw := do(t, h, http.MethodGet, "/api/config", "")
+	view, _ := raw["chart_view"].(map[string]any)
+	if view == nil || view["window"] != "7d" || fmt.Sprint(raw["chart_expanded"]) != "[Claude]" ||
+		raw["mcp_public_url"] != "https://mcp.example.com" || raw["mask_accounts"] != true || raw["events_show_5h_resets"] != true {
+		t.Fatalf("config %v", raw)
+	}
+	body = `{"config_token":"t2","chart_view":null,"chart_expanded":null,"mcp_public_url":null,"mask_accounts":null,"events_show_5h_resets":null}`
+	if code, _ := do(t, h, http.MethodPatch, "/api/config", body); code != http.StatusOK {
+		t.Fatalf("delete: %d", code)
+	}
+	_, raw = do(t, h, http.MethodGet, "/api/config", "")
+	if len(raw) != 1 || raw["config_token"] != "t2" {
+		t.Fatalf("deleted keys remain: %v", raw)
+	}
+}
+
 func TestPageAndUnknownRoutes(t *testing.T) {
 	s, _ := newServer(t)
 	h := s.Handler()

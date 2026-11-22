@@ -104,6 +104,15 @@ type Webhook struct {
 	SuccessJSON map[string]any `yaml:"success_json,omitempty" json:"success_json,omitempty"`
 }
 
+// ChartView is the chart choice the page keeps when remember_chart_filters
+// is on: the window ("5h" or "7d"), the order ("default" or "low") and the
+// range of each window, keyed by window.
+type ChartView struct {
+	Window string            `yaml:"window,omitempty" json:"window,omitempty"`
+	Sort   string            `yaml:"sort,omitempty" json:"sort,omitempty"`
+	Ranges map[string]string `yaml:"ranges,omitempty" json:"ranges,omitempty"`
+}
+
 // Config is the effective plugin configuration.
 type Config struct {
 	ConfigToken       string  `yaml:"config_token" json:"config_token"`
@@ -149,9 +158,28 @@ type Config struct {
 
 	HistoryRetentionDays int `yaml:"history_retention_days" json:"history_retention_days"`
 
-	// RememberChartFilters makes the page keep the chart filters in the
-	// browser and restore them when it opens.
+	// RememberChartFilters makes the page keep the chart's window, range
+	// and order in ChartView and restore them when it opens.
 	RememberChartFilters bool `yaml:"remember_chart_filters" json:"remember_chart_filters"`
+	// RememberChartExpanded makes the page keep the expanded multi-account
+	// groups of the chart in ChartExpanded.
+	RememberChartExpanded bool `yaml:"remember_chart_expanded,omitempty" json:"remember_chart_expanded,omitempty"`
+
+	// The page writes the keys below itself to keep its own state across
+	// reloads and devices: in Magpie it runs in a sandboxed iframe without
+	// browser storage. The plugin does not use them.
+	//
+	// ChartView holds the chart's window, order and range of each window.
+	ChartView *ChartView `yaml:"chart_view,omitempty" json:"chart_view,omitempty"`
+	// ChartExpanded lists the multi-account groups expanded in the chart.
+	ChartExpanded []string `yaml:"chart_expanded,omitempty" json:"chart_expanded,omitempty"`
+	// MCPPublicURL is the public address of /mcp shown in the client
+	// configs, such as that of a reverse proxy with HTTPS.
+	MCPPublicURL string `yaml:"mcp_public_url,omitempty" json:"mcp_public_url,omitempty"`
+	// MaskAccounts blurs the account names on the page.
+	MaskAccounts bool `yaml:"mask_accounts,omitempty" json:"mask_accounts,omitempty"`
+	// EventsShow5hResets lists the resets of 5-hour windows in the events.
+	EventsShow5hResets bool `yaml:"events_show_5h_resets,omitempty" json:"events_show_5h_resets,omitempty"`
 
 	// AccountNames maps an account pin to the name Lamplighter shows for
 	// it. Magpie has no way for a plugin to rename an account.

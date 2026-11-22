@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,73 @@ func TestParseRememberChartFilters(t *testing.T) {
 	}
 	if !cfg.RememberChartFilters {
 		t.Fatal("remember_chart_filters not read")
+	}
+}
+
+func TestParsePageState(t *testing.T) {
+	cfg, err := Parse([]byte(`{"remember_chart_expanded": true, "chart_view": {"window": "7d", "sort": "low", "ranges": {"5h": "12h", "7d": "15d"}},
+		"chart_expanded": ["Claude", "Codex"], "mcp_public_url": "https://mcp.example.com", "mask_accounts": true, "events_show_5h_resets": true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ChartView{Window: "7d", Sort: "low", Ranges: map[string]string{"5h": "12h", "7d": "15d"}}
+	if !cfg.RememberChartExpanded || cfg.ChartView == nil || !reflect.DeepEqual(*cfg.ChartView, want) ||
+		!reflect.DeepEqual(cfg.ChartExpanded, []string{"Claude", "Codex"}) || cfg.MCPPublicURL != "https://mcp.example.com" ||
+		!cfg.MaskAccounts || !cfg.EventsShow5hResets {
+		t.Fatalf("page state %+v", cfg)
+	}
+	// The status leaves out the keys the file does not set.
+	cfg, err = Parse(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"remember_chart_expanded", "chart_view", "chart_expanded", "mcp_public_url", "mask_accounts", "events_show_5h_resets"} {
+		if bytes.Contains(raw, []byte(`"`+key+`"`)) {
+			t.Fatalf("default config names %s: %s", key, raw)
+		}
+	}
+}
+
+func TestStorePatchesPageState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	store, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := `{"window":"5h","sort":"default","ranges":{"5h":"6h","7d":"8d"}}`
+	cfg, err := store.Patch(map[string]json.RawMessage{
+		"remember_chart_filters":  json.RawMessage(`true`),
+		"remember_chart_expanded": json.RawMessage(`true`),
+		"chart_view":              json.RawMessage(view),
+		"chart_expanded":          json.RawMessage(`["Claude"]`),
+		"mask_accounts":           json.RawMessage(`true`),
+	})
+	if err != nil || cfg.ChartView == nil || cfg.ChartView.Ranges["7d"] != "8d" || len(cfg.ChartExpanded) != 1 || !cfg.MaskAccounts {
+		t.Fatalf("patch %+v %v", cfg, err)
+	}
+	if string(store.Raw()["chart_view"]) != view || string(store.Raw()["chart_expanded"]) != `["Claude"]` {
+		t.Fatalf("raw %s", store.Raw())
+	}
+	_, cfg, err = Open(path)
+	if err != nil || !cfg.RememberChartExpanded || cfg.ChartView == nil || cfg.ChartView.Window != "5h" || cfg.ChartExpanded[0] != "Claude" {
+		t.Fatalf("reopened %+v %v", cfg, err)
+	}
+	cfg, err = store.Patch(map[string]json.RawMessage{"chart_view": json.RawMessage(`null`), "chart_expanded": json.RawMessage(`null`), "mask_accounts": json.RawMessage(`null`)})
+	if err != nil || cfg.ChartView != nil || cfg.ChartExpanded != nil || cfg.MaskAccounts {
+		t.Fatalf("delete %+v %v", cfg, err)
+	}
+	raw := store.Raw()
+	for _, key := range []string{"chart_view", "chart_expanded", "mask_accounts"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("%s still saved: %s", key, raw)
+		}
+	}
+	if string(raw["remember_chart_filters"]) != "true" {
+		t.Fatalf("other keys must stay: %s", raw)
 	}
 }
 
