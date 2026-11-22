@@ -59,7 +59,7 @@ test("config tokens are 16 hexadecimal digits", () => {
 
 test("account names are saved in account_names by pin and clearing removes the entry", async () => {
   const writes = [];
-  const ctx = context(["saveAccountName"], {
+  const ctx = context(["saveAccountName", "rereadConfig"], {
     rawConfig: { account_names: { "codex/b": "B" } }, status: { accounts: [{ auth_index: "codex/a" }] },
     API: "api",
     patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
@@ -90,7 +90,7 @@ test("drag targets use layout midpoints rather than animated rectangles", () => 
 
 test("queued inline weights merge changes and an empty field removes only its own override", async () => {
   const states = [], writes = [];
-  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight", "rereadConfig"], {
     rawConfig: {}, saveQueue: Promise.resolve(), history: null,
     saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     translate: (key) => key, setSaveState: (...args) => states.push(args),
@@ -119,7 +119,7 @@ test("queued inline weights merge changes and an empty field removes only its ow
 });
 
 test("an earlier account name save does not overwrite a newer unsaved edit", async () => {
-  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight"], {
+  const ctx = context(["saveAccountField", "accountFieldHost", "fmtWeight", "rereadConfig"], {
     saveQueue: Promise.resolve(), history: null, saveHost: () => ({}), saveEntry: (_, input) => ({ input }),
     claimState: () => () => {}, translate: (key) => key, renderAccounts: () => {},
     saveAccountName: async () => {},
@@ -175,7 +175,7 @@ function accountSaveContext(fail) {
   const heading = saveNode("H2", { id: "account-order-state" });
   const section = { tagName: "SECTION", querySelector: selector => { assert.equal(selector, ".card-title"); return heading; } };
   const row = { account: { name: "a", note: "old" }, getAttribute: () => "a" };
-  const ctx = stateContext(["saveAccountField", "accountFieldHost", "fmtWeight", "saveAccountOrder"], {
+  const ctx = stateContext(["saveAccountField", "accountFieldHost", "fmtWeight", "saveAccountOrder", "rereadConfig"], {
     fail, rawConfig: {}, saveQueue: Promise.resolve(), history: null, pendingOrder: null,
     $: () => heading, toast: () => {},
     showApplied: say => { say("waiting", "waiting"); say("saved", "applied"); },
@@ -377,7 +377,7 @@ function settingsSaveContext(radio = false) {
     input.type = "radio"; input.value = i ? "all" : "off"; input.checked = !i;
     input.closest = selector => selector === ".thresholds, .mode-switch" ? { querySelectorAll: () => inputs } : null;
   });
-  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls"], {
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
     rawConfig: { ignition: {} }, status: { config: {} },
     saveHost: () => ({}), claimState: () => () => true,
@@ -1129,6 +1129,7 @@ test("the page speaks Magpie's bridge protocol to its parent only", async () => 
     status: null, history: null, renderChart: () => {},
     applyTheme: () => calls.theme++, applyLanguage: () => calls.language++,
     loadStatus: () => { calls.refresh++; return Promise.resolve(); }, refreshHistory: () => {},
+    contentReady: true, keyAsked: () => false, loadPage: () => { calls.load = (calls.load || 0) + 1; },
   });
   const hello = ctx.magpieCall("hello");
   assert.deepEqual(posted, [[{ magpie: 1, id: 1, method: "hello" }, "*"]]);
@@ -1146,6 +1147,12 @@ test("the page speaks Magpie's bridge protocol to its parent only", async () => 
   ctx.status = {};
   ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: true } } });
   assert.equal(ctx.magpie.visible, true);
+  assert.equal(calls.refresh, 1);
+  // Back to a page that has not read a valid config yet, it loads at once.
+  ctx.contentReady = false;
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: false } } });
+  ctx.magpieMessage({ source: parent, data: { magpie: 1, event: "visibility", data: { visible: true } } });
+  assert.equal(calls.load, 1);
   assert.equal(calls.refresh, 1);
   const copy = ctx.magpieCall("image.copy", { png: "blob" });
   ctx.magpieMessage({ source: parent, data: { magpie: 1, id: 2, error: "A picture is a PNG of 16 MB at most" } });
@@ -1368,7 +1375,7 @@ test("API requests carry the page token only when the page has one", async () =>
 
   const sent = [];
   const ctx = context(["api"], {
-    key: "", PAGE_TOKEN: "tok_123", translate: (k) => k, setTimeout, clearTimeout, askForKey: () => {},
+    key: "", authEpoch: 0, PAGE_TOKEN: "tok_123", translate: (k) => k, setTimeout, clearTimeout, askForKey: () => {},
     fetch: async (p, opts) => { sent.push(opts.headers); return { status: 200, ok: true, json: async () => ({}) }; },
   });
   await ctx.api("GET", "api/status");
@@ -1461,8 +1468,8 @@ function timezoneSaveContext(reply) {
   input.type = "text";
   input.closest = (selector) => selector === ".settings-section" ? section : null;
   const sent = [], refilled = [];
-  const ctx = stateContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "patchConfig", "api"], {
-    rawConfig: {}, status: { config: {} }, saveQueue: Promise.resolve(), savedTokens: [],
+  const ctx = stateContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "patchConfig", "keepSaved", "api", "rereadConfig"], {
+    rawConfig: {}, status: { config: {} }, saveQueue: Promise.resolve(), savedTokens: [], authEpoch: 0, pendingOrder: null,
     THRESHOLDS: ["notice_threshold", "low_threshold", "critical_threshold"],
     CONFIG_API: "api/config", key: "", PAGE_TOKEN: "", askForKey: () => {}, setTimeout, clearTimeout,
     newConfigToken: () => "0123456789abcdef",
@@ -1472,6 +1479,7 @@ function timezoneSaveContext(reply) {
     refillSaved: (intent) => refilled.push(intent),
     loadConfig: async () => { Object.assign(ctx.rawConfig, { timezone: sent.at(-1).timezone }); },
   });
+  vm.runInContext(pageVar("PAGE_STATE_KEYS"), ctx);
   return { ctx, heading, input, sent, refilled };
 }
 
@@ -2170,4 +2178,914 @@ test("estimated stretches of a line are split off and share their ends", () => {
   assert.deepEqual(plain(ctx.estimatedRuns(pts).map((r) => [r.estimated, r.pts.map((p) => p[0])])),
     [[true, [1, 2, 3, 4]], [false, [4, 5]]]);
   assert.deepEqual(plain(ctx.estimatedRuns([[1, 50, 0]]).map((r) => [r.estimated, r.pts.length])), [[false, 1]]);
+});
+
+// ---- Page state kept in the config ----
+
+const STATE_RANGES = {
+  "5h": [["1h"], ["3h"], ["6h"], ["12h"], ["24h"], ["26h"]],
+  "7d": [["24h"], ["4d"], ["8d"], ["15d"], ["1mo"], ["36d"]],
+};
+const stateFunctions = ["writePageState", "sendPageState", "forgetStores", "readOldMask", "restorePageState", "rememberChart", "rememberExpanded",
+  "currentChartView", "saveChartFilters", "expandedGroups", "saveChartExpanded", "saveChartSwitch", "rangeFor", "restoreChartState"];
+
+// The page state functions with a settings form of two switches and a
+// config endpoint that records each PATCH and answers when told to.
+function pageStateContext(switches = {}, globals = {}) {
+  const writes = [], results = [], pressed = {}, pending = [];
+  const form = {
+    remember_chart_filters: { name: "remember_chart_filters", checked: !!switches.filters },
+    remember_chart_expanded: { name: "remember_chart_expanded", checked: !!switches.expanded },
+  };
+  const ctx = context(stateFunctions, {
+    RANGES: STATE_RANGES, DEFAULT_RANGE: { "5h": "6h", "7d": "8d" },
+    rawConfig: {}, chartWindow: "5h", range: "6h", chartSort: "default", chartExpanded: {}, chartView: null,
+    pageStateReady: false, chartRestored: false, pageStateWrites: {}, pageStateFailed: {},
+    masked: false, showFiveHourResets: false,
+    $: (id) => { assert.equal(id, "settings"); return { elements: form }; },
+    windowKinds: () => ["5h", "7d"],
+    pressSegment: (id, value) => { pressed[id] = value; },
+    renderRangeButtons: () => { pressed.ranges = ctx.range; },
+    setMasked: (on) => { ctx.masked = on; },
+    translate: (key) => key,
+    saveHost: () => ({}),
+    claimState: (host, input) => (state) => { results.push(input.name + ":" + state); return true; },
+    pageStateSaved: (group, err, switched) => { if (err) results.push(group + ":" + err.message + (switched ? ":switch" : "")); },
+    patchConfig: (patch) => {
+      writes.push(plain(patch));
+      if (!ctx.hold) return Promise.resolve("");
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    },
+    ...globals,
+  });
+  // As the script loads.
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES") + pageVar("oldMask"), ctx);
+  return { ctx, form, writes, results, pressed, pending };
+}
+const settle = () => new Promise(setImmediate);
+
+test("a chart switch saves with its state in one patch, and turning it off deletes both", async () => {
+  const { ctx, form, writes, results } = pageStateContext();
+  ctx.restoreChartState({});
+  // Off: changes are not saved.
+  ctx.chartWindow = "7d"; ctx.range = "15d"; ctx.saveChartFilters();
+  assert.equal(writes.length, 0);
+  form.remember_chart_filters.checked = true;
+  ctx.saveChartSwitch(form.remember_chart_filters);
+  await settle();
+  assert.deepEqual(writes, [{ remember_chart_filters: true, chart_view: { window: "7d", sort: "default", ranges: { "7d": "15d" } } }]);
+  assert.deepEqual(results, ["remember_chart_filters:saved"]);
+  ctx.chartSort = "low"; ctx.saveChartFilters();
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_view: { window: "7d", sort: "low", ranges: { "7d": "15d" } } });
+  form.remember_chart_filters.checked = false;
+  ctx.saveChartSwitch(form.remember_chart_filters);
+  await settle();
+  assert.deepEqual(writes.at(-1), { remember_chart_filters: null, chart_view: null });
+  form.remember_chart_expanded.checked = true;
+  ctx.chartExpanded["group:claude|Claude"] = true;
+  ctx.saveChartSwitch(form.remember_chart_expanded);
+  form.remember_chart_expanded.checked = false;
+  ctx.hold = false;
+  await settle();
+  ctx.saveChartSwitch(form.remember_chart_expanded);
+  await settle();
+  assert.deepEqual(writes.slice(-2), [{ remember_chart_expanded: true, chart_expanded: ["claude|Claude"] }, { remember_chart_expanded: null, chart_expanded: null }]);
+  // The settings save leaves the switches to saveChartSwitch.
+  assert.match(source, /if \(!top \|\| top === "remember_chart_filters" \|\| top === "remember_chart_expanded"\) return;/);
+});
+
+test("switch and state changes queue in order: one write at a time, later values winning", async () => {
+  const { ctx, form, writes, pending, results } = pageStateContext({ filters: true });
+  ctx.restoreChartState({ remember_chart_filters: true });
+  ctx.hold = true;
+  for (const r of ["1h", "3h", "12h", "24h"]) { ctx.range = r; ctx.saveChartFilters(); }
+  assert.equal(writes.length, 1, "one write is under way");
+  pending.shift().resolve("");
+  await settle();
+  assert.equal(writes.length, 2, "the waiting values collapse into the last one");
+  assert.equal(writes[1].chart_view.ranges["5h"], "24h");
+  // Turning the switch off while a write is under way deletes both last,
+  // and a change made after that is not saved.
+  form.remember_chart_filters.checked = false;
+  ctx.saveChartSwitch(form.remember_chart_filters);
+  ctx.range = "1h"; ctx.saveChartFilters();
+  pending.shift().reject(new Error("offline"));
+  await settle();
+  assert.deepEqual(writes.at(-1), { remember_chart_filters: null, chart_view: null });
+  pending.shift().resolve("");
+  await settle();
+  assert.equal(writes.length, 3);
+  assert.deepEqual(results, ["chart_view:offline", "remember_chart_filters:saved"]);
+  assert.equal(ctx.pageStateWrites.chart_view.running, null);
+  // On again while a state write waits: the switch and the newest state go
+  // in one patch.
+  form.remember_chart_filters.checked = true;
+  ctx.saveChartSwitch(form.remember_chart_filters);
+  ctx.chartSort = "low"; ctx.saveChartFilters();
+  ctx.range = "3h"; ctx.saveChartFilters();
+  pending.shift().resolve("");
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_view: { window: "5h", sort: "low", ranges: { "5h": "3h" } } });
+  assert.deepEqual(writes.at(-2), { remember_chart_filters: true, chart_view: { window: "5h", sort: "default", ranges: { "5h": "1h" } } });
+});
+
+test("the chart state is restored from the first valid config, switches included", () => {
+  const view = { window: "7d", sort: "low", ranges: { "5h": "12h", "7d": "15d" } };
+  const { ctx, form, pressed, writes } = pageStateContext();
+  // The form was filled from a newer config; the restore follows its own.
+  ctx.rawConfig = { remember_chart_filters: false };
+  ctx.restoreChartState({ remember_chart_filters: true, chart_view: view, remember_chart_expanded: true, chart_expanded: ["claude|Claude"] });
+  assert.equal(form.remember_chart_filters.checked, true);
+  assert.equal(form.remember_chart_expanded.checked, true);
+  assert.equal(ctx.chartWindow, "7d");
+  assert.equal(ctx.chartSort, "low");
+  assert.equal(ctx.range, "15d");
+  assert.equal(ctx.rangeFor("5h"), "12h");
+  assert.deepEqual(pressed, { "window-buttons": "7d", "sort-buttons": "low", ranges: "15d" });
+  assert.deepEqual(plain(ctx.chartExpanded), { "group:claude|Claude": true });
+  assert.equal(writes.length, 0, "restoring writes nothing");
+  // Only once.
+  ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: "5h" } });
+  assert.equal(ctx.chartWindow, "7d");
+});
+
+test("a saved chart choice that is not offered falls back to the defaults", () => {
+  const { ctx } = pageStateContext();
+  ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: "30d", sort: "random", ranges: { "5h": "8d", "7d": 3 } } });
+  assert.equal(ctx.chartWindow, "5h");
+  assert.equal(ctx.chartSort, "default");
+  assert.equal(ctx.range, "6h");
+  assert.equal(ctx.rangeFor("7d"), "8d");
+  // With the switch off the saved choice is ignored.
+  const off = pageStateContext();
+  off.ctx.restoreChartState({ chart_view: { window: "7d", sort: "low", ranges: { "7d": "15d" } }, chart_expanded: ["claude|Claude"] });
+  assert.equal(off.ctx.chartWindow, "5h");
+  assert.equal(off.ctx.rangeFor("7d"), "8d");
+  assert.deepEqual(plain(off.ctx.chartExpanded), {});
+});
+
+test("a saved window that only the history still has is restored once its history is read, or falls back", async () => {
+  const now = Date.now() / 1000;
+  // With samples in the range, without, and when the history cannot be read
+  // in LOAD_TIMEOUT; for 7d with accounts that report 5h, and for 5h, the
+  // window the chart starts with, with accounts that report 7d.
+  for (const [saved, answer, want, wantRange] of [["7d", "samples", "7d", "15d"], ["7d", "empty", "5h", "12h"], ["7d", "failed", "5h", "12h"],
+    ["5h", "samples", "5h", "12h"], ["5h", "empty", "7d", "15d"], ["5h", "failed", "7d", "15d"]]) {
+    const other = saved === "7d" ? "5h" : "7d";
+    const requested = [], timeouts = [];
+    const { ctx, pressed } = pageStateContext({ filters: true }, {
+      status: { accounts: [{ groups: [{ windows: [{ kind: other }] }] }] },
+      historyCache: {}, historyPending: {}, historySeq: 0, API: "api", pendingOrder: null, LOAD_TIMEOUT: 15000,
+      $: (id) => id === "settings" ? { elements: { remember_chart_filters: { checked: true }, remember_chart_expanded: { checked: false } } }
+        : { querySelectorAll: () => [] },
+      api: async (method, p, body, timeout) => {
+        requested.push(p);
+        timeouts.push(timeout);
+        if (answer === "failed") throw new Error("request_timed_out");
+        const from = new Date((now - 15 * 86400) * 1000).toISOString();
+        return { from, series: answer === "samples" ? [{ kind: saved, points: [[now - 600, 50]] }] : [] };
+      },
+    });
+    for (const name of ["windowKinds", "recentSamples", "windowKind", "historyKey", "fetchHistory", "renderWindowButtons"]) {
+      vm.runInContext(source.match(new RegExp("  function " + name + "\\([^]*?\\n  }"))[0], ctx);
+    }
+    const restored = ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: saved, sort: "low", ranges: { "7d": "15d", "5h": "12h" } } });
+    // Nothing is drawn until the window is chosen; the sort is restored at once.
+    assert.ok(restored && typeof restored.then === "function");
+    assert.equal(ctx.chartSort, "low");
+    assert.equal(ctx.chartWindow, "5h");
+    await restored;
+    assert.deepEqual(requested, ["api/history?range=" + (saved === "7d" ? "15d" : "12h") + "&window=" + saved]);
+    assert.deepEqual(timeouts, [15000]);
+    // The page then shows the window buttons (renderStatus).
+    ctx.renderWindowButtons();
+    assert.equal(ctx.chartWindow, want, saved + " " + answer);
+    assert.equal(ctx.range, wantRange, saved + " " + answer);
+    assert.equal(pressed["window-buttons"], want);
+  }
+  // The app stays hidden until then: preparePage waits for the restore.
+  assert.match(source.match(/  function preparePage\([^]*?\n  }/)[0], /return Promise\.resolve\(restoreChartState\(cfg\)\);/);
+});
+
+// Pooled rows from the real chartRows: two Antigravity accounts share
+// "Claude / GPT".
+function pooledChartRows() {
+  const now = 1795280000;
+  const win = (remaining) => [{ id: "five-hour", kind: "5h", short: "5h", remaining, reset: "" }];
+  const status = { accounts: [
+    { auth_index: "4", provider: "antigravity", groups: [{ key: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", windows: win(65) }] },
+    { auth_index: "5", provider: "antigravity", groups: [{ key: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", windows: win(20) }] },
+    { auth_index: "3", provider: "claude", groups: [{ key: "claude:3:claude", label: "Claude", source_label: "Claude", windows: win(40) }] },
+  ], group_order: [] };
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+    status, providerTitle: (id) => ({ antigravity: "Antigravity" })[id] || id, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
+    gapLimit: () => 900, pooled: () => [],
+  });
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
+  const series = (s, value) => ({ ...s, window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  ctx.history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), series: [
+    series({ group: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", provider: "antigravity", auth_index: "4" }, 65),
+    series({ group: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", provider: "antigravity", auth_index: "5" }, 20),
+    series({ group: "claude:3:claude", label: "Claude", source_label: "Claude", provider: "claude", auth_index: "3" }, 40),
+  ] };
+  return ctx.chartRows();
+}
+
+test("expanded groups are saved by row id without group:, and ids the chart lacks are kept", async () => {
+  const rows = pooledChartRows();
+  const pooled = rows.filter((r) => r.children);
+  assert.deepEqual(plain(pooled.map((r) => r.id)), ["group:antigravity|Claude / GPT"]);
+  const { ctx, form, writes } = pageStateContext({ expanded: true });
+  ctx.restoreChartState({ remember_chart_expanded: true, chart_expanded: ["antigravity|Claude / GPT", "codex|Gone", 7] });
+  // The saved id expands the real row; an id without a row stays.
+  assert.equal(ctx.chartExpanded[pooled[0].id], true);
+  assert.deepEqual(plain(ctx.chartExpanded), { "group:antigravity|Claude / GPT": true, "group:codex|Gone": true });
+  // Collapsing the row, as a click on it does, saves the rest.
+  ctx.chartExpanded[pooled[0].id] = false; ctx.saveChartExpanded();
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_expanded: ["codex|Gone"] });
+  ctx.chartExpanded[pooled[0].id] = true; ctx.saveChartExpanded();
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_expanded: ["antigravity|Claude / GPT", "codex|Gone"] });
+  ["group:codex|Gone", pooled[0].id].forEach((id) => { ctx.chartExpanded[id] = false; });
+  ctx.saveChartExpanded();
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_expanded: null });
+  // Off: nothing is saved.
+  form.remember_chart_expanded.checked = false;
+  ctx.chartExpanded[pooled[0].id] = true; ctx.saveChartExpanded();
+  await settle();
+  assert.equal(writes.length, 3);
+  // The click on an expanded row saves.
+  assert.match(source.match(/  function renderOverview\([^]*?\n  }/)[0], /chartExpanded\[r\.id\] = !chartExpanded\[r\.id\];\n\s*saveChartExpanded\(\);/);
+});
+
+// Stubs every name fn reads but globals lack with an object that answers
+// any use, so the real drawing code runs.
+function universal() {
+  const p = new Proxy(function () {}, {
+    get: (t, k) => k === Symbol.toPrimitive ? () => 0 : k === "length" ? 0 : (k === "then" || k === Symbol.iterator) ? undefined : p,
+    set: () => true, apply: () => p, construct: () => p,
+  });
+  return p;
+}
+function runStubbed(ctx, call) {
+  for (let i = 0; i < 200; i++) {
+    try { return call(); } catch (err) {
+      const m = /^(\w+) is not defined/.exec(err.message);
+      if (!m) throw err;
+      ctx[m[1]] = universal();
+    }
+  }
+  throw new Error("too many names");
+}
+
+test("drawing the chart keeps the remembered range of each window", async () => {
+  const { ctx, writes } = pageStateContext({ filters: true }, { chartSelected: "", hoverListeners: [] });
+  vm.runInContext(source.match(/  function renderOverview\([^]*?\n  }/)[0], ctx);
+  const draw = () => runStubbed(ctx, () => ctx.renderOverview(pooledChartRows(), { clientWidth: 900, appendChild() {} }, 0));
+  ctx.restoreChartState({ remember_chart_filters: true });
+  // As the range and window buttons do, drawing after each pick.
+  const pickWindow = (value) => { ctx.chartWindow = value; ctx.range = ctx.rangeFor(value); ctx.saveChartFilters(); draw(); };
+  ctx.range = "12h"; ctx.saveChartFilters(); draw();
+  pickWindow("7d");
+  assert.equal(ctx.range, "8d");
+  pickWindow("5h");
+  assert.equal(ctx.range, "12h");
+  await settle();
+  assert.deepEqual(writes.at(-1), { chart_view: { window: "5h", sort: "default", ranges: { "5h": "12h", "7d": "8d" } } });
+  assert.ok(ctx.chartGeom, "the overview keeps its geometry apart");
+  // The page's functions share one scope, so no two may declare one name.
+  const names = [...source.matchAll(/\n  var (\w+)/g)].map((m) => m[1]);
+  assert.deepEqual(names.filter((n, i) => names.indexOf(n) !== i), []);
+});
+
+test("masking and the 5-hour resets come from the first config only", async () => {
+  const { ctx, writes } = pageStateContext();
+  ctx.restorePageState({ mask_accounts: true, events_show_5h_resets: true });
+  assert.equal(ctx.masked, true);
+  assert.equal(ctx.showFiveHourResets, true);
+  assert.equal(writes.length, 0);
+  ctx.writePageState("mask_accounts", { mask_accounts: null });
+  await settle();
+  assert.deepEqual(writes, [{ mask_accounts: null }]);
+  ctx.restorePageState({ mask_accounts: true, events_show_5h_resets: false });
+  assert.equal(ctx.showFiveHourResets, true);
+  assert.match(source, /writePageState\("mask_accounts", \{ mask_accounts: masked \|\| null \}\);/);
+  assert.match(source, /writePageState\("events_show_5h_resets", \{ events_show_5h_resets: showFiveHourResets \|\| null \}\);/);
+  assert.doesNotMatch(source, /\bMASK_STORE|EVENTS_STORE|MCP_URL_STORE|CHART_STORE|pageStateTouched/);
+});
+
+test("the masking switch of an earlier version moves to the config once, and the other old keys go", async () => {
+  const OLD = { "lamplighter-mask-accounts": "1", "lamplighter-events-5h": "1", "lamplighter-chart-filters": "{}", "lamplighter-mcp-url": "x", "lamplighter-view": "settings" };
+  const setup = (old, globals) => {
+    const stored = { ...old };
+    const state = pageStateContext({}, {
+      localStorage: { getItem: (k) => k in stored ? stored[k] : null, removeItem: (k) => { delete stored[k]; } },
+      ...globals,
+    });
+    return { ...state, stored };
+  };
+  // No mask_accounts in the config and the old switch on: masked at once,
+  // saved quietly, and the old key goes once saved.
+  let { ctx, writes, results, pending, stored } = setup(OLD, { hold: true });
+  ctx.restorePageState({});
+  assert.equal(ctx.masked, true);
+  assert.deepEqual(writes, [{ mask_accounts: true }]);
+  assert.deepEqual(Object.keys(stored).sort(), ["lamplighter-mask-accounts", "lamplighter-view"]);
+  pending.shift().resolve("");
+  await settle();
+  assert.deepEqual(Object.keys(stored), ["lamplighter-view"], "the view stays in the browser");
+  assert.deepEqual(results, []);
+  // A failed save keeps the old key, so the next opening moves it again.
+  ({ ctx, writes, pending, stored } = setup(OLD, { hold: true, pageStateSaved: () => {} }));
+  ctx.restorePageState({});
+  pending.shift().reject(new Error("down"));
+  await settle();
+  assert.equal(ctx.masked, true);
+  assert.equal(stored["lamplighter-mask-accounts"], "1");
+  // The config wins when it has mask_accounts; the old switch goes either way.
+  for (const [cfg, old, want] of [[{ mask_accounts: false }, "1", false], [{ mask_accounts: true }, "0", true], [{}, "0", false], [{}, null, false]]) {
+    ({ ctx, writes, stored } = setup(old === null ? {} : { "lamplighter-mask-accounts": old }));
+    ctx.restorePageState(cfg);
+    assert.equal(ctx.masked, want, JSON.stringify([cfg, old]));
+    assert.deepEqual(writes, []);
+    assert.deepEqual(stored, {});
+  }
+  // Without localStorage, as in Magpie, only the config counts.
+  ({ ctx, writes } = setup({}, { localStorage: undefined }));
+  ctx.restorePageState({});
+  assert.equal(ctx.masked, false);
+  assert.deepEqual(writes, []);
+});
+
+test("a second tab opened before the masking moves still masks with the config it read before", async () => {
+  // Two tabs of one browser share the old key; both load before either
+  // has its config.
+  const stored = { "lamplighter-mask-accounts": "1" };
+  const localStorage = { getItem: (k) => k in stored ? stored[k] : null, removeItem: (k) => { delete stored[k]; } };
+  const first = pageStateContext({}, { localStorage });
+  const second = pageStateContext({}, { localStorage });
+  // The first tab moves the masking and deletes the key.
+  first.ctx.restorePageState({});
+  await settle();
+  assert.equal(first.ctx.masked, true);
+  assert.deepEqual(stored, {});
+  // The second tab read its config before that save: still masked.
+  second.ctx.restorePageState({});
+  assert.equal(second.ctx.masked, true);
+  assert.deepEqual(second.writes, [{ mask_accounts: true }]);
+});
+
+// loadPage with its real gate and the real api: the app, the loading
+// card and the key form are plain objects, and each request waits until
+// the test answers it.
+function loadPageContext(globals = {}) {
+  const nodes = {}, calls = [], timers = [], requests = [], stored = {};
+  const node = (id) => nodes[id] || (nodes[id] = { id, hidden: true, textContent: "", value: "" });
+  const ctx = context(["loadPage", "preparePage", "showPage", "hideContent", "showContent", "setLoadState", "renderLoadCard", "keyAsked",
+    "askForKey", "cancelLoad", "submitKey", "validKey", "begin", "forgetStores", "readOldMask", "restorePageState", "api", "fetchStatus", "fetchConfig"], {
+    pageLoad: null, pagePrepared: false, pageStateReady: false, contentReady: false,
+    loadState: { state: "", message: "" }, loadCardTimer: null, LOAD_TIMEOUT: 15000, LOAD_CARD_DELAY: 300,
+    key: "", KEY_STORE: "k", history: null, masked: false, showFiveHourResets: false, reloads: 0,
+    localStorage: { getItem: (k) => k in stored ? stored[k] : null, setItem: (k, v) => { stored[k] = v; }, removeItem: (k) => { delete stored[k]; } },
+    writePageState: (group, patch, say) => { calls.push("write:" + JSON.stringify(patch)); say("saved"); },
+    location: { reload: () => { ctx.reloads++; } },
+    API: "api", CONFIG_API: "api/config", PAGE_TOKEN: "", window: { AbortController }, AbortController, rawConfig: {},
+    $: node, translate: (k, a) => a ? k + ":" + a : k,
+    setTimeout: (fn, ms) => { timers.push([fn, ms]); return timers.length; }, clearTimeout: () => {},
+    // A request ends when the test answers it or, unless it holds on, when
+    // it is aborted.
+    fetch: (url, opts) => new Promise((resolve, reject) => {
+      const request = { url, opts, key: opts.headers.Authorization || "", holdOn: ctx.holdOn,
+        answer: (body, code = 200) => resolve({ status: code, ok: code < 300, json: typeof body === "function" ? body : async () => body }),
+        fail: reject };
+      requests.push(request);
+      if (opts.signal) opts.signal.addEventListener("abort", () => { if (!request.holdOn) reject(new Error("aborted")); });
+    }),
+    start: () => { nodes["key-section"].hidden = true; ctx.loadPage(); },
+    useStatus: (data) => { ctx.status = data; calls.push("useStatus"); },
+    useConfig: (data) => { ctx.rawConfig = data; calls.push("useConfig"); },
+    setMasked: (on) => { ctx.masked = on; calls.push("mask:" + on); },
+    renderStatus: () => calls.push("renderStatus:" + (nodes.app.hidden ? "hidden" : "shown") + ":" + ctx.masked),
+    fillSettings: () => calls.push("fill"), checkUpdate: () => {},
+    restoreChartState: (cfg) => { calls.push("restoreChart:" + JSON.stringify(cfg)); return null; },
+    loadHistory: async () => { calls.push("history"); return false; }, prefetchHistory: () => {},
+    ...globals,
+  });
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES") + pageVar("oldMask"), ctx);
+  for (const id of ["app", "key-section", "key-input", "key-error", "load-section", "load-text", "load-retry"]) node(id);
+  // The requests of the latest load: [status, config].
+  const last = () => [requests.findLast((r) => r.url === "api/status"), requests.findLast((r) => r.url === "api/config")];
+  // A key entered in the form; resolves as the load it starts on this
+  // page, if any.
+  const enterKey = (secret) => {
+    nodes["key-input"].value = " " + secret + " ";
+    ctx.submitKey({ preventDefault: () => {} });
+    return ctx.pageLoad && ctx.pageLoad.promise;
+  };
+  return { ctx, nodes, calls, timers, requests, stored, last, enterKey };
+}
+
+test("the app shows only once a valid config has set the masking and the chart state is restored", async () => {
+  let restored;
+  const { ctx, nodes, calls, timers, requests, last } = loadPageContext();
+  ctx.restoreChartState = (cfg) => {
+    calls.push("restoreChart:" + JSON.stringify(cfg));
+    return new Promise((resolve) => { restored = resolve; });
+  };
+  const load = ctx.loadPage();
+  assert.equal(ctx.loadPage(), load, "one load runs at a time");
+  assert.deepEqual(requests.map((r) => r.url), ["api/status", "api/config"]);
+  assert.deepEqual(timers.filter((t) => t[1] === 15000).length, 2, "each request gives up after LOAD_TIMEOUT");
+  // The loading card waits, so a quick start does not flash it.
+  assert.equal(nodes["load-section"].hidden, true);
+  timers.find((t) => t[1] === 300)[0]();
+  assert.equal(nodes["load-section"].hidden, false);
+  assert.equal(nodes["load-text"].textContent, "loading");
+  const first = { mask_accounts: true, remember_chart_filters: true, chart_view: { window: "7d" } };
+  last()[1].answer(first);
+  await settle();
+  assert.deepEqual(calls, [], "nothing is taken before both answer");
+  last()[0].answer({});
+  await settle();
+  // The chart state, with the history it may read, is restored while the
+  // app is hidden and the load holds its lock.
+  assert.deepEqual(calls, ["useStatus", "useConfig", "mask:true", "restoreChart:" + JSON.stringify(first)]);
+  assert.equal(nodes.app.hidden, true);
+  assert.equal(nodes["load-section"].hidden, false);
+  assert.equal(ctx.loadPage(), load);
+  assert.equal(requests.length, 2);
+  restored();
+  assert.equal(await load, true);
+  assert.equal(nodes.app.hidden, false);
+  assert.equal(nodes["load-section"].hidden, true);
+  assert.equal(ctx.pagePrepared, true);
+  assert.equal(ctx.pageLoad, null);
+  await settle();
+  assert.deepEqual(calls.slice(4), ["renderStatus:shown:true", "fill", "history"], "the first chart loads after the page shows");
+});
+
+test("a load holds its lock until both requests end, and the first failure cancels the other", async () => {
+  const { ctx, nodes, requests, last, timers } = loadPageContext();
+  // A config request that does not stop at once when cancelled.
+  ctx.holdOn = true;
+  const load = ctx.loadPage();
+  ctx.holdOn = false;
+  const [status, config] = last();
+  status.answer({ error: "down" }, 500);
+  await settle();
+  assert.equal(config.opts.signal.aborted, true, "the failure cancels the config request");
+  // Until it ends, a retry joins the load instead of sending more requests.
+  assert.equal(ctx.loadPage(), load);
+  assert.equal(requests.length, 2);
+  assert.notEqual(ctx.pageLoad, null);
+  config.answer({});
+  assert.equal(await load, false);
+  assert.equal(ctx.pageLoad, null);
+  assert.equal(nodes.app.hidden, true, "a config without its status shows nothing");
+  assert.equal(nodes["load-text"].textContent, "load_failed:down");
+  assert.equal(nodes["load-retry"].hidden, false);
+  // A request that hangs gives up at LOAD_TIMEOUT and cancels the other.
+  const retry = ctx.loadPage();
+  assert.equal(requests.length, 4);
+  timers.filter((t) => t[1] === 15000).at(-2)[0]();
+  assert.equal(await retry, false);
+  assert.equal(last()[1].opts.signal.aborted, true);
+  assert.equal(nodes["load-text"].textContent, "load_failed:request_timed_out");
+  // The history is not part of the load: a history that never answers
+  // leaves the lock free.
+  ctx.loadHistory = () => new Promise(() => {});
+  const shown = ctx.loadPage();
+  last()[0].answer({});
+  last()[1].answer({});
+  assert.equal(await shown, true);
+  assert.equal(ctx.pageLoad, null);
+});
+
+test("a config that is not an object, such as a proxy's page, keeps the app hidden until a retry reads one", async () => {
+  const bodies = [async () => { throw new SyntaxError("Unexpected token <"); }, null, ["a"]];
+  for (const body of bodies) {
+    const { ctx, nodes, last } = loadPageContext();
+    const load = ctx.loadPage();
+    last()[0].answer({});
+    last()[1].answer(body);
+    assert.equal(await load, false);
+    assert.equal(ctx.contentReady, false);
+    assert.equal(nodes.app.hidden, true);
+    assert.equal(ctx.pageStateReady, false);
+    assert.deepEqual(plain(ctx.rawConfig), {});
+    assert.equal(nodes["load-section"].hidden, false);
+    assert.equal(nodes["load-text"].textContent, "load_failed:bad_response");
+    assert.equal(nodes["load-retry"].hidden, false);
+    // Retry, as the button does.
+    const retry = ctx.loadPage();
+    last()[0].answer({});
+    last()[1].answer({});
+    await retry;
+    assert.equal(nodes.app.hidden, false);
+    assert.equal(nodes["load-section"].hidden, true);
+  }
+  assert.match(source, /\$\("load-retry"\)\.addEventListener\("click", function \(\) \{ loadPage\(\); \}\);/);
+  assert.match(pageHtml(), /<div id="load-section" class="card" hidden>/);
+  assert.match(pageHtml(), /<button id="load-retry"[^>]*data-i18n="retry"/);
+});
+
+test("a 401 before any answers asks for the key, and the key entered is stored and loads the page anew", async () => {
+  const { ctx, nodes, calls, requests, stored, last, enterKey } = loadPageContext();
+  // Opened without a key: the status answers 401, the config is still on
+  // its way and will not stop when cancelled.
+  ctx.holdOn = true;
+  const keyless = ctx.loadPage();
+  ctx.holdOn = false;
+  const [status, config] = last();
+  status.answer({ error: "unauthorized" }, 401);
+  await settle();
+  assert.equal(nodes["key-section"].hidden, false);
+  assert.equal(nodes["key-error"].hidden, true);
+  assert.equal(nodes["load-section"].hidden, true, "the key form shows without a failure");
+  assert.equal(ctx.pageLoad, null);
+  assert.equal(config.opts.signal.aborted, true, "the load is cancelled");
+  assert.equal(ctx.reloads, 0);
+  // The key entered is stored and the page loads anew with it.
+  assert.equal(enterKey("right"), null);
+  assert.equal(stored.k, "right");
+  assert.equal(ctx.reloads, 1);
+  assert.equal(requests.length, 2, "this page sends nothing with the key");
+  config.answer({ mask_accounts: false });
+  assert.equal(await keyless, false);
+  assert.deepEqual(calls, []);
+  // The reloaded page sends the stored key; a wrong one asks again, with
+  // the reason, and does not reload.
+  const other = loadPageContext();
+  other.ctx.key = other.stored.k = "wrong";
+  const wrong = other.ctx.loadPage();
+  other.last()[0].answer({}, 401);
+  assert.equal(await wrong, false);
+  assert.equal(other.nodes["key-error"].textContent, "key_invalid");
+  assert.equal(other.nodes["key-error"].hidden, false);
+  assert.equal(other.nodes.app.hidden, true);
+  assert.equal(other.stored.k, undefined);
+  assert.equal(other.ctx.reloads, 0);
+});
+
+test("without localStorage the key entered loads on the page, which has taken nothing", async () => {
+  const { ctx, nodes, calls, last, enterKey } = loadPageContext();
+  ctx.localStorage = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); }, removeItem: () => { throw new Error("denied"); } };
+  ctx.holdOn = true;
+  const keyless = ctx.loadPage();
+  ctx.holdOn = false;
+  const [status, config] = last();
+  status.answer({}, 401);
+  await settle();
+  assert.equal(nodes["key-section"].hidden, false);
+  const load = enterKey("right");
+  assert.equal(ctx.reloads, 0);
+  assert.equal(nodes["key-section"].hidden, true);
+  assert.deepEqual(last().map((r) => r.key), ["Bearer right", "Bearer right"]);
+  // The old config arriving then changes nothing.
+  config.answer({ mask_accounts: false });
+  assert.equal(await keyless, false);
+  assert.deepEqual(calls, []);
+  last()[1].answer({ mask_accounts: true });
+  last()[0].answer({});
+  assert.equal(await load, true);
+  assert.equal(nodes.app.hidden, false);
+  assert.equal(ctx.masked, true);
+});
+
+test("once the page has taken the answers of a key, a 401 reloads it and keeps the stored key, so it asks with the reason", async () => {
+  // Before it shows: the chart state is still being restored when a
+  // request of the page, such as the language report, answers 401.
+  let restored;
+  const early = loadPageContext({ restoreChartState: () => new Promise((resolve) => { restored = resolve; }) });
+  early.ctx.key = early.stored.k = "old";
+  const loading = early.ctx.loadPage();
+  early.last()[0].answer({});
+  early.last()[1].answer({ mask_accounts: false });
+  await settle();
+  const report = early.ctx.api("POST", "api/language", {});
+  early.requests.at(-1).answer({ error: "unauthorized" }, 401);
+  await assert.rejects(report, /unauthorized/);
+  assert.equal(early.ctx.reloads, 1);
+  assert.equal(early.stored.k, "old");
+  assert.equal(early.nodes["key-section"].hidden, true, "the reloaded page asks for the key");
+  // The load is dropped: it does not show the page while it reloads.
+  restored();
+  assert.equal(await loading, false);
+  assert.equal(early.nodes.app.hidden, true);
+  assert.equal(early.calls.some((c) => c.startsWith("renderStatus")), false);
+
+  // After it has shown.
+  const { ctx, nodes, requests, stored, last } = loadPageContext();
+  ctx.key = stored.k = "old";
+  const load = ctx.loadPage();
+  last()[0].answer({});
+  last()[1].answer({ mask_accounts: false });
+  assert.equal(await load, true);
+  const again = ctx.api("POST", "api/language", {});
+  requests.at(-1).answer({ error: "unauthorized" }, 401);
+  await assert.rejects(again, /unauthorized/);
+  assert.equal(ctx.reloads, 1);
+  assert.equal(nodes.app.hidden, true);
+  assert.equal(nodes["key-section"].hidden, true);
+  assert.equal(stored.k, "old");
+  // After the reload the stored key answers 401 before any answers, which
+  // asks with the reason (see the tests above).
+});
+
+test("a key a header cannot carry is not taken, and a stored one is asked for again at once", async () => {
+  const { ctx, nodes, requests, stored, enterKey } = loadPageContext();
+  ctx.askForKey("");
+  for (const bad of ["密钥abc", "abc😀", "ab\tc", "abcé", "ab\x7fc"]) {
+    assert.equal(enterKey(bad), null);
+    assert.equal(stored.k, undefined, bad);
+    assert.equal(ctx.reloads, 0);
+    assert.equal(nodes["key-error"].hidden, false);
+    assert.equal(nodes["key-error"].textContent, "key_format");
+    assert.equal(nodes["key-section"].hidden, false);
+  }
+  assert.equal(requests.length, 0);
+  // Spaces inside a key, as in a hand-written admin_key, are kept.
+  enterKey("llad_A-z0~! b");
+  assert.equal(stored.k, "llad_A-z0~! b");
+  assert.equal(ctx.reloads, 1);
+  // A bad key stored earlier, such as by an older page: asked for with
+  // the reason, without a request, a failure card or a retry.
+  const other = loadPageContext();
+  other.stored.k = "坏的key";
+  other.ctx.begin();
+  assert.equal(other.requests.length, 0);
+  assert.equal(other.stored.k, undefined);
+  assert.equal(other.ctx.key, "");
+  assert.equal(other.nodes["key-section"].hidden, false);
+  assert.equal(other.nodes["key-error"].textContent, "key_invalid");
+  assert.equal(other.nodes["load-section"].hidden, true);
+  // A good stored key starts the load with it.
+  for (const stored of ["good", "my admin key"]) {
+    const good = loadPageContext();
+    good.stored.k = stored;
+    good.ctx.begin();
+    assert.deepEqual(good.requests.map((r) => r.key), ["Bearer " + stored, "Bearer " + stored]);
+    assert.equal(good.nodes["key-section"].hidden, true);
+  }
+  assert.match(source, /\n  begin\(\);\n\}\)\(\);\s*$/);
+});
+
+test("the old masking switch masks before the page shows", async () => {
+  const { ctx, calls, stored, last } = loadPageContext();
+  stored["lamplighter-mask-accounts"] = "1";
+  ctx.oldMask = ctx.readOldMask();
+  const load = ctx.loadPage();
+  last()[0].answer({});
+  last()[1].answer({});
+  assert.equal(await load, true);
+  await settle();
+  assert.deepEqual(calls.slice(0, 6), ["useStatus", "useConfig", "mask:true", 'write:{"mask_accounts":true}', "restoreChart:{}", "renderStatus:shown:true"]);
+  assert.equal(stored["lamplighter-mask-accounts"], undefined);
+});
+
+test("nothing that names an account is drawn while the content is not ready", () => {
+  for (const name of ["renderStatus", "renderChart"]) {
+    const body = source.match(new RegExp("  function " + name + "\\(\\) \\{\\n([^]*?)\\n  }"))[1];
+    assert.match(body.split("\n").filter((l) => !/^\s*\/\//.test(l))[0], /^\s*if \(!contentReady\) return;$/, name);
+  }
+  let drawn = 0;
+  const ctx = context(["renderStatus"], { contentReady: false, sortAccounts: () => { drawn++; } });
+  ctx.renderStatus();
+  assert.equal(drawn, 0);
+  assert.match(source, /if \(status && contentReady\) renderEvents\(\);/);
+  // The timer and a return to the page retry while the content is not ready.
+  assert.match(source, /if \(document\.hidden \|\| !magpie\.visible \|\| keyAsked\(\)\) return;\n\s*if \(!contentReady\) loadPage\(\);/);
+  assert.match(pageHtml(), /<main id="app" hidden>/);
+});
+
+test("a failed page state shows once in a toast and stays at the chart switch until it saves", () => {
+  const toasts = [];
+  const heading = saveNode("LEGEND");
+  const input = saveNode("INPUT", { name: "remember_chart_filters" });
+  const ctx = stateContext(["pageStateSaved"], {
+    PAGE_STATE_SWITCH: { chart_view: "remember_chart_filters" }, pageStateFailed: {},
+    $: () => ({ elements: { remember_chart_filters: input } }),
+    toast: (text) => toasts.push(text),
+  });
+  ctx.saveHost = () => heading;
+  ctx.translate = ((base) => (key, ...args) => key === "state_save_failed" ? "not saved: " + args[0] : base(key, ...args))(ctx.translate);
+  // The switch's own save succeeded; the state then fails twice.
+  ctx.setSaveState(heading, "saved", "saved", input);
+  ctx.pageStateSaved("chart_view", new Error("offline"));
+  ctx.pageStateSaved("chart_view", new Error("offline"));
+  assert.deepEqual(toasts, ["not saved: offline"]);
+  assert.match(heading.textContent, /remember_chart_filters save failed: offline/);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  // A later save of the switch keeps the failure; a saved state clears it.
+  ctx.setSaveState(heading, "saved", "saved", input);
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  ctx.pageStateSaved("chart_view", null);
+  assert.equal(input.getAttribute("aria-invalid"), null);
+  assert.equal(heading.textContent, "saved");
+  // A write that carries the switch shows at the switch only.
+  ctx.pageStateSaved("chart_view", new Error("down"), true);
+  assert.equal(toasts.length, 1);
+  assert.equal(input.getAttribute("aria-invalid"), null);
+  // Masking and the resets have no switch: a toast only.
+  ctx.pageStateSaved("mask_accounts", new Error("offline"));
+  assert.equal(toasts.length, 2);
+  ctx.pageStateSaved("mask_accounts", new Error("unauthorized"));
+  assert.equal(toasts.length, 2);
+});
+
+test("a patch of page state only goes without a config token and needs no applying", async () => {
+  const sent = [];
+  let answer = (body) => body;
+  const ctx = context(["patchConfig", "keepSaved"], {
+    CONFIG_API: "api/config", savedTokens: [], newConfigToken: () => "t1", pendingOrder: null,
+    rawConfig: { mask_accounts: true, chart_view: { window: "7d" }, bark_url: "a" },
+    api: async (method, p, body) => { sent.push(plain(body)); return answer(body); },
+  });
+  vm.runInContext(pageVar("PAGE_STATE_KEYS"), ctx);
+  // The plugin answers with the saved config: rawConfig takes the patched
+  // keys from it, as saved, and keeps the others.
+  answer = () => ({ mcp_public_url: "x.com", remember_chart_filters: true });
+  assert.equal(await ctx.patchConfig({ mask_accounts: null, mcp_public_url: " x.com ", chart_view: { window: "5h" } }), "");
+  assert.deepEqual(plain(ctx.rawConfig), { mcp_public_url: "x.com", bark_url: "a" });
+  answer = () => null;
+  assert.equal(await ctx.patchConfig({ mask_accounts: true, bark_url: "b" }), "t1");
+  assert.deepEqual(sent, [{ mask_accounts: null, mcp_public_url: " x.com ", chart_view: { window: "5h" } }, { mask_accounts: true, bark_url: "b", config_token: "t1" }]);
+  assert.deepEqual(plain(ctx.savedTokens), ["t1"]);
+  assert.deepEqual(plain(ctx.rawConfig), { mcp_public_url: "x.com", bark_url: "b", mask_accounts: true }, "without a config in the answer, the sent values");
+  // The same keys as config.IsPageState.
+  const goKeys = [...fs.readFileSync(path.join(__dirname, "..", "config", "config.go"), "utf8")
+    .match(/var pageStateKeys = map\[string\]bool\{([^}]*)\}/)[1].matchAll(/"(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...ctx.PAGE_STATE_KEYS].sort(), goKeys.sort());
+  const said = [];
+  const applied = context(["showApplied"], { translate: (k) => k });
+  assert.equal(await applied.showApplied((state, text) => said.push(state + ":" + text), ""), true);
+  assert.deepEqual(said, ["saved:save_saved"]);
+});
+
+// publicUrl with the expressions it uses, and the functions names.
+function publicUrlContext(names = [], globals = {}) {
+  const ctx = context(["publicUrl", ...names], globals);
+  for (const name of ["PUBLIC_URL_TRIM", "PUBLIC_URL_FORM"]) vm.runInContext(pageVar(name), ctx);
+  return ctx;
+}
+
+test("the public MCP address is a setting that accepts only http and https addresses", async () => {
+  const url = publicUrlContext();
+  // The cases config.MCPPublicURLValid is tested with: both accept the
+  // same addresses.
+  const cases = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "config", "testdata", "public_urls.json"), "utf8"));
+  assert.ok(cases.length > 30);
+  for (const [value, want] of cases) assert.equal(url.publicUrl(value), want, JSON.stringify(value));
+  // The expressions are those of the Go check.
+  const go = fs.readFileSync(path.join(__dirname, "..", "config", "config.go"), "utf8");
+  assert.equal(url.PUBLIC_URL_FORM.source.replace(/\\\//g, "/"), go.match(/publicURLForm += regexp\.MustCompile\(`([^`]*)`\)/)[1]);
+  const ctx = context(["topKey", "setPath", "buildPatch", "mcpKey"], {
+    rawConfig: { mcp_public_url: "https://old.example.com" }, status: { config: {} },
+    $: () => ({ elements: [{ name: "mcp_public_url", value: "  ", getAttribute: () => null, type: "text" }] }),
+  });
+  assert.deepEqual(plain(ctx.buildPatch("mcp_public_url")), { mcp_public_url: null });
+  const field = { name: "mcp_public_url", value: "mcp.example.com/mcp/", getAttribute: () => null, type: "text" };
+  const base = publicUrlContext(["mcpBaseUrl"], {
+    $: () => ({ elements: { mcp_public_url: field, public_listen: { value: "0.0.0.0:8318" } } }),
+    status: null, publicState: () => null, MCP_LISTEN: "127.0.0.1:8318", location: { hostname: "nas" },
+  });
+  assert.equal(base.mcpBaseUrl(), "https://mcp.example.com");
+  field.value = "";
+  assert.equal(base.mcpBaseUrl(), "http://nas:8318");
+  field.value = "ftp://x.com";
+  assert.equal(base.mcpBaseUrl(), "http://nas:8318", "an invalid address is not offered to clients");
+  // /mcp comes off the path only, never off a host named mcp.
+  for (const [value, want] of [["mcp", "https://mcp"], ["mcp/", "https://mcp"], ["mcp/mcp", "https://mcp"], ["http://mcp:8318/mcp/", "http://mcp:8318"],
+    ["https://x.com/a/mcp//", "https://x.com/a"], ["https://x.com/mcpx", "https://x.com/mcpx"], ["https://x.com/a/", "https://x.com/a"]]) {
+    field.value = value;
+    assert.equal(base.mcpBaseUrl(), want, value);
+  }
+  assert.match(pageHtml(), /<input id="mcp-public-url" name="mcp_public_url"/);
+  const effective = context(["effectiveConfig"], { status: { config: {} }, rawConfig: { mcp_public_url: "https://mcp.example.com" }, MCP_LISTEN: "x" });
+  assert.equal(effective.effectiveConfig().mcp_public_url, "https://mcp.example.com");
+
+  // Saving refuses an invalid address before any request.
+  const heading = saveNode("LEGEND");
+  const input = saveNode("INPUT", { name: "mcp_public_url" });
+  input.type = "text";
+  input.value = "ftp://x.com";
+  input.checkValidity = () => true;
+  const sent = [];
+  const save = stateContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "rereadConfig"], {
+    rawConfig: {}, status: { config: {} }, saveQueue: Promise.resolve(), THRESHOLDS: [],
+    $: () => ({ elements: [input] }), renderIgnitionOff: () => {}, autofilled: () => false,
+    patchConfig: async (patch) => { sent.push(plain(patch)); return ""; },
+    showApplied: async (say) => { say("saved", "save_saved"); return true; }, refillSaved: () => {}, loadConfig: async () => {},
+  });
+  for (const name of ["PUBLIC_URL_TRIM", "PUBLIC_URL_FORM"]) vm.runInContext(pageVar(name), save);
+  vm.runInContext(source.match(/  function publicUrl\([^]*?\n  }/)[0], save);
+  save.saveHost = () => heading;
+  save.translate = ((base) => (key, ...args) => key === "mcp_public_url_invalid" ? "not an http address" : base(key, ...args))(save.translate);
+  save.saveField({ target: input });
+  await save.saveQueue;
+  assert.deepEqual(sent, []);
+  assert.match(heading.textContent, /mcp_public_url save failed: not an http address/);
+  input.value = "mcp.example.com";
+  save.saveField({ target: input });
+  await save.saveQueue;
+  assert.deepEqual(sent, [{ mcp_public_url: "mcp.example.com" }]);
+});
+
+test("a saved public address stays in the field while the config is read again", async () => {
+  const heading = saveNode("LEGEND");
+  const input = saveNode("INPUT", { name: "mcp_public_url" });
+  input.type = "text";
+  input.value = "https://old.example.com";
+  const sent = [], gets = [];
+  let answer = null;
+  const ctx = publicUrlContext(["saveField", "captureIntent", "buildPatch", "inputTop", "topKey", "setPath", "getPath", "noteEdit", "rereadConfig",
+    "patchConfig", "keepSaved", "showApplied", "refillSaved", "fillSettings", "fillInput", "effectiveConfig", ...saveFunctions], {
+    rawConfig: { mcp_public_url: "https://old.example.com" }, status: { config: {} }, saveQueue: Promise.resolve(), THRESHOLDS: [],
+    savedTokens: [], pendingOrder: null, CONFIG_API: "api/config", MCP_LISTEN: "127.0.0.1:8318", newConfigToken: () => "t",
+    saveSerial: 0, translate: (k) => k, saveText: (t) => t, saveItemLabel: (i) => i.name, el: (tag, attrs) => saveNode(tag.toUpperCase(), attrs),
+    clear: (n) => { n.textContent = ""; }, maskedNodes: (t) => [{ textContent: t }],
+    $: (id) => ({ settings: { elements: [input] }, "timezone-note": {} })[id], document: { activeElement: null, querySelectorAll: () => [] },
+    PAGE_STATE_KEYS: [], renderIgnitionOff: () => {}, autofilled: () => false, providersWithGroups: () => [], renderTimezone: () => {},
+    timezoneText: () => "", renderMcp: () => {},
+    // The plugin answers with the saved config, trimmed; the GET after the
+    // save answers only when the test says so.
+    api: (method, p, body) => { sent.push(plain(body)); return answer || Promise.resolve(Object.assign({}, body.mcp_public_url ? { mcp_public_url: body.mcp_public_url.trim() } : {})); },
+    loadConfig: () => new Promise((resolve, reject) => gets.push({ resolve, reject })),
+  });
+  vm.runInContext(pageVar("PAGE_STATE_KEYS"), ctx);
+  ctx.saveHost = () => heading;
+  const save = async (value) => {
+    input.value = value;
+    ctx.noteEdit(input);
+    input.settingsDirty = true;
+    ctx.saveField({ target: input });
+    await settle();
+  };
+  await save("  new.example.com ");
+  assert.deepEqual(sent.at(-1), { mcp_public_url: "new.example.com" });
+  assert.equal(gets.length, 1, "the GET is still on its way");
+  assert.equal(input.value, "new.example.com", "the field shows the saved value, not the one before");
+  assert.equal(ctx.rawConfig.mcp_public_url, "new.example.com");
+  assert.match(heading.textContent, /save_saved/);
+  // The save queue goes on once the GET answers.
+  gets.shift().resolve();
+  await save("");
+  assert.deepEqual(sent.at(-1), { mcp_public_url: null });
+  assert.equal(input.value, "");
+  assert.equal("mcp_public_url" in ctx.rawConfig, false);
+  gets.shift().resolve();
+  // Typing again while the save is under way: the new text stays.
+  let reply;
+  answer = new Promise((resolve) => { reply = resolve; });
+  await save("a.example.com");
+  input.value = "b.example.com";
+  ctx.noteEdit(input);
+  reply({ mcp_public_url: "a.example.com" });
+  await settle();
+  assert.equal(input.value, "b.example.com");
+  assert.equal(input.settingsDirty, true);
+  gets.shift().resolve();
+  // A save stands when the config cannot be read again after it.
+  answer = null;
+  await save("c.example.com");
+  gets.shift().reject(new Error("down"));
+  await settle();
+  assert.match(heading.textContent, /save_saved/);
+  assert.doesNotMatch(heading.textContent, /fail/);
+  assert.equal(ctx.rawConfig.mcp_public_url, "c.example.com");
+  // So do the other saves: none waits on loadConfig for its result.
+  assert.doesNotMatch(source, /return loadConfig\(\);/);
+  assert.match(source, /function rereadConfig\(\) \{\n\s*return loadConfig\(\)\.catch\(function \(\) \{\}\);/);
+});
+
+test("the chart switches are not refilled after the first restore", () => {
+  const filters = { name: "remember_chart_filters", type: "checkbox", checked: true, getAttribute: () => null, hasAttribute: () => false };
+  const other = { name: "mask_accounts_note", type: "checkbox", checked: false, getAttribute: () => null, hasAttribute: () => false };
+  const ctx = context(["fillSettings", "fillInput", "getPath"], {
+    effectiveConfig: () => ({ remember_chart_filters: false, mask_accounts_note: true }), status: {}, rawConfig: {},
+    document: { activeElement: null, querySelectorAll: () => [] }, providersWithGroups: () => [],
+    $: (id) => id === "settings" ? { elements: [filters, other] } : {}, saveControls: () => [],
+    renderTimezone: () => {}, timezoneText: () => "", renderIgnitionOff: () => {}, renderMcp: () => {},
+  });
+  // Signed in again with a config whose switch is off: the switch keeps the
+  // state this page restored and saves.
+  ctx.fillSettings();
+  assert.equal(filters.checked, true);
+  assert.equal(other.checked, true);
+});
+
+test("the client commands quote the address and the key for the shell, and the JSON is built by JSON.stringify", () => {
+  const { execFileSync } = require("node:child_process");
+  const ctx = context(["mcpSnippets", "shellQuote"]);
+  const url = "https://x.com/'$(touch /tmp/pwned)'`id`/mcp", secret = "k'ey";
+  const snippets = Object.fromEntries(ctx.mcpSnippets(url, secret));
+  assert.equal(ctx.shellQuote("a'b"), "'a'\\''b'");
+  // The shell reads each command back as the words it was built from.
+  const words = (command) => execFileSync("sh", ["-c", "for w in " + command.replace(/^\S+ /, "") + "; do printf '%s\\n' \"$w\"; done"], { encoding: "utf8" }).trim().split("\n");
+  assert.deepEqual(words(snippets.mcp_claude), ["mcp", "add", "--transport", "http", "lamplighter", url, "--header", "Authorization: Bearer k'ey"]);
+  assert.deepEqual(words(snippets.mcp_stdio), ["mcp-remote", url, "--header", "Authorization: Bearer k'ey"]);
+  assert.deepEqual(JSON.parse(snippets.mcp_json), { mcpServers: { lamplighter: { type: "http", url, headers: { Authorization: "Bearer k'ey" } } } });
 });

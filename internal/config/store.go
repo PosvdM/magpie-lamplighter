@@ -88,8 +88,10 @@ func (s *Store) Raw() map[string]json.RawMessage {
 }
 
 // Patch replaces the given top-level keys, a null value deleting the key.
-// The result must parse and pass Config.Check; it is then written to the
-// file whole (a temporary file and a rename) and returned.
+// chart_view and chart_expanded are dropped while remember_chart_filters
+// and remember_chart_expanded are off. The result must parse and pass
+// Config.Check; it is then written to the file whole (a temporary file and
+// a rename) and returned.
 //
 // Patch does not apply the result; a caller that applies it holds its own
 // lock across Patch and the apply, so that the order of the saved
@@ -108,11 +110,20 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 		}
 		next[key] = value
 	}
-	data, err := json.MarshalIndent(next, "", "  ")
+	// The state a remember switch keeps is not kept while the switch is
+	// off: a page opened before the switch was turned off elsewhere may
+	// still write it. It is dropped before parsing, so that a state the
+	// switch would not keep cannot fail the patch either.
+	for state, on := range rememberSwitches {
+		if next[state] != nil && !switchOn(next[on]) {
+			delete(next, state)
+		}
+	}
+	cfg, err := parseKeys(next)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg, err := Parse(data)
+	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return Config{}, err
 	}
@@ -124,6 +135,28 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	}
 	s.raw = next
 	return cfg, nil
+}
+
+// rememberSwitches maps the page state kept by a remember switch to the
+// switch.
+var rememberSwitches = map[string]string{
+	"chart_view":     "remember_chart_filters",
+	"chart_expanded": "remember_chart_expanded",
+}
+
+// switchOn reports whether the raw value of a switch is true. A value that
+// is not a boolean counts as off; parsing the config then refuses it.
+func switchOn(raw json.RawMessage) bool {
+	var on bool
+	return raw != nil && json.Unmarshal(raw, &on) == nil && on
+}
+
+func parseKeys(keys map[string]json.RawMessage) (Config, error) {
+	data, err := json.MarshalIndent(keys, "", "  ")
+	if err != nil {
+		return Config{}, err
+	}
+	return Parse(data)
 }
 
 func writeFile(path string, data []byte) error {

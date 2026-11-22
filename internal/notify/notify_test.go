@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -370,7 +371,7 @@ func TestResetFeedSendsLatestPostPerSchedule(t *testing.T) {
 	if sent := ProcessResetRecords(context.Background(), st, next, false, sender, shanghai, LangZH, now); sent != 1 {
 		t.Fatalf("only the latest post is sent, got %d: %+v", sent, sender.sent)
 	}
-	if want := "预计：10/07 15:00～10/08 15:00\n置信度：82%"; !strings.HasPrefix(sender.sent[0].Body, want) {
+	if want := "预计：10/07 周三 15:00～10/08 周四 15:00\n置信度：82%"; !strings.HasPrefix(sender.sent[0].Body, want) {
 		t.Fatalf("body %q, want prefix %q", sender.sent[0].Body, want)
 	}
 	late := bankedSchedule("late", "pending", "2026-10-07T19:00:00Z", start, end, 0.9)
@@ -449,15 +450,54 @@ func TestScheduleText(t *testing.T) {
 		r          ResetRecord
 		lang, want string
 	}{
-		{exact, LangZH, "10/09 07:00"},
-		{deadline, LangZH, "10/08 07:00 前"},
-		{deadline, LangEN, "by 10/08 07:00"},
-		{bankedSchedule("c", "pending", "", "2026-10-07T07:00:00Z", "2026-10-08T07:00:00Z", 0.9), LangEN, "10/07 07:00–10/08 07:00"},
-		{noWindow, LangZH, "10/09 07:00"},
+		{exact, LangZH, "10/09 周五 07:00"},
+		{deadline, LangZH, "10/08 周四 07:00 前"},
+		{deadline, LangEN, "by 10/08 Thu 07:00"},
+		{bankedSchedule("c", "pending", "", "2026-10-07T07:00:00Z", "2026-10-08T07:00:00Z", 0.9), LangEN, "10/07 Wed 07:00–10/08 Thu 07:00"},
+		{noWindow, LangZH, "10/09 周五 07:00"},
 	} {
-		if got := scheduleText(c.r, time.UTC, c.lang); got != c.want {
+		format := func(t time.Time) string { return FormatTime(t, time.UTC, c.lang) }
+		if got := scheduleText(c.r, format, c.lang); got != c.want {
 			t.Fatalf("scheduleText(%v) = %q, want %q", c.r["id"], got, c.want)
 		}
+	}
+}
+
+func TestFormatTime(t *testing.T) {
+	at := time.Date(2026, 11, 22, 19, 0, 0, 0, time.UTC)
+	shanghai := time.FixedZone("CST", 8*3600)
+	for _, c := range []struct {
+		loc        *time.Location
+		lang, want string
+	}{
+		{shanghai, LangZH, "11/23 周一 03:00"},
+		{shanghai, LangEN, "11/23 Mon 03:00"},
+		{time.UTC, LangEN, "11/22 Sun 19:00"},
+		{time.UTC, "fr", "11/22 周日 19:00"},
+	} {
+		if got := FormatTime(at, c.loc, c.lang); got != c.want {
+			t.Fatalf("FormatTime(%v, %s) = %q, want %q", c.loc, c.lang, got, c.want)
+		}
+	}
+	end := time.Date(2026, 10, 8, 7, 0, 0, 0, time.UTC)
+	if got := CircuitMessage(LangZH, "Claude", end, "boom", shanghai).Body; !strings.Contains(got, "10/08 周四 15:00") {
+		t.Fatalf("circuit body %q", got)
+	}
+	limited := CredentialMessage(LangEN, "Claude", Problem{Kind: KindRateLimited, Summary: "slow down", Until: end}, time.UTC)
+	if !strings.Contains(limited.Body, "10/08 Thu 07:00") {
+		t.Fatalf("rate limit body %q", limited.Body)
+	}
+}
+
+// The content kept for a sent schedule has no weekday, so that a later post
+// repeating the schedule is not taken for a change.
+func TestEventContentHasNoWeekday(t *testing.T) {
+	r := bankedSchedule("c", "pending", "", "2026-10-07T07:00:00Z", "2026-10-08T07:00:00Z", 0.9)
+	if got := eventContent(r); !strings.Contains(got, "10/07 07:00–10/08 07:00") || strings.Contains(got, "Wed") {
+		t.Fatalf("event content %q", got)
+	}
+	if got := ResetMessage(r, time.UTC, LangEN).Body; !strings.Contains(got, "10/07 Wed 07:00–10/08 Thu 07:00") {
+		t.Fatalf("message body %q", got)
 	}
 }
 
@@ -477,7 +517,7 @@ func TestEnglishNotifications(t *testing.T) {
 	a.ProcessGroup(context.Background(), st, group(26, 80, now), now)
 	later := now.Add(5 * time.Hour)
 	a.ProcessGroup(context.Background(), st, group(100, 80, later), later)
-	if len(sender.sent) != 2 || !strings.HasPrefix(sender.sent[0].Body, "5h: 26% | 05h | ") || sender.sent[1].Title != "✅ GPT#eg · 5h recovered" {
+	if len(sender.sent) != 2 || !regexp.MustCompile(`^5h: 26% \| 05h \| \d\d/\d\d (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d`).MatchString(sender.sent[0].Body) || sender.sent[1].Title != "✅ GPT#eg · 5h recovered" {
 		t.Fatalf("got %+v", sender.sent)
 	}
 	if got := CircuitMessage(LangEN, "Claude", now, "boom", time.UTC).Title; got != "⚠️ Claude ignition paused" {

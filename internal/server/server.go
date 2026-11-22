@@ -276,6 +276,10 @@ func (s *Server) routes(page []byte) http.Handler {
 }
 
 // patchConfig saves patch, applies the result and returns the saved keys.
+// A patch of only the page's own state (config.IsPageState) is saved
+// without being applied: the engine and the public listener are not
+// configured again, and config_token stays the one of the last applied
+// save.
 // Two patches never interleave: otherwise the later one could be saved
 // last and applied first, leaving the running configuration different
 // from the file.
@@ -298,8 +302,23 @@ func (s *Server) patchConfig(patch map[string]json.RawMessage) (map[string]json.
 	if s.patched != nil {
 		s.patched()
 	}
+	// The page's own state is only saved: applying it would wake the
+	// background loop, which runs the ignitions due within its lead early,
+	// and move config_applied_token, which the page's test notification
+	// waits for.
+	if config.IsPageState(patch) && s.applyPageState(cfg) {
+		return s.store.Raw(), nil
+	}
 	s.apply(cfg, nil)
 	return s.store.Raw(), nil
+}
+
+// applyPageState hands the page state of cfg to the engine for the status;
+// see engine.ConfigurePageState.
+func (s *Server) applyPageState(cfg config.Config) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped || s.engine.ConfigurePageState(cfg)
 }
 
 func (s *Server) action(w http.ResponseWriter, err error) {

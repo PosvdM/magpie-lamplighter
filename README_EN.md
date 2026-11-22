@@ -144,7 +144,7 @@ The public listener lets other devices reach Lamplighter in a browser or over MC
 
 With both the page and MCP off, nothing listens. The two keys do not stand in for each other: the admin key cannot reach `/mcp`, and the MCP key cannot reach the page and API. The two keys must differ: the page refuses to save equal keys, and when equal keys are written into `config.json` by hand, the public listener serves neither the page and API nor `/mcp`, and the top of the page shows why.
 
-The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. Page preferences such as blurring accounts are also kept per browser.
+The first time the page is opened through the public address, it asks for the admin key ("Management key required") and keeps it in the browser. When the admin key is replaced elsewhere, an open page reloads and asks for it again. Page preferences such as blurring accounts and the chart choices are kept in the Lamplighter config and shared by every device (a browser that blurred accounts before the upgrade saves that to the config the first time the page opens, and every device shares it from then on); the last **Quota | Settings** view is kept per browser.
 
 Listening on the public internet directly is not recommended. Keep the public listener on loopback, let a reverse proxy on the same host terminate TLS, and add a firewall or allow-list as needed. The proxy must pass the `Authorization` and `MCP-Protocol-Version` headers; `/mcp` refuses browser requests whose `Origin` is not local, which ordinary MCP agents do not send.
 
@@ -190,18 +190,18 @@ Authentication and listener details are in [对外监听](./docs/architecture.md
 - five colors shared by the quota bars and the chart: **Full** at a raw 100%, **Empty** at 0%, and **High**, **Medium** and **Low** in between, split by the first two alert thresholds; 99.6% is not colored as full even though it shows as 100%;
 - the next ignition time and current reset time of each quota group (both with the weekday), the latest result and the failure-protection state, with **Ignite now**; this part is hidden while ignition is off;
 - the quota history chart:
-  - First pick the 5-hour or the 7-day quota. The 5-hour quota offers 1, 3, 6, 12, 24 and 26 hours (6 by default); the 7-day quota offers 1, 4, 8 and 15 days, 1 month (from this day last month) and 36 days (8 days by default). Windows of other lengths appear only on the account cards. With `remember_chart_filters` on, the page remembers the last choice.
+  - First pick the 5-hour or the 7-day quota. The 5-hour quota offers 1, 3, 6, 12, 24 and 26 hours (6 by default); the 7-day quota offers 1, 4, 8 and 15 days, 1 month (from this day last month) and 36 days (8 days by default). Windows of other lengths appear only on the account cards. With `remember_chart_filters` (**Remember the window, range and order**) on, the page remembers the last choice on every device.
   - 1 and 3 hours, and 1 and 4 days, end at the current time. Longer ranges end at the reset time of the selected row's current window; 6 hours, for example, shows the current 5-hour window and the last hour of the previous one. The part after now is hatched.
-  - The upper part has one strip per service, colored like the quota bars by the lowest reading in each cycle. Rows follow the order of the account cards by default, or can be sorted by lowest remaining; a service with several accounts shows a weighted total, which expands into its accounts on click. While one account is missing data, the total estimates that account from its readings before and after the gap, and the detail chart draws that stretch dashed; while the latest total is estimated, no projection is drawn. A window an account no longer reports is marked **Inactive** and kept until its last sample leaves the range.
+  - The upper part has one strip per service, colored like the quota bars by the lowest reading in each cycle. Rows follow the order of the account cards by default, or can be sorted by lowest remaining; a service with several accounts shows a weighted total, which expands into its accounts when clicked again after it is selected. With `remember_chart_expanded` (**Remember expanded groups**) on, the page remembers the expanded groups, one set for the 5-hour and 7-day quotas. While one account is missing data, the total estimates that account from its readings before and after the gap, and the detail chart draws that stretch dashed; while the latest total is estimated, no projection is drawn. A window an account no longer reports is marked **Inactive** and kept until its last sample leaves the range.
   - The lower part is the selected row's curve, marking resets and ignition results, with an even-pace line that falls linearly from 100% to 0% at the scheduled reset over a 5-hour or 7-day cycle. A curve above the line means slower use than even pace. Above the curve are the current remaining, the even-pace value at this moment and the difference.
   - When the right end is the reset time, a projection is drawn from now: if the quota runs out first, the time axis marks when; if the reset comes first, the remaining quota at the reset is labeled on the right. The 5-hour quota is projected at the current rate, so the run-out time is early in the first minutes of heavy use; the 7-day quota is projected at the cycle's daily average, which is less accurate in the first day or two of a cycle.
   - The page reads the status every 30 seconds and updates the chart when new data arrives; while the mouse is over the chart, the update waits until it leaves.
   - When an account has several quota groups, such as **Gemini** and **Claude / GPT** of Antigravity, the chart, its data table, the ignition table and the events put the service before the group, as in **Antigravity · Claude / GPT**, shortened to **AG · Claude / GPT** where the chart's label column is too narrow. A group named after its service, such as the main **Claude** group of a Claude account, is not prefixed. The account cards, which show the groups under the service badge, do not, and neither do account events such as invalid credentials, whose label already names the account.
-- recent events, in columns for time, type, quota group and details; the quota group column is as wide as its longest name. A notification triggered by an event is marked at the end of that event's row as **Notified** or **Notification failed**. 5-hour resets are hidden by default; tick **Show 5-hour resets** to see them.
+- recent events, in columns for time, type, quota group and details; the quota group column is as wide as its longest name. A notification triggered by an event is marked at the end of that event's row as **Notified** or **Notification failed**. 5-hour resets are hidden by default; tick **Show 5-hour resets** to see them, and the page remembers the choice.
 
 How the chart is computed is in [页面功能](./docs/architecture.md#页面功能) (Chinese).
 
-The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the browser, separately for each computer and browser. Blurring only affects the display and does not remove anything from the API or the page.
+The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the Lamplighter config and shared by every device; when the page opens, it shows only **Loading…** until the config is read, or the reason and a **Retry** button when reading fails. Blurring only affects the display and does not remove anything from the API or the page.
 
 The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
 
@@ -255,11 +255,11 @@ Notifications use the page language from the last time the management page was o
 ```text
 🟡 Claude · 7d 48% | 03d
 
-5h: 96% | 04h | 10/04 13:50
-7d: 48% | 03d | 10/07 14:00
+5h: 96% | 04h | 10/04 Sun 13:50
+7d: 48% | 03d | 10/07 Wed 14:00
 ```
 
-Title icons: 🟡 remaining fell to the first threshold (50% by default), 🔴 to the second (20% by default) or lower, ✅ quota recovered, ⏰ reset reminder, 🎫 plan changed, 🔑 credential invalid, ⛔ account suspended, ⏳ rate limited, ✅ credential restored, ⚠️ ignition paused or another problem that needs attention. Each body line is: window, remaining quota, time until reset, reset time. The first time a quota window is seen, its state is only recorded, not notified.
+Title icons: 🟡 remaining fell to the first threshold (50% by default), 🔴 to the second (20% by default) or lower, ✅ quota recovered, ⏰ reset reminder, 🎫 plan changed, 🔑 credential invalid, ⛔ account suspended, ⏳ rate limited, ✅ credential restored, ⚠️ ignition paused or another problem that needs attention. Each body line is: window, remaining quota, time until reset, reset time. Dates and times in notifications read "month/day weekday hour:minute", such as `10/04 Sun 13:50`, or `10/04 周日 13:50` in Chinese. The first time a quota window is seen, its state is only recorded, not notified.
 
 ## Configuration
 
@@ -283,12 +283,17 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `passive_skip_seconds` | `60` | Skip the active query when Magpie has a new reading this many seconds before it; `0` never skips |
 | `passive_skip_max_minutes` | `30` | How many minutes one account may be skipped in a row |
 | `history_retention_days` | `40` | Days of quota history to keep |
-| `remember_chart_filters` | `false` | Remember the quota window, range and sort last chosen in the quota history chart, in this browser |
+| `remember_chart_filters` | `false` | Remember the quota window, range and order last chosen in the quota history chart, in `chart_view`, shared by every device |
+| `remember_chart_expanded` | `false` | Remember the multi-account groups expanded in the quota history chart, in `chart_expanded`, shared by every device |
+| `chart_view`, `chart_expanded` | empty | Written by the page: the window, order and range of each window, and the expanded group IDs (service and name, such as `claude\|Claude`), while the two settings above are on; deleted when they are turned off, and not saved while their setting is off |
+| `mask_accounts` | `false` | Written by the page: the state of the blur switch |
+| `events_show_5h_resets` | `false` | Written by the page: **Show 5-hour resets** of the event list |
 | `account_names` | empty | Account names, keyed by the account's identifier in Magpie (such as `codex/<id>`) |
 | `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
 | `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
 | `public_listen`, `web_enabled`, `admin_key`, `mcp_enabled`, `mcp_key` | | See [Public access](#public-access) |
-| `config_token` | empty | A confirmation token the page generates on each save; no need to set it |
+| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and it takes the form `host[:port][/path]`. The host name contains only ASCII letters, digits, `.` and `-`; bracketed IPv6 addresses are not supported. The whole address contains only printable ASCII characters, without spaces, `?`, `#`, `\` or a user name. Empty uses the public listen address. See [MCP](#mcp) |
+| `config_token` | empty | A confirmation token the page generates when it saves settings; no need to set it. Saves of page state only (the keys written by the page above, the two remember settings and `mcp_public_url`) leave it as it is, and the plugin does not apply the config again |
 
 The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.
 
@@ -366,7 +371,7 @@ Requests from the same machine need no key; from other machines or from outside 
 
 ### /mcp on the public listener
 
-Under **Advanced** in the Settings view, tick **Enable the MCP endpoint**; without a key, the page generates one in the same save, and a new key can also be generated separately. The same section gives client configurations for Claude Code, generic JSON and mcp-remote. For remote use, go through an HTTPS reverse proxy; see [Public access](#public-access).
+Under **Advanced** in the Settings view, tick **Enable the MCP endpoint**; without a key, the page generates one in the same save, and a new key can also be generated separately. The same section gives client configurations for Claude Code, generic JSON and mcp-remote, addressed to the address entered in **Public address (optional)** (`mcp_public_url`), or to the public listen address when none is entered. For remote use, go through an HTTPS reverse proxy; see [Public access](#public-access).
 
 The endpoint uses Streamable HTTP with protocol versions `2025-03-26` and `2025-06-18`, and returns JSON only, without SSE. Each server instance runs at most 4 tool calls at a time; beyond that it answers at once with a JSON-RPC `-32000` busy error, and the call can be retried later. Query tools time out after 10 seconds and `refresh_quotas` after 180 seconds. Protocol details are in [MCP](./docs/architecture.md#mcp) (Chinese).
 
@@ -440,7 +445,7 @@ Placeholders are escaped for where they appear: URL-encoded in the URL; JSON-str
 The JSON sent when `body` is empty:
 
 ```json
-{"source":"lamplighter","kind":"quota","title":"🔴 GPT#rk · 5h 8% | 03h","body":"5h: 8% | 03h | 10/10 19:00\n7d: 60% | 04d | 10/14 09:00","text":"…","url":"","priority":"high","label":"GPT#rk","time":"2026-10-10T16:00:00+08:00"}
+{"source":"lamplighter","kind":"quota","title":"🔴 GPT#rk · 5h 8% | 03h","body":"5h: 8% | 03h | 10/10 Sat 19:00\n7d: 60% | 04d | 10/14 Wed 09:00","text":"…","url":"","priority":"high","label":"GPT#rk","time":"2026-10-10T16:00:00+08:00"}
 ```
 
 Formats for common services follow. They are based on each service's documentation and have not all been tested.

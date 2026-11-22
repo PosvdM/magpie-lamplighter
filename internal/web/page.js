@@ -122,7 +122,9 @@
   function magpieVisible(visible) {
     var back = visible && !magpie.visible;
     magpie.visible = visible;
-    if (back && status) loadStatus().then(refreshHistory).catch(function () {});
+    if (!back || keyAsked()) return;
+    if (!contentReady) loadPage();
+    else loadStatus().then(refreshHistory).catch(function () {});
   }
 
   function magpieHello() {
@@ -209,6 +211,7 @@
       key_placeholder: "Lamplighter 管理密钥",
       key_submit: "确定",
       key_invalid: "管理密钥无效，请重新输入。",
+      key_format: "管理密钥只能包含英文字母、数字和符号。",
       refresh_all: "立即刷新全部",
       quota: "额度",
       ignition: "自动点火",
@@ -269,8 +272,11 @@
       ignite_groups: "{0} 点火额度组", no_ignition: "不支持点火", list_or: " 或 ",
       codex_reset_enabled: "转发 Did Codex Reset 发布的 Codex 重置信号",
       codex_reset_pending: "首次开启时推送当前待生效的排期",
-      chart_prefs: "额度图表", remember_chart_filters: "记住筛选条件",
-      remember_chart_filters_hint: "在当前浏览器中记住上次选择的额度窗口、时间范围和排序；关闭后每次打开页面都使用默认选择。",
+      chart_prefs: "额度图表", remember_chart_filters: "记住额度窗口、时间范围和排序",
+      remember_chart_filters_hint: "“额度变化”上次选择的额度窗口、时间范围和排序存在服务器上，各设备共用；关闭后每次打开页面都使用默认选择。",
+      remember_chart_expanded: "记住展开的分组",
+      remember_chart_expanded_hint: "“额度变化”中展开的多账号分组存在服务器上，各设备共用，5 小时和 7 天额度共用一套；关闭后每次打开页面分组都是收起的。",
+      state_save_failed: "未能保存这项选择：{0}",
       save_hint: "修改后自动保存到 Lamplighter 的 config.json 并立即应用。文本和数字在离开输入框或按回车时保存，保存结果显示在区块标题旁，高级设置按分组显示。",
       language_note: "通知语言跟随最近一次打开此页面时的页面语言，当前为{0}。",
       lang_zh: "中文", lang_en: "English",
@@ -339,7 +345,9 @@
       zone_notice: "尚未设置时区。页面中的时间按浏览器的时区显示，点火时段和通知中的时间按服务器的时区（{0}）计算。",
       zone_notice_go: "设置时区",
       save_failed: "保存失败：{0}",
-      load_failed: "加载失败：{0}",
+      load_failed: "加载失败：{0}", retry: "重试",
+      bad_response: "服务返回的不是 Lamplighter 的数据", request_timed_out: "请求超时",
+      mcp_public_url_invalid: "对外地址须为 http 或 https 地址，不能含空格、? 或 #",
       refreshed_all: "已刷新全部额度", test_sent: "测试通知已发送",
       level_full: "满", level_high: "高", level_medium: "中", level_low: "低", level_empty: "空",
       inactive: "已停用", inactive_suffix: "（已停用）", stat_last: "最后读数",
@@ -364,7 +372,7 @@
       mcp_generate: "生成新密钥", mcp_regenerate_confirm: "生成新密钥？旧密钥会立即失效，使用它的客户端需要换成新密钥。",
       mcp_status: "状态", mcp_unknown: "未知", mcp_running: "运行中", mcp_stopped: "未启动",
       mcp_public_url: "对外地址（可选）",
-      mcp_public_hint: "对外开放时请使用反向代理并配置 HTTPS，然后在这里填写对外地址，下面的配置随之更新。这个地址只保存在当前浏览器。",
+      mcp_public_hint: "对外开放时请使用反向代理并配置 HTTPS，然后在这里填写对外地址，下面的配置随之更新。",
       mcp_snippets: "客户端配置", mcp_claude: "Claude Code", mcp_json: "通用 JSON", mcp_stdio: "只支持 stdio 的客户端（mcp-remote）",
       mcp_no_key: "先生成密钥，配置中的 <key> 会换成实际的密钥。", mcp_error: "MCP 接口未启动：{0}",
       copy_failed_sandbox: "Magpie 中的页面不能写入剪贴板。请选中文本手动复制，或通过对外地址在浏览器中打开页面后复制",
@@ -387,6 +395,7 @@
       key_placeholder: "Lamplighter admin key",
       key_submit: "OK",
       key_invalid: "The admin key is not valid. Enter it again.",
+      key_format: "The admin key can only contain English letters, digits and symbols.",
       refresh_all: "Refresh all",
       quota: "Quota",
       ignition: "Ignition",
@@ -447,8 +456,11 @@
       ignite_groups: "{0} ignition groups", no_ignition: "No ignition", list_or: " or ",
       codex_reset_enabled: "Forward Codex reset signals published by Did Codex Reset",
       codex_reset_pending: "When first turned on, send the pending schedule",
-      chart_prefs: "Quota chart", remember_chart_filters: "Remember the filters",
-      remember_chart_filters_hint: "This browser remembers the last quota window, time range and order. When off, the page opens with the default choices.",
+      chart_prefs: "Quota chart", remember_chart_filters: "Remember the window, range and order",
+      remember_chart_filters_hint: "The quota window, time range and order last chosen in the quota history are kept on the server and shared by every device. When off, the page opens with the default choices.",
+      remember_chart_expanded: "Remember expanded groups",
+      remember_chart_expanded_hint: "The multi-account groups expanded in the quota history are kept on the server and shared by every device, one set for the 5-hour and 7-day quotas. When off, the page opens with the groups collapsed.",
+      state_save_failed: "This choice was not saved: {0}",
       save_hint: "Changes save to Lamplighter's config.json automatically and apply at once. Text and numbers save when you leave the field or press Enter. Save results appear beside section headings or advanced group legends.",
       language_note: "Notifications use the language of this page from the last time it was opened, now {0}.",
       lang_zh: "中文", lang_en: "English",
@@ -517,7 +529,9 @@
       zone_notice: "No time zone is set. This page shows times in the browser's time zone; the ignition hours and the times in notifications use the server's ({0}).",
       zone_notice_go: "Set time zone",
       save_failed: "Could not save: {0}",
-      load_failed: "Could not load: {0}",
+      load_failed: "Could not load: {0}", retry: "Retry",
+      bad_response: "The server did not answer with Lamplighter data", request_timed_out: "The request timed out",
+      mcp_public_url_invalid: "The public address must be an http or https address without spaces, ? or #",
       refreshed_all: "Refreshed all quota", test_sent: "Test notification sent",
       level_full: "Full", level_high: "High", level_medium: "Medium", level_low: "Low", level_empty: "Empty",
       inactive: "Inactive", inactive_suffix: " (inactive)", stat_last: "Last reading",
@@ -542,7 +556,7 @@
       mcp_generate: "Generate new key", mcp_regenerate_confirm: "Generate a new key? The old key stops working at once, and clients using it need the new one.",
       mcp_status: "Status", mcp_unknown: "Unknown", mcp_running: "Running", mcp_stopped: "Not running",
       mcp_public_url: "Public address (optional)",
-      mcp_public_hint: "To open it to other machines, put a reverse proxy with HTTPS in front and enter its address here; the configs below follow it. The address is kept in this browser only.",
+      mcp_public_hint: "To open it to other machines, put a reverse proxy with HTTPS in front and enter its address here; the configs below follow it.",
       mcp_snippets: "Client configuration", mcp_claude: "Claude Code", mcp_json: "Generic JSON", mcp_stdio: "stdio-only clients (mcp-remote)",
       mcp_no_key: "Generate a key first; it replaces <key> in the configs.", mcp_error: "The MCP endpoint is not running: {0}",
       copy_failed_sandbox: "Pages in Magpie cannot write to the clipboard. Select the text and copy it, or open the page through the public address in a browser",
@@ -599,6 +613,7 @@
     renderRangeButtons();
     renderMaskButton();
     renderCardsSnapshot();
+    if (loadState && loadState.state && !$("load-section").hidden) renderLoadCard();
     if (status) {
       renderStatus();
       $("timezone-note").textContent = timezoneText();
@@ -622,8 +637,9 @@
     $("language-note").textContent = translate("language_note", translate("lang_" + (status.language || "zh")));
   }
 
-  // timeout, in milliseconds, aborts a request that takes longer.
-  function api(method, path, body, timeout) {
+  // timeout, in milliseconds, aborts a request that takes longer; so does
+  // signal, an AbortSignal, when it aborts.
+  function api(method, path, body, timeout, signal) {
     var opts = { method: method, headers: { "Accept": "application/json" } };
     var sentKey = key;
     if (key) opts.headers.Authorization = "Bearer " + key;
@@ -632,19 +648,28 @@
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    var timer = null;
-    if (timeout && window.AbortController) {
+    var timer = null, expired = false;
+    if ((timeout || signal) && window.AbortController) {
       var abort = new AbortController();
       opts.signal = abort.signal;
-      timer = setTimeout(function () { abort.abort(); }, timeout);
+      if (timeout) timer = setTimeout(function () { expired = true; abort.abort(); }, timeout);
+      if (signal && signal.aborted) abort.abort();
+      else if (signal) signal.addEventListener("abort", function () { abort.abort(); });
     }
     var done = function () { clearTimeout(timer); };
+    var timedOut = function (err) {
+      throw expired ? new Error(translate("request_timed_out")) : err;
+    };
     return fetch(path, opts).then(function (res) {
       return res.json().catch(function (err) {
-        // A body cut off by the timeout is no answer.
+        // A body cut off by the timeout is no answer. A success whose body
+        // is not JSON, such as the login page of a proxy, is not one either.
         if (opts.signal && opts.signal.aborted) throw err;
+        if (res.ok) throw new Error(translate("bad_response"));
         return {};
       }).then(function (data) {
+        if (!data || typeof data !== "object") data = res.ok ? null : {};
+        if (!data) throw new Error(translate("bad_response"));
         if (res.status === 401) {
           // A request sent before this page saved a new admin key does not
           // make the new key invalid.
@@ -654,8 +679,13 @@
         if (!res.ok) throw new Error(data.error || data.message || ("HTTP " + res.status));
         return data;
       });
-    }).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
+    }).catch(timedOut).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
   }
+
+  // A key a request header can carry: printable ASCII, spaces inside
+  // included (the ends are trimmed). The browser refuses to send others,
+  // such as one pasted with Chinese text, without a 401.
+  function validKey(value) { return /^[\x20-\x7e]+$/.test(value); }
 
   // After the page saves a new admin key, a page that sends a key sends the
   // new one.
@@ -665,10 +695,23 @@
     try { localStorage.setItem(KEY_STORE, secret); } catch (err) {}
   }
 
+  // A page that has taken anything from a key (pagePrepared) never takes
+  // another one: it loads anew, which drops the requests of the old key
+  // still under way with all they could change, such as the masking, the
+  // page state and the history. The stored key stays, so the reloaded page
+  // asks with the reason; a key that was not stored is asked for without
+  // it. A page that has taken nothing shows the key form. Either way the
+  // load under way is cancelled, so it does not show the page meanwhile.
   function askForKey(message) {
+    cancelLoad();
+    hideContent();
+    if (pagePrepared) {
+      location.reload();
+      return;
+    }
     key = "";
     try { localStorage.removeItem(KEY_STORE); } catch (err) {}
-    $("app").hidden = true;
+    setLoadState("");
     $("key-section").hidden = false;
     $("key-error").hidden = !message;
     $("key-error").textContent = message || "";
@@ -832,17 +875,17 @@
   // ---- Account masking ----
 
   // The eye button in the header blurs every text that names an account,
-  // for screenshots to share. The choice is kept in this browser, so each
-  // computer keeps its own, and applies before the first render.
+  // for screenshots to share. The choice is kept in mask_accounts of the
+  // config (see writePageState). The app stays hidden and nothing that names
+  // an account is drawn until a valid config has set the masking
+  // (contentReady, see loadPage), so a masked page never shows the names
+  // first, and an unmasked one never flashes blurred.
   // Text that names accounts carries SENSITIVE, which .mask-accounts
   // blurs; chart text in SVG gets the mask-blur filter instead. Masked,
   // title tooltips that name accounts are left out and labels for screen
   // readers number the accounts. Confirmations keep the names.
   var SENSITIVE = "account-sensitive";
-  var MASK_STORE = "lamplighter-mask-accounts";
   var masked = false;
-  try { masked = localStorage.getItem(MASK_STORE) === "1"; } catch (err) {}
-  document.documentElement.classList.toggle("mask-accounts", masked);
 
   function accountAlias(index) { return translate("account_n", index + 1); }
 
@@ -947,12 +990,16 @@
     return drawMaskButton(el("button", { type: "button", class: "btn btn-ghost btn-icon mask-toggle no-snapshot", onclick: toggleMask }));
   }
 
-  function toggleMask() {
-    var detailFocus = document.activeElement === $("chart-detail-head").querySelector(".mask-toggle");
-    masked = !masked;
-    try { localStorage.setItem(MASK_STORE, masked ? "1" : "0"); } catch (err) {}
+  function setMasked(on) {
+    masked = on;
     document.documentElement.classList.toggle("mask-accounts", masked);
     renderMaskButton();
+  }
+
+  function toggleMask() {
+    var detailFocus = document.activeElement === $("chart-detail-head").querySelector(".mask-toggle");
+    setMasked(!masked);
+    writePageState("mask_accounts", { mask_accounts: masked || null });
     if (!status) return;
     renderStatus();
     if (history) renderChart();
@@ -1280,8 +1327,8 @@
       return patchConfig({ account_order: names }).then(function (token) {
         showApplied(say, token);
         if (pendingOrder && pendingOrder.join("\n") === names.join("\n")) pendingOrder = null;
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         if (pendingOrder && pendingOrder.join("\n") === names.join("\n")) pendingOrder = null;
         say("failed", err.message);
         if (err.message !== "unauthorized") toast(translate("order_failed", err.message));
@@ -1585,10 +1632,8 @@
   var EVENTS_COLLAPSED = 12, EVENTS_MAX = 100;
   var eventsExpanded = false;
   // Resets of 5-hour windows, one per service every five hours, show only
-  // when chosen; the choice is kept in this browser.
-  var EVENTS_STORE = "lamplighter-events-5h";
+  // when chosen; the choice is kept in events_show_5h_resets of the config.
   var showFiveHourResets = false;
-  try { showFiveHourResets = localStorage.getItem(EVENTS_STORE) === "1"; } catch (err) {}
 
   // The events a notification reports, by its notify_kind. A notification
   // sent within NOTIFY_LAG of such an event of the same quota group shows
@@ -2106,6 +2151,8 @@
   }
 
   function renderStatus() {
+    // Account names wait for the masking of a valid config.
+    if (!contentReady) return;
     sortAccounts();
     checkApplied();
     renderHeader();
@@ -2123,12 +2170,21 @@
     renderZoneChange();
   }
 
-  function loadStatus(timeout) {
-    return api("GET", API + "/status", undefined, timeout).then(function (data) {
-      status = data;
-      renderStatus();
-      reportLanguage();
+  function fetchStatus(timeout, signal) {
+    return api("GET", API + "/status", undefined, timeout, signal).then(function (data) {
+      if (Array.isArray(data)) throw new Error(translate("bad_response"));
+      return data;
     });
+  }
+
+  function useStatus(data) {
+    status = data;
+    renderStatus();
+    reportLanguage();
+  }
+
+  function loadStatus(timeout) {
+    return fetchStatus(timeout).then(useStatus);
   }
 
   function runAction(button, path, body, success) {
@@ -2152,9 +2208,7 @@
     var latest = rawConfig.account_names;
     var names = latest && typeof latest === "object" ? JSON.parse(JSON.stringify(latest)) : {};
     if (name) names[account.auth_index] = name; else delete names[account.auth_index];
-    return patchConfig({ account_names: Object.keys(names).length ? names : null }).then(function () {
-      return loadConfig();
-    }).then(function () {
+    return patchConfig({ account_names: Object.keys(names).length ? names : null }).then(rereadConfig).then(function () {
       (status.accounts || []).forEach(function (a) { if (a.auth_index === account.auth_index) a.note = name; });
       return api("POST", API + "/refresh", { auth_index: account.auth_index }).then(function (data) {
         if (data.status) { status = data.status; renderStatus(); }
@@ -2194,7 +2248,7 @@
       if (answer === "") delete weights[account.name]; else weights[account.name] = value;
       return patchConfig({ account_weights: Object.keys(weights).length ? weights : null }).then(function (token) {
         showApplied(say, token);
-        return loadConfig();
+        return rereadConfig();
       });
     }).then(function () {
       input = binding.input;
@@ -2254,7 +2308,9 @@
   // the spacing of the values beside the detail chart.
   var CHAR_W = 6.6, LABEL_H = 16;
 
-  var chartView = null;
+  // The geometry of the overview drawn last, shared by the detail chart and
+  // hovering. The chart_view the page keeps is chartView.
+  var chartGeom = null;
   var hoverSource = "";
   var hoverListeners = [];
   // Samples of the row in the detail chart; hovering either chart snaps to them.
@@ -2833,7 +2889,7 @@
   // Overview: one band per row on a shared time axis, the ignition lane
   // below, and a crosshair shared with the detail chart.
   function renderOverview(rows, box, end) {
-    var g = chartView = geometry(Math.max(480, box.clientWidth || 800), end);
+    var g = chartGeom = geometry(Math.max(480, box.clientWidth || 800), end);
     var limit = gapLimit();
     var flat = [];
     rows.forEach(function (r) {
@@ -2879,7 +2935,10 @@
         "↻" + fmtCountdown(r.reset * 1000 - Date.now())));
       var hit = svg("rect", { x: 0, y: y0 - 3, width: g.width, height: LANE + 6, fill: "transparent", style: "cursor:pointer" });
       hit.addEventListener("click", function () {
-        if (r.children && chartSelected === r.id) chartExpanded[r.id] = !chartExpanded[r.id];
+        if (r.children && chartSelected === r.id) {
+          chartExpanded[r.id] = !chartExpanded[r.id];
+          saveChartExpanded();
+        }
         chartSelected = r.id;
         renderChart();
       });
@@ -3273,7 +3332,7 @@
   // projection at the current rate. A pooled row adds a band from its
   // lowest to its highest account.
   function renderDetail(row, head, box) {
-    var g = chartView, limit = gapLimit();
+    var g = chartGeom, limit = gapLimit();
     snapPoints = row.points;
     var group = !!row.children;
     // An inactive window ends at its last sample, without projection or
@@ -3583,8 +3642,8 @@
 
   function hoverAt(e, root, rowId, source) {
     var rect = root.getBoundingClientRect();
-    var t = chartView.t((e.clientX - rect.left) / rect.width * chartView.width);
-    if (t < chartView.from || t > chartView.to) { setHover(null); return; }
+    var t = chartGeom.t((e.clientX - rect.left) / rect.width * chartGeom.width);
+    if (t < chartGeom.from || t > chartGeom.to) { setHover(null); return; }
     hoverSource = source;
     setHover(snapTime(t), rowId);
   }
@@ -3593,10 +3652,10 @@
   // measured time. Inside a data gap and after now the pointer's own time is
   // kept.
   function snapTime(t) {
-    if (t > chartView.now) return t;
+    if (t > chartGeom.now) return t;
     var best = null;
     snapPoints.forEach(function (p) {
-      if (p[0] >= chartView.from && p[0] <= chartView.to && (best == null || Math.abs(p[0] - t) < Math.abs(best - t))) best = p[0];
+      if (p[0] >= chartGeom.from && p[0] <= chartGeom.to && (best == null || Math.abs(p[0] - t) < Math.abs(best - t))) best = p[0];
     });
     return best != null && Math.abs(best - t) <= gapLimit() ? best : t;
   }
@@ -3640,6 +3699,7 @@
   // which lays the page out while the chart is empty. The card keeps its
   // height meanwhile, or the shorter page would pull the scroll position up.
   function renderChart() {
+    if (!contentReady) return;
     renderLegend();
     // The chart measures its width, so a hidden chart is drawn when its view
     // shows.
@@ -3678,7 +3738,7 @@
     renderOverview(rows, overview, axisEnd(selected));
     $("chart-detail-wrap").hidden = false;
     renderDetail(selected, head, detail);
-    placeDetailHead($("chart-detail-wrap"), head, detail, chartView);
+    placeDetailHead($("chart-detail-wrap"), head, detail, chartGeom);
     renderChartTable(rows);
   }
 
@@ -3702,51 +3762,236 @@
     pressSegment("range-buttons", range);
   }
 
-  // With remember_chart_filters on, the chart filters are kept in this
-  // browser's localStorage as {window, sort, ranges: {"5h": ..., "7d": ...}}
-  // and restored when the page opens. Each window keeps its own range because
-  // the two windows offer different ranges.
-  var CHART_STORE = "lamplighter-chart-filters";
+  // ---- Page state in the config ----
+
+  // Magpie shows the page in a sandboxed iframe without browser storage,
+  // so the choices the page remembers are kept in config.json and shared by
+  // every device: chart_view and chart_expanded with the switches that keep
+  // them, mask_accounts and events_show_5h_resets. They are restored once,
+  // from the first valid config the page reads (restorePageState,
+  // restoreChartState); the app stays hidden until then (see loadPage), so
+  // no choice can be made before it arrives. The plugin only saves a patch
+  // of these keys, without applying it or a config_token (see patchConfig).
+  var pageStateReady = false;
+  var chartRestored = false;
+  var pageStateWrites = {};
+  var pageStateFailed = {};
+  // The settings switch that keeps the state, keyed by the state.
+  var PAGE_STATE_SWITCH = { chart_view: "remember_chart_filters", chart_expanded: "remember_chart_expanded" };
+
+  // Saves patch, a null value deleting its key, as a write of group, the
+  // state it changes. One write per group is under way at a time; changes
+  // made meanwhile merge into the next write, later values winning, so the
+  // order of the changes is the order of the saves and the last value is
+  // the one saved. A switch writes with its state in the same patch. say,
+  // from claimState, reports the result of the write that carries it.
+  function writePageState(group, patch, say) {
+    var w = pageStateWrites[group] || (pageStateWrites[group] = { running: null, next: null });
+    if (!w.next) w.next = { patch: {}, says: [] };
+    Object.keys(patch).forEach(function (name) { w.next.patch[name] = patch[name]; });
+    if (say) w.next.says.push(say);
+    if (!w.running) w.running = sendPageState(group, w);
+    return w.running;
+  }
+
+  function sendPageState(group, w) {
+    var next = w.next;
+    w.next = null;
+    return patchConfig(next.patch).then(function () {
+      next.says.forEach(function (say) { say("saved", translate("save_saved")); });
+      pageStateSaved(group, null, next.says.length > 0);
+    }, function (err) {
+      next.says.forEach(function (say) { say("failed", err.message); });
+      pageStateSaved(group, err, next.says.length > 0);
+    }).then(function () {
+      if (w.next) return sendPageState(group, w);
+      w.running = null;
+    });
+  }
+
+  // A write made without a switch shows only a failure: the first one in a
+  // row in a toast and, for the chart, at the legend of its switch until
+  // the state saves again. A switch shows its own result.
+  function pageStateSaved(group, err, switched) {
+    var failed = pageStateFailed[group];
+    pageStateFailed[group] = !!err;
+    if (err && !failed && !switched && err.message !== "unauthorized") toast(translate("state_save_failed", err.message));
+    var input = PAGE_STATE_SWITCH[group] && $("settings").elements[PAGE_STATE_SWITCH[group]];
+    var host = input && saveHost(input);
+    if (!host) return;
+    if (err && !switched) {
+      var entry = saveEntry(host, input, group);
+      entry.owner = null;
+      entry.order = ++saveSerial;
+      updateSaveEntry(entry, "failed", err.message);
+      return;
+    }
+    var done = !err && host.saveEntries && host.saveEntries.get(group);
+    if (done && done.failure) {
+      done.failure = null;
+      done.state = "";
+      renderSaveState(host);
+    }
+  }
+
+  // An earlier version kept the page state in the browser's localStorage.
+  // Only the masking moves to the config, so that a browser that blurred
+  // the accounts does not show them after the upgrade; the other keys are
+  // dropped.
+  var OLD_MASK_STORE = "lamplighter-mask-accounts";
+  var OLD_STORES = ["lamplighter-events-5h", "lamplighter-chart-filters", "lamplighter-mcp-url"];
+
+  function forgetStores(names) {
+    names.forEach(function (name) {
+      try { localStorage.removeItem(name); } catch (err) {}
+    });
+  }
+
+  // The old masking switch is read as the script loads, before any
+  // request: another tab of this browser may move it and delete its key
+  // while this one waits for its config.
+  function readOldMask() {
+    try { return localStorage.getItem(OLD_MASK_STORE); } catch (err) { return null; }
+  }
+  var oldMask = readOldMask();
+
+  // Applies mask_accounts and events_show_5h_resets of cfg, the first
+  // valid config. Without mask_accounts in cfg, the old masking switch of
+  // this browser, when on, masks and is saved to the config; its key goes
+  // once saved, and at once when cfg has mask_accounts.
+  function restorePageState(cfg) {
+    if (pageStateReady) return;
+    pageStateReady = true;
+    var migrate = cfg.mask_accounts == null && oldMask === "1";
+    forgetStores(migrate ? OLD_STORES : OLD_STORES.concat(OLD_MASK_STORE));
+    setMasked(migrate || cfg.mask_accounts === true);
+    if (migrate) {
+      writePageState("mask_accounts", { mask_accounts: true }, function (state) {
+        if (state === "saved") forgetStores([OLD_MASK_STORE]);
+      });
+    }
+    showFiveHourResets = cfg.events_show_5h_resets === true;
+  }
+
+  // With remember_chart_filters on, chart_view keeps the chosen window,
+  // order and the range of each window as {window, sort, ranges: {"5h":
+  // ..., "7d": ...}}; each window keeps its own range because the two
+  // windows offer different ranges. chartView is the page's copy of it.
+  // With remember_chart_expanded on, chart_expanded lists the expanded
+  // totals by the id of their row without "group:", the provider and the
+  // label, as in "claude|Claude"; one list serves both windows. The
+  // switches read the settings form, so a change applies before it is
+  // saved.
+  var chartView = null;
 
   function rememberChart() {
     var input = $("settings").elements["remember_chart_filters"];
     return !!(input && input.checked);
   }
 
-  function storedChartFilters() {
-    try {
-      var saved = JSON.parse(localStorage.getItem(CHART_STORE) || "null");
-      if (saved && typeof saved === "object") return saved;
-    } catch (err) {}
-    return {};
+  function rememberExpanded() {
+    var input = $("settings").elements["remember_chart_expanded"];
+    return !!(input && input.checked);
+  }
+
+  // The chosen window, order and ranges, with the range kept for the other
+  // window.
+  function currentChartView() {
+    var ranges = {}, saved = chartView && chartView.ranges;
+    if (saved) Object.keys(saved).forEach(function (kind) { ranges[kind] = saved[kind]; });
+    ranges[chartWindow] = range;
+    return { window: chartWindow, sort: chartSort, ranges: ranges };
   }
 
   function saveChartFilters() {
-    if (!rememberChart()) return;
-    var saved = storedChartFilters();
-    var ranges = saved.ranges && typeof saved.ranges === "object" ? saved.ranges : {};
-    ranges[chartWindow] = range;
-    try {
-      localStorage.setItem(CHART_STORE, JSON.stringify({ window: chartWindow, sort: chartSort, ranges: ranges }));
-    } catch (err) {}
+    if (!chartRestored || !rememberChart()) return;
+    chartView = currentChartView();
+    writePageState("chart_view", { chart_view: chartView });
+  }
+
+  // The expanded groups, or null for none, which deletes the key. Groups
+  // the chart does not show, such as those of the other window, stay in
+  // the list.
+  function expandedGroups() {
+    var names = Object.keys(chartExpanded).filter(function (id) {
+      return chartExpanded[id] && id.indexOf("group:") === 0;
+    }).map(function (id) { return id.slice(6); });
+    return names.length ? names : null;
+  }
+
+  function saveChartExpanded() {
+    if (chartRestored && rememberExpanded()) writePageState("chart_expanded", { chart_expanded: expandedGroups() });
+  }
+
+  // Turning a chart switch on saves it with the current state; turning it
+  // off deletes both. The switch shows the result like a setting.
+  function saveChartSwitch(input) {
+    var group = input.name === "remember_chart_filters" ? "chart_view" : "chart_expanded";
+    var on = input.checked, patch = {};
+    if (group === "chart_view") chartView = on ? currentChartView() : null;
+    patch[input.name] = on || null;
+    patch[group] = on ? (group === "chart_view" ? chartView : expandedGroups()) : null;
+    var say = claimState(saveHost(input), input);
+    writePageState(group, patch, function (state, text) {
+      if (say(state, text) && state === "saved") input.settingsDirty = false;
+    });
   }
 
   // The remembered range of a window, or its default when nothing valid is saved.
   function rangeFor(kind) {
-    var ranges = rememberChart() ? storedChartFilters().ranges : null;
+    var ranges = rememberChart() && chartView ? chartView.ranges : null;
     var saved = ranges && typeof ranges === "object" ? ranges[kind] : null;
     return RANGES[kind].some(function (r) { return r[0] === saved; }) ? saved : DEFAULT_RANGE[kind];
   }
 
-  function restoreChartFilters() {
-    if (!rememberChart()) return;
-    var saved = storedChartFilters();
-    if (windowKinds().indexOf(saved.window) >= 0) chartWindow = saved.window;
-    if (saved.sort === "default" || saved.sort === "low") chartSort = saved.sort;
-    range = rangeFor(chartWindow);
-    pressSegment("window-buttons", chartWindow);
-    pressSegment("sort-buttons", chartSort);
-    renderRangeButtons();
+  // Restores the chart switches, chart_view and chart_expanded of cfg, the
+  // first valid config, while the app is hidden (see preparePage). The
+  // switches are set from cfg too, so they and the state come from one
+  // config. A saved window that no account reports, the default one
+  // included, is offered while its
+  // history has samples in the range (windowKinds), which is not loaded
+  // yet: its history is read first, for LOAD_TIMEOUT at most, and the
+  // promise returned resolves once the window is chosen: the saved window
+  // or, without samples, or when the history cannot be read, the one
+  // offered. Returns null when nothing is to be read.
+  function restoreChartState(cfg) {
+    if (chartRestored) return null;
+    chartRestored = true;
+    ["remember_chart_filters", "remember_chart_expanded"].forEach(function (name) {
+      var input = $("settings").elements[name];
+      if (input) input.checked = cfg[name] === true;
+    });
+    var saved = cfg.chart_view, unknown = null;
+    chartView = null;
+    if (rememberChart() && saved && typeof saved === "object" && !Array.isArray(saved)) {
+      var ranges = {};
+      Object.keys(RANGES).forEach(function (kind) {
+        var value = saved.ranges && typeof saved.ranges === "object" ? saved.ranges[kind] : null;
+        if (RANGES[kind].some(function (r) { return r[0] === value; })) ranges[kind] = value;
+      });
+      if (windowKinds().indexOf(saved.window) >= 0) chartWindow = saved.window;
+      else if (Object.keys(RANGES).indexOf(saved.window) >= 0) unknown = saved.window;
+      if (saved.sort === "default" || saved.sort === "low") chartSort = saved.sort;
+      chartView = { window: chartWindow, sort: chartSort, ranges: ranges };
+      range = rangeFor(chartWindow);
+      pressSegment("window-buttons", chartWindow);
+      pressSegment("sort-buttons", chartSort);
+      renderRangeButtons();
+    }
+    if (rememberExpanded() && Array.isArray(cfg.chart_expanded)) {
+      cfg.chart_expanded.forEach(function (id) {
+        if (typeof id === "string") chartExpanded["group:" + id] = true;
+      });
+    }
+    if (!unknown) return null;
+    return fetchHistory(unknown, rangeFor(unknown), false, LOAD_TIMEOUT).catch(function () {}).then(function () {
+      if (windowKinds().indexOf(unknown) < 0) return;
+      chartWindow = chartView.window = unknown;
+      range = rangeFor(unknown);
+      renderWindowButtons();
+      pressSegment("window-buttons", chartWindow);
+      renderRangeButtons();
+    });
   }
 
   // History responses by window and range. A chosen chart that is cached is
@@ -3765,15 +4010,15 @@
   function historyKey(kind, name) { return kind + "|" + name; }
 
   // Requests a history, or joins the request for it that is under way unless
-  // fresh is set. The cache keeps the response of the latest request, and
-  // the promise resolves to it.
-  function fetchHistory(kind, name, fresh) {
+  // fresh is set; timeout is that of api. The cache keeps the response of
+  // the latest request, and the promise resolves to it.
+  function fetchHistory(kind, name, fresh, timeout) {
     var key = historyKey(kind, name);
     if (historyPending[key] && !fresh) return historyPending[key].promise;
     var seq = ++historySeq;
     var entry = { seq: seq };
     var done = function () { if (historyPending[key] === entry) delete historyPending[key]; };
-    entry.promise = api("GET", API + "/history?range=" + name + "&window=" + kind).then(function (data) {
+    entry.promise = api("GET", API + "/history?range=" + name + "&window=" + kind, undefined, timeout).then(function (data) {
       var cached = historyCache[key];
       if (!cached || cached.seq < seq) historyCache[key] = { seq: seq, data: data };
       done();
@@ -3952,6 +4197,11 @@
     if (effective.mcp_enabled === undefined) effective.mcp_enabled = !!rawConfig.mcp_enabled;
     if (effective.web_enabled === undefined) effective.web_enabled = !!rawConfig.web_enabled;
     if (!effective.public_listen) effective.public_listen = rawConfig.public_listen || MCP_LISTEN;
+    effective.mcp_public_url = typeof rawConfig.mcp_public_url === "string" ? rawConfig.mcp_public_url : "";
+    // The page writes its switches without the plugin applying them, so
+    // they come from the saved config, like the state they keep.
+    effective.remember_chart_filters = rawConfig.remember_chart_filters === true;
+    effective.remember_chart_expanded = rawConfig.remember_chart_expanded === true;
     // The saved time zone and ignition switch come from GET /api/config,
     // which the page reads after each save; a key the file lacks takes the
     // plugin's value from the status, so the page assumes no default.
@@ -4034,11 +4284,14 @@
 
   // keys, when given, limits the refill to those top-level keys and skips the
   // focused field, so a refill after a save leaves the field being edited alone.
+  // The chart switches are not refilled: restoreChartState sets them with
+  // the state they keep from the first valid config, and later only the
+  // user changes them.
   function fillSettings(keys) {
     var effective = effectiveConfig();
     var active = document.activeElement;
     Array.prototype.forEach.call($("settings").elements, function (input) {
-      if (!input.name) return;
+      if (!input.name || /^remember_chart_(filters|expanded)$/.test(input.name)) return;
       if (keys && (!keys[topKey(input.name)] || input === active)) return;
       if (input.settingsDirty || input.hasAttribute("aria-invalid")) return;
       if (input.type === "radio" && saveControls(input).some(function (peer) { return peer.settingsDirty || peer.hasAttribute("aria-invalid"); })) return;
@@ -4208,6 +4461,8 @@
     // status comparisons do not wait on a trailing slash or an empty field.
     if (top === "bark_url") patch[top] = patch[top].replace(/\/+$/, "");
     if (top === "public_listen" && !patch[top]) patch[top] = "127.0.0.1:8318";
+    // An empty public address deletes the key.
+    if (top === "mcp_public_url" && !patch[top]) patch[top] = null;
     return patch;
   }
 
@@ -4251,10 +4506,12 @@
     return text ? text.textContent : input.name || input.id;
   }
 
-  function saveEntry(host, input) {
+  // key, when given, names an item of its own that shares the control, such
+  // as a page state saved for a switch (see pageStateSaved).
+  function saveEntry(host, input, key) {
     if (!host) return null;
     input = input || host;
-    var key = saveItemKey(input);
+    key = key || saveItemKey(input);
     if (!host.saveEntries) host.saveEntries = new Map();
     var entry = host.saveEntries.get(key);
     if (!entry) {
@@ -4281,7 +4538,7 @@
   function saveText(text) {
     var keys = ["save_saved", "save_saving", "save_waiting", "save_applied", "save_unconfirmed",
       "mcp_error", "public_error", "weight_invalid",
-      "thresholds_order", "headers_invalid", "json_invalid"];
+      "thresholds_order", "headers_invalid", "json_invalid", "mcp_public_url_invalid"];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i], languages = Object.keys(I18N);
       for (var j = 0; j < languages.length; j++) {
@@ -4305,9 +4562,12 @@
     failures.sort(function (a, b) { return b.failure.order - a.failure.order; });
     var failed = failures[0], state = failed ? "failed" : latest ? latest.state : "";
     var text = failed ? translate("save_field_failed", saveItemLabel(failed.input)) : latest ? saveText(latest.text) : "";
+    // Items can share a control, which stays marked while any of them failed.
+    var invalid = new Set();
+    failures.forEach(function (entry) { entry.controls.forEach(function (control) { invalid.add(control); }); });
     entries.forEach(function (entry) {
       entry.controls.forEach(function (control) {
-        if (entry.failure) control.setAttribute("aria-invalid", "true");
+        if (invalid.has(control)) control.setAttribute("aria-invalid", "true");
         else control.removeAttribute("aria-invalid");
       });
     });
@@ -4405,7 +4665,8 @@
   function saveField(event) {
     var input = event.target;
     var top = input.hasAttribute("data-group") ? "providers" : input.name && topKey(input.name);
-    if (!top) return;
+    // The chart switches save with their state; see saveChartSwitch.
+    if (!top || top === "remember_chart_filters" || top === "remember_chart_expanded") return;
     var host = saveHost(input);
     var tops = [top];
     // Browsers fill the password saved for this site, usually the admin key,
@@ -4443,6 +4704,10 @@
         return;
       }
     }
+    if (top === "mcp_public_url" && publicUrl(input.value) === null) {
+      setSaveState(host, "failed", translate("mcp_public_url_invalid"), input);
+      return;
+    }
     if (input.name === "ignition.enabled") renderIgnitionOff();
     var say = claimState(host, input);
     noteEdit(input);
@@ -4455,9 +4720,9 @@
       });
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
-        showApplied(say, token, /^(mcp_|public_listen$|web_enabled$|admin_key$)/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
-        return loadConfig();
-      }).catch(function (err) {
+        showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -4493,17 +4758,44 @@
     return saved >= 0 && !!applied && tokens.indexOf(applied) >= saved;
   }
 
+  // The keys of the page's own state, the same as config.IsPageState: the
+  // plugin saves a patch of only these keys without applying it.
+  var PAGE_STATE_KEYS = ["remember_chart_filters", "remember_chart_expanded", "chart_view", "chart_expanded",
+    "mask_accounts", "events_show_5h_resets", "mcp_public_url"];
+
   // Writes a patch of the plugin config with a new token, and resolves to
-  // the token once it is saved.
+  // the token once it is saved. A patch of only page state goes without a
+  // token, which the plugin would not apply, and resolves to "".
+  // Before it resolves, rawConfig takes the saved values of the patched keys
+  // (keepSaved), so a field refilled after the save shows what was saved.
   function patchConfig(patch) {
-    var token = newConfigToken(), body = {};
-    Object.keys(patch).forEach(function (name) { body[name] = patch[name]; });
+    var token = newConfigToken(), body = {}, names = Object.keys(patch);
+    names.forEach(function (name) { body[name] = patch[name]; });
+    if (names.length && names.every(function (name) { return PAGE_STATE_KEYS.indexOf(name) >= 0; })) {
+      return api("PATCH", CONFIG_API, body).then(function (saved) { keepSaved(names, body, saved); return ""; });
+    }
     body.config_token = token;
-    return api("PATCH", CONFIG_API, body).then(function () {
+    return api("PATCH", CONFIG_API, body).then(function (saved) {
+      keepSaved(names, body, saved);
       savedTokens.push(token);
       if (savedTokens.length > 200) savedTokens.shift();
       return token;
     });
+  }
+
+  // Copies the keys names of a saved patch into rawConfig: from saved, the
+  // config the plugin answers with, which holds them as it saved them
+  // (trimmed, or dropped like the state of a remember switch that is off),
+  // or from sent when the answer is not a config. Only these keys change, so
+  // an answer that arrives after a later one leaves the other keys alone.
+  function keepSaved(names, sent, saved) {
+    var from = saved && typeof saved === "object" && !Array.isArray(saved) ? saved : sent;
+    names.forEach(function (name) {
+      var value = from[name];
+      if (value === undefined || value === null) delete rawConfig[name];
+      else rawConfig[name] = value;
+    });
+    if (pendingOrder) rawConfig.account_order = pendingOrder.slice();
   }
 
   function lastToken() { return savedTokens.length ? savedTokens[savedTokens.length - 1] : ""; }
@@ -4571,7 +4863,12 @@
   // token even when a newer save owns the field's state.
   // listener is set for the settings of the public listener, whose error
   // after the save is a failure.
+  // A save without a token, of page state only, is done once it is saved.
   function showApplied(say, token, listener) {
+    if (!token) {
+      say("saved", translate("save_saved"));
+      return Promise.resolve(true);
+    }
     say("waiting", translate("save_waiting"));
     return whenApplied(token).then(function (applied) {
       var pub = status && status.public, error = "";
@@ -4596,7 +4893,6 @@
   }
 
   var MCP_LISTEN = "127.0.0.1:8318";
-  var MCP_URL_STORE = "lamplighter-mcp-url";
   var mcpKeyShown = false;
 
   var adminKeyShown = false;
@@ -4657,14 +4953,34 @@
 
   function maskedKey(value) { return value ? value.slice(0, 6) + "••••••••••••" + value.slice(-4) : ""; }
 
-  // The address clients use: the public address entered in this browser, or
-  // http:// and the listen address. A listen address without a host or on
-  // all interfaces is reached through the host of this page.
+  // mcp_public_url as clients use it: https:// in front of an address
+  // without a scheme. "" when value is empty, null when it is not an http or
+  // https address. PUBLIC_URL_FORM is the expression of
+  // config.MCPPublicURLValid, and the ends are trimmed of the white space strings.TrimSpace trims, so
+  // the page and the plugin accept the same addresses; both are tested with
+  // internal/config/testdata/public_urls.json.
+  var PUBLIC_URL_TRIM = /^[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+  var PUBLIC_URL_FORM = /^[Hh][Tt][Tt][Pp][Ss]?:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::([0-9]{1,5}))?(\/[\x21\x22\x24-\x3e\x40-\x5b\x5d-\x7e]*)?$/;
+  function publicUrl(value) {
+    var text = String(value || "").replace(PUBLIC_URL_TRIM, "");
+    if (!text) return "";
+    var full = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text) ? text : "https://" + text;
+    var m = PUBLIC_URL_FORM.exec(full);
+    return m && !(m[1] && Number(m[1]) > 65535) ? full : null;
+  }
+
+  // The address clients use, without the path /mcp: the public address in
+  // the field (mcp_public_url, as typed, before it is saved) while it is
+  // valid, with /mcp and trailing slashes taken off its path, or http:// and
+  // the listen address. A listen address without a host or on all interfaces is
+  // reached through the host of this page.
   function mcpBaseUrl() {
-    var stored = "";
-    try { stored = localStorage.getItem(MCP_URL_STORE) || ""; } catch (err) {}
-    stored = stored.trim().replace(/\/+$/, "").replace(/\/mcp$/, "");
-    if (stored) return /^[a-z][a-z0-9+.-]*:\/\//i.test(stored) ? stored : "https://" + stored;
+    var field = $("settings").elements["mcp_public_url"];
+    var stored = publicUrl(field && field.value);
+    if (stored) {
+      var path = PUBLIC_URL_FORM.exec(stored)[2] || "";
+      return stored.slice(0, stored.length - path.length) + path.replace(/\/+$/, "").replace(/\/mcp$/, "");
+    }
     var input = $("settings").elements["public_listen"];
     var state = publicState(status);
     var listen = (input && input.value.trim()) || (state && state.listen) || MCP_LISTEN;
@@ -4674,12 +4990,19 @@
     return "http://" + host + port;
   }
 
+  // A POSIX shell word for text: single quotes, with ' written as '\''.
+  function shellQuote(text) {
+    return "'" + String(text).replace(/'/g, "'\\''") + "'";
+  }
+
+  // The commands quote the address and the header for the shell; the JSON
+  // is built by JSON.stringify.
   function mcpSnippets(url, secret) {
-    var auth = "Authorization: Bearer " + secret;
+    var auth = shellQuote("Authorization: Bearer " + secret);
     return [
-      ["mcp_claude", "claude mcp add --transport http lamplighter " + url + " --header \"" + auth + "\""],
+      ["mcp_claude", "claude mcp add --transport http lamplighter " + shellQuote(url) + " --header " + auth],
       ["mcp_json", JSON.stringify({ mcpServers: { lamplighter: { type: "http", url: url, headers: { Authorization: "Bearer " + secret } } } }, null, 2)],
-      ["mcp_stdio", "npx mcp-remote " + url + " --header \"" + auth + "\""]
+      ["mcp_stdio", "npx mcp-remote " + shellQuote(url) + " --header " + auth]
     ];
   }
 
@@ -4749,8 +5072,8 @@
     saveQueue = saveQueue.then(function () {
       return patchConfig({ mcp_key: secret }).then(function (token) {
         showApplied(say, token, true);
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -4766,8 +5089,8 @@
       return patchConfig({ admin_key: secret }).then(function (token) {
         useKey(secret);
         showApplied(say, token, true);
-        return loadConfig();
-      }).catch(function (err) {
+        return rereadConfig();
+      }, function (err) {
         say("failed", err.message);
       });
     });
@@ -4794,13 +5117,34 @@
     });
   }
 
-  function loadConfig() {
-    return api("GET", CONFIG_API).then(function (data) {
-      rawConfig = data || {};
-      if (pendingOrder) rawConfig.account_order = pendingOrder.slice();
-      renderMcp();
-      if (settingsFilled) renderTimezone();
+  // Resolves to the config read, which must be an object: an answer that
+  // is not, such as the page of a proxy, fails like a request.
+  function fetchConfig(timeout, signal) {
+    return api("GET", CONFIG_API, undefined, timeout, signal).then(function (data) {
+      if (Array.isArray(data)) throw new Error(translate("bad_response"));
+      return data;
     });
+  }
+
+  function useConfig(data) {
+    rawConfig = data;
+    if (pendingOrder) rawConfig.account_order = pendingOrder.slice();
+    renderMcp();
+    if (settingsFilled) renderTimezone();
+  }
+
+  function loadConfig(timeout) {
+    return fetchConfig(timeout).then(function (data) {
+      useConfig(data);
+      return data;
+    });
+  }
+
+  // Reads the config again after a save. The save stands when this read
+  // fails: rawConfig already holds what was saved (see patchConfig), and
+  // the next read catches up.
+  function rereadConfig() {
+    return loadConfig().catch(function () {});
   }
 
   // Opening the page also checks for a newer release, after the first status
@@ -4814,35 +5158,164 @@
 
   // ---- Startup ----
 
+  // The app shows once a valid config has set the masking and the chart
+  // state is restored (contentReady); until then a card says the page is
+  // loading or why it failed, with a button to try again. The card shows
+  // only after LOAD_CARD_DELAY, so a quick start does not flash it. Once a
+  // load has its answers, the page takes them (pagePrepared), and a request
+  // that asks for the admin key afterwards reloads the page (askForKey).
+  var contentReady = false;
+  var pagePrepared = false;
+  // The load under way: {cancel, promise}; see loadPage.
+  var pageLoad = null;
+  var loadState = { state: "", message: "" };
+  var loadCardTimer = null;
+  var LOAD_TIMEOUT = 15000;
+  var LOAD_CARD_DELAY = 300;
+
+  function hideContent() {
+    contentReady = false;
+    $("app").hidden = true;
+  }
+
+  function showContent() {
+    contentReady = true;
+    setLoadState("");
+    $("app").hidden = false;
+  }
+
+  // state is "loading", "failed" with the reason in message, or "".
+  function setLoadState(state, message) {
+    loadState = { state: state, message: message || "" };
+    clearTimeout(loadCardTimer);
+    if (state === "loading" && $("load-section").hidden) loadCardTimer = setTimeout(renderLoadCard, LOAD_CARD_DELAY);
+    else renderLoadCard();
+  }
+
+  function renderLoadCard() {
+    $("load-section").hidden = !loadState.state;
+    $("load-text").textContent = loadState.state === "failed" ? translate("load_failed", loadState.message) : translate("loading");
+    $("load-retry").hidden = loadState.state !== "failed";
+  }
+
+  function keyAsked() { return !$("key-section").hidden; }
+
+  // Cancels the load under way; it then ends without changing the page.
+  function cancelLoad() {
+    if (pageLoad) pageLoad.cancel();
+    pageLoad = null;
+  }
+
+  // Starts with the stored key. The internal listener needs no key; the
+  // public one answers 401 without the admin key, which asks for it. A
+  // stored key a header cannot carry is asked for again at once, since the
+  // browser would fail its requests without a 401.
+  function begin() {
+    try { key = localStorage.getItem(KEY_STORE) || ""; } catch (err) {}
+    if (key && !validKey(key)) askForKey(translate("key_invalid"));
+    else start();
+  }
+
   function start() {
     $("key-section").hidden = true;
-    $("app").hidden = false;
-    Promise.all([loadStatus(), loadConfig()]).then(function () {
-      checkUpdate();
-      // The status may have arrived before the config with the saved order.
-      sortAccounts();
-      renderAccounts();
-      fillSettings();
-      restoreChartFilters();
-      return loadHistory();
-    }).then(function (loaded) { if (loaded) prefetchHistory(); }).catch(function (err) {
-      if (err.message !== "unauthorized") toast(translate("load_failed", err.message));
-    });
+    loadPage();
     clearInterval(refreshTimer);
     refreshTimer = setInterval(function () {
-      if (document.hidden || !magpie.visible) return;
-      loadStatus().then(refreshHistory).catch(function () {});
+      if (document.hidden || !magpie.visible || keyAsked()) return;
+      if (!contentReady) loadPage();
+      else loadStatus().then(refreshHistory).catch(function () {});
     }, 30000);
   }
 
+  // Reads the status and the config, restores the page state from them
+  // while the app is still hidden (preparePage), then shows the page
+  // (showPage). One load runs at a time: it holds pageLoad until it ends.
+  // Each request gives up after LOAD_TIMEOUT, and the first failure cancels
+  // the other. A load that asks for the admin key before it has its
+  // answers is cancelled (cancelLoad) and ends without changing the page.
+  // Resolves to whether the page was shown.
+  function loadPage() {
+    if (pageLoad) return pageLoad.promise;
+    var abort = window.AbortController ? new AbortController() : null;
+    var round = { failure: null, answers: [] };
+    var current = function () { return pageLoad === round; };
+    round.cancel = function () { if (abort) abort.abort(); };
+    pageLoad = round;
+    setLoadState("loading");
+    var request = function (read, at) {
+      return read(LOAD_TIMEOUT, abort ? abort.signal : undefined).then(function (data) {
+        round.answers[at] = data;
+      }, function (err) {
+        if (round.failure) return;
+        round.failure = err;
+        round.cancel();
+      });
+    };
+    round.promise = Promise.all([request(fetchStatus, 0), request(fetchConfig, 1)]).then(function () {
+      if (!current()) return false;
+      if (round.failure) {
+        pageLoad = null;
+        setLoadState("failed", round.failure.message);
+        return false;
+      }
+      return preparePage(round.answers[0], round.answers[1]).then(function () {
+        if (!current()) return false;
+        pageLoad = null;
+        showPage();
+        return true;
+      });
+    });
+    return round.promise;
+  }
+
+  // Takes the status and the config cfg of a load and restores the page
+  // state of cfg, the first valid config, while the app is hidden: the
+  // masking applies before any account name shows, and the chart state,
+  // with the history of a saved window it may need, before the first chart
+  // and before anything can be clicked. Resolves once the chart state is
+  // restored.
+  function preparePage(data, cfg) {
+    pagePrepared = true;
+    useStatus(data);
+    useConfig(cfg);
+    restorePageState(cfg);
+    return Promise.resolve(restoreChartState(cfg));
+  }
+
+  // Shows the page, then loads the chosen chart.
+  function showPage() {
+    checkUpdate();
+    // Shown before drawing, since the chart measures its width; nothing
+    // is painted before the drawing below.
+    showContent();
+    renderStatus();
+    fillSettings();
+    loadHistory().then(function (loaded) {
+      if (loaded) prefetchHistory();
+    });
+  }
+
   // Magpie's sandbox blocks form submission without a submit event, so the
-  // key is also taken on Enter and on a click of the button. Without
-  // localStorage the key lasts until the page reloads.
+  // key is also taken on Enter and on a click of the button. The key is
+  // stored and the page loads anew with it. Without localStorage the page
+  // loads with the key, which lasts until the page reloads: the key form
+  // shows only on a page that has taken nothing (see askForKey). A key a
+  // header cannot carry is not taken.
   function submitKey(e) {
     e.preventDefault();
-    key = $("key-input").value.trim();
-    if (!key) return;
-    try { localStorage.setItem(KEY_STORE, key); } catch (err) {}
+    var entered = $("key-input").value.trim();
+    if (!entered) return;
+    if (!validKey(entered)) {
+      $("key-error").hidden = false;
+      $("key-error").textContent = translate("key_format");
+      return;
+    }
+    try {
+      localStorage.setItem(KEY_STORE, entered);
+      location.reload();
+      return;
+    } catch (err) {}
+    key = entered;
     start();
   }
   $("key-form").addEventListener("submit", submitKey);
@@ -4895,7 +5368,8 @@
     if (top) noteEdit(e.target);
     var host = accountField ? accountFieldHost(e.target) : top ? saveHost(e.target) : null;
     if (host) editSaveState(host, e.target);
-    if (e.target.name === "public_listen") renderMcp();
+    // The client configs follow the addresses as they are typed.
+    if (e.target.name === "public_listen" || e.target.name === "mcp_public_url") renderMcp();
   });
   timezoneOptions().forEach(function (name) { $("timezone-options").appendChild(el("option", { value: name })); });
   // Saves the time zone the field shows, such as the browser's one filled in.
@@ -4907,15 +5381,6 @@
   $("admin-key-new").addEventListener("click", generateAdminKey);
   $("admin-key-show").addEventListener("click", function () { adminKeyShown = !adminKeyShown; renderPublic(); });
   $("admin-key-copy").addEventListener("click", function (e) { copyText(adminKey(), e.currentTarget); });
-  // The public address stays in this browser; the configs follow it.
-  $("mcp-public-url").addEventListener("input", function (e) {
-    try {
-      if (e.target.value.trim()) localStorage.setItem(MCP_URL_STORE, e.target.value.trim());
-      else localStorage.removeItem(MCP_URL_STORE);
-    } catch (err) {}
-    renderMcp();
-  });
-  try { $("mcp-public-url").value = localStorage.getItem(MCP_URL_STORE) || ""; } catch (err) {}
 
   // The quota and settings views; the last one shown is kept in this
   // browser. The chart is drawn when its view shows, since it measures its
@@ -4933,11 +5398,9 @@
     var button = e.target.closest(".seg");
     if (button && button.getAttribute("aria-pressed") !== "true") showView(button.getAttribute("data-value"), true);
   });
-  // Turning remembering on keeps the current filters; turning it off forgets them.
-  $("settings").elements["remember_chart_filters"].addEventListener("change", function (e) {
-    if (e.target.checked) saveChartFilters();
-    else try { localStorage.removeItem(CHART_STORE); } catch (err) {}
-  });
+  $("settings").elements["remember_chart_filters"].addEventListener("change", function (e) { saveChartSwitch(e.target); });
+  $("settings").elements["remember_chart_expanded"].addEventListener("change", function (e) { saveChartSwitch(e.target); });
+  $("load-retry").addEventListener("click", function () { loadPage(); });
   $("settings").addEventListener("submit", function (e) { e.preventDefault(); });
   // Enter commits a text or number field; leaving it fires the change that saves it.
   $("settings").addEventListener("keydown", function (e) {
@@ -4949,8 +5412,8 @@
   $("events-more").addEventListener("click", function () { eventsExpanded = !eventsExpanded; renderEvents(); });
   $("events-5h").addEventListener("change", function (e) {
     showFiveHourResets = e.target.checked;
-    try { localStorage.setItem(EVENTS_STORE, showFiveHourResets ? "1" : "0"); } catch (err) {}
-    if (status) renderEvents();
+    writePageState("events_show_5h_resets", { events_show_5h_resets: showFiveHourResets || null });
+    if (status && contentReady) renderEvents();
   });
   // bounce is set when the user picks the value, so the thumb slides there.
   function pressSegment(id, value, bounce) {
@@ -5014,8 +5477,5 @@
   var storedView = "quota";
   try { storedView = localStorage.getItem(VIEW_STORE) || "quota"; } catch (err) {}
   showView(storedView);
-  // The internal listener needs no key; the public one answers 401 without
-  // the admin key, which asks for it.
-  try { key = localStorage.getItem(KEY_STORE) || ""; } catch (err) {}
-  start();
+  begin();
 })();
