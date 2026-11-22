@@ -2186,7 +2186,7 @@ const STATE_RANGES = {
   "5h": [["1h"], ["3h"], ["6h"], ["12h"], ["24h"], ["26h"]],
   "7d": [["24h"], ["4d"], ["8d"], ["15d"], ["1mo"], ["36d"]],
 };
-const stateFunctions = ["writePageState", "sendPageState", "forgetStores", "restorePageState", "rememberChart", "rememberExpanded",
+const stateFunctions = ["writePageState", "sendPageState", "forgetStores", "readOldMask", "restorePageState", "rememberChart", "rememberExpanded",
   "currentChartView", "saveChartFilters", "expandedGroups", "saveChartExpanded", "saveChartSwitch", "rangeFor", "restoreChartState"];
 
 // The page state functions with a settings form of two switches and a
@@ -2218,7 +2218,8 @@ function pageStateContext(switches = {}, globals = {}) {
     },
     ...globals,
   });
-  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES"), ctx);
+  // As the script loads.
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES") + pageVar("oldMask"), ctx);
   return { ctx, form, writes, results, pressed, pending };
 }
 const settle = () => new Promise(setImmediate);
@@ -2519,6 +2520,24 @@ test("the masking switch of an earlier version moves to the config once, and the
   assert.deepEqual(writes, []);
 });
 
+test("a second tab opened before the masking moves still masks with the config it read before", async () => {
+  // Two tabs of one browser share the old key; both load before either
+  // has its config.
+  const stored = { "lamplighter-mask-accounts": "1" };
+  const localStorage = { getItem: (k) => k in stored ? stored[k] : null, removeItem: (k) => { delete stored[k]; } };
+  const first = pageStateContext({}, { localStorage });
+  const second = pageStateContext({}, { localStorage });
+  // The first tab moves the masking and deletes the key.
+  first.ctx.restorePageState({});
+  await settle();
+  assert.equal(first.ctx.masked, true);
+  assert.deepEqual(stored, {});
+  // The second tab read its config before that save: still masked.
+  second.ctx.restorePageState({});
+  assert.equal(second.ctx.masked, true);
+  assert.deepEqual(second.writes, [{ mask_accounts: true }]);
+});
+
 // loadPage with its real gate and the real api: the app, the loading
 // card and the key form are plain objects, and each request waits until
 // the test answers it.
@@ -2526,7 +2545,7 @@ function loadPageContext(globals = {}) {
   const nodes = {}, calls = [], timers = [], requests = [], stored = {};
   const node = (id) => nodes[id] || (nodes[id] = { id, hidden: true, textContent: "", value: "" });
   const ctx = context(["loadPage", "preparePage", "showPage", "hideContent", "showContent", "setLoadState", "renderLoadCard", "keyAsked",
-    "askForKey", "cancelLoad", "submitKey", "forgetStores", "restorePageState", "api", "fetchStatus", "fetchConfig"], {
+    "askForKey", "cancelLoad", "submitKey", "validKey", "begin", "forgetStores", "readOldMask", "restorePageState", "api", "fetchStatus", "fetchConfig"], {
     pageLoad: null, pagePrepared: false, pageStateReady: false, contentReady: false,
     loadState: { state: "", message: "" }, loadCardTimer: null, LOAD_TIMEOUT: 15000, LOAD_CARD_DELAY: 300,
     key: "", KEY_STORE: "k", history: null, masked: false, showFiveHourResets: false, reloads: 0,
@@ -2555,7 +2574,7 @@ function loadPageContext(globals = {}) {
     loadHistory: async () => { calls.push("history"); return false; }, prefetchHistory: () => {},
     ...globals,
   });
-  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES"), ctx);
+  vm.runInContext(pageVar("OLD_MASK_STORE") + pageVar("OLD_STORES") + pageVar("oldMask"), ctx);
   for (const id of ["app", "key-section", "key-input", "key-error", "load-section", "load-text", "load-retry"]) node(id);
   // The requests of the latest load: [status, config].
   const last = () => [requests.findLast((r) => r.url === "api/status"), requests.findLast((r) => r.url === "api/config")];
@@ -2776,9 +2795,44 @@ test("once the page has taken the answers of a key, a 401 reloads it and keeps t
   // asks with the reason (see the tests above).
 });
 
+test("a key a header cannot carry is not taken, and a stored one is asked for again at once", async () => {
+  const { ctx, nodes, requests, stored, enterKey } = loadPageContext();
+  ctx.askForKey("");
+  for (const bad of ["密钥abc", "abc😀", "ab c", "abcé"]) {
+    assert.equal(enterKey(bad), null);
+    assert.equal(stored.k, undefined, bad);
+    assert.equal(ctx.reloads, 0);
+    assert.equal(nodes["key-error"].hidden, false);
+    assert.equal(nodes["key-error"].textContent, "key_format");
+    assert.equal(nodes["key-section"].hidden, false);
+  }
+  assert.equal(requests.length, 0);
+  enterKey("llad_A-z0~!");
+  assert.equal(stored.k, "llad_A-z0~!");
+  assert.equal(ctx.reloads, 1);
+  // A bad key stored earlier, such as by an older page: asked for with
+  // the reason, without a request, a failure card or a retry.
+  const other = loadPageContext();
+  other.stored.k = "坏的key";
+  other.ctx.begin();
+  assert.equal(other.requests.length, 0);
+  assert.equal(other.stored.k, undefined);
+  assert.equal(other.ctx.key, "");
+  assert.equal(other.nodes["key-section"].hidden, false);
+  assert.equal(other.nodes["key-error"].textContent, "key_invalid");
+  assert.equal(other.nodes["load-section"].hidden, true);
+  // A good stored key starts the load with it.
+  const good = loadPageContext();
+  good.stored.k = "good";
+  good.ctx.begin();
+  assert.deepEqual(good.requests.map((r) => r.key), ["Bearer good", "Bearer good"]);
+  assert.match(source, /\n  begin\(\);\n\}\)\(\);\s*$/);
+});
+
 test("the old masking switch masks before the page shows", async () => {
   const { ctx, calls, stored, last } = loadPageContext();
   stored["lamplighter-mask-accounts"] = "1";
+  ctx.oldMask = ctx.readOldMask();
   const load = ctx.loadPage();
   last()[0].answer({});
   last()[1].answer({});

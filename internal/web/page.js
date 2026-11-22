@@ -211,6 +211,7 @@
       key_placeholder: "Lamplighter 管理密钥",
       key_submit: "确定",
       key_invalid: "管理密钥无效，请重新输入。",
+      key_format: "管理密钥只能包含英文字母、数字和符号。",
       refresh_all: "立即刷新全部",
       quota: "额度",
       ignition: "自动点火",
@@ -394,6 +395,7 @@
       key_placeholder: "Lamplighter admin key",
       key_submit: "OK",
       key_invalid: "The admin key is not valid. Enter it again.",
+      key_format: "The admin key can only contain English letters, digits and symbols.",
       refresh_all: "Refresh all",
       quota: "Quota",
       ignition: "Ignition",
@@ -679,6 +681,10 @@
       });
     }).catch(timedOut).then(function (data) { done(); return data; }, function (err) { done(); throw err; });
   }
+
+  // A key a request header can carry: visible ASCII. The browser refuses
+  // to send others, such as one pasted with Chinese text, without a 401.
+  function validKey(value) { return /^[\x21-\x7e]+$/.test(value); }
 
   // After the page saves a new admin key, a page that sends a key sends the
   // new one.
@@ -3840,6 +3846,14 @@
     });
   }
 
+  // The old masking switch is read as the script loads, before any
+  // request: another tab of this browser may move it and delete its key
+  // while this one waits for its config.
+  function readOldMask() {
+    try { return localStorage.getItem(OLD_MASK_STORE); } catch (err) { return null; }
+  }
+  var oldMask = readOldMask();
+
   // Applies mask_accounts and events_show_5h_resets of cfg, the first
   // valid config. Without mask_accounts in cfg, the old masking switch of
   // this browser, when on, masks and is saved to the config; its key goes
@@ -3847,8 +3861,6 @@
   function restorePageState(cfg) {
     if (pageStateReady) return;
     pageStateReady = true;
-    var oldMask = null;
-    try { oldMask = localStorage.getItem(OLD_MASK_STORE); } catch (err) {}
     var migrate = cfg.mask_accounts == null && oldMask === "1";
     forgetStores(migrate ? OLD_STORES : OLD_STORES.concat(OLD_MASK_STORE));
     setMasked(migrate || cfg.mask_accounts === true);
@@ -5193,6 +5205,16 @@
     pageLoad = null;
   }
 
+  // Starts with the stored key. The internal listener needs no key; the
+  // public one answers 401 without the admin key, which asks for it. A
+  // stored key a header cannot carry is asked for again at once, since the
+  // browser would fail its requests without a 401.
+  function begin() {
+    try { key = localStorage.getItem(KEY_STORE) || ""; } catch (err) {}
+    if (key && !validKey(key)) askForKey(translate("key_invalid"));
+    else start();
+  }
+
   function start() {
     $("key-section").hidden = true;
     loadPage();
@@ -5276,11 +5298,17 @@
   // key is also taken on Enter and on a click of the button. The key is
   // stored and the page loads anew with it. Without localStorage the page
   // loads with the key, which lasts until the page reloads: the key form
-  // shows only on a page that has taken nothing (see askForKey).
+  // shows only on a page that has taken nothing (see askForKey). A key a
+  // header cannot carry is not taken.
   function submitKey(e) {
     e.preventDefault();
     var entered = $("key-input").value.trim();
     if (!entered) return;
+    if (!validKey(entered)) {
+      $("key-error").hidden = false;
+      $("key-error").textContent = translate("key_format");
+      return;
+    }
     try {
       localStorage.setItem(KEY_STORE, entered);
       location.reload();
@@ -5448,8 +5476,5 @@
   var storedView = "quota";
   try { storedView = localStorage.getItem(VIEW_STORE) || "quota"; } catch (err) {}
   showView(storedView);
-  // The internal listener needs no key; the public one answers 401 without
-  // the admin key, which asks for it.
-  try { key = localStorage.getItem(KEY_STORE) || ""; } catch (err) {}
-  start();
+  begin();
 })();
