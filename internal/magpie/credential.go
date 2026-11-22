@@ -240,6 +240,7 @@ func codexCredential(auth json.RawMessage) (host.Credential, error) {
 	} else if exp, ok := jwtClaims(t.AccessToken)["exp"].(float64); ok && exp > 0 && !now().Before(time.Unix(int64(exp), 0)) {
 		cred.Expired = true
 	}
+	cred.RenewedByRefresh = cred.Expired
 	return cred, nil
 }
 
@@ -333,7 +334,7 @@ func (h *Host) claudeCredential(l savedLogin) (host.Credential, error) {
 		cred.Fingerprint = fingerprint(oauth.AccessToken)
 	}
 	if oauth.ExpiresAt > 0 && !now().Before(time.UnixMilli(oauth.ExpiresAt)) {
-		cred.Expired = true
+		cred.Expired, cred.RenewedByRefresh = true, true
 	}
 	return cred, nil
 }

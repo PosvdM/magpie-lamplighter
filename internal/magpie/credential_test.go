@@ -89,7 +89,7 @@ func TestCodexCredential(t *testing.T) {
 	}
 	// Lamplighter never refreshes a Codex token: one past its exp is Expired.
 	writeFiles(t, h.ConfigDir, map[string]string{"logins.json": loginsFile(jwt(map[string]any{"exp": float64(testNow.Unix())}), "{}")})
-	if got, err := h.Credential(context.Background(), host.Account{Pin: "codex/1a2b3c4d5e6f7a8b", Provider: "codex"}); err != nil || !got.Expired {
+	if got, err := h.Credential(context.Background(), host.Account{Pin: "codex/1a2b3c4d5e6f7a8b", Provider: "codex"}); err != nil || !got.Expired || !got.RenewedByRefresh {
 		t.Fatalf("expired token: %+v, %v", got, err)
 	}
 }
@@ -103,7 +103,7 @@ func TestClaudeCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AccessToken != "old-access" || !got.Expired || got.Fingerprint != fingerprint("rt-1") {
+	if got.AccessToken != "old-access" || !got.Expired || !got.RenewedByRefresh || got.Fingerprint != fingerprint("rt-1") {
 		t.Fatalf("credential = %+v", got)
 	}
 	// Claude Code keeps a saved account's sign-in in claude-accounts/<hash>,
@@ -114,12 +114,12 @@ func TestClaudeCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AccessToken != "new-access" || got.Expired || got.Fingerprint != fingerprint("rt-2") {
+	if got.AccessToken != "new-access" || got.Expired || got.RenewedByRefresh || got.Fingerprint != fingerprint("rt-2") {
 		t.Fatalf("credential with Claude Code's own copy = %+v (is %s the account's folder?)", got, dir)
 	}
 	// An account added with a setup-token reads Magpie's kept quota.
 	got, err = h.Credential(context.Background(), host.Account{Pin: "claude/" + nameID("claude", "Setup token …x1y2"), Provider: "claude"})
-	if err != nil || !got.Expired || got.AccessToken != "" || got.Fingerprint != fingerprint("sk-ant-oat01-setup") {
+	if err != nil || !got.Expired || got.RenewedByRefresh || got.AccessToken != "" || got.Fingerprint != fingerprint("sk-ant-oat01-setup") {
 		t.Fatalf("setup-token account: %+v, %v", got, err)
 	}
 }
@@ -234,7 +234,7 @@ func TestAgyRefused(t *testing.T) {
 	}
 	// Without a refresh token an ended access token is Expired.
 	h, _ = agyFixture(t, agyToken("ya29.old", "", testNow.Add(-time.Minute)))
-	if got, err := h.Credential(context.Background(), agyAccount); err != nil || !got.Expired {
+	if got, err := h.Credential(context.Background(), agyAccount); err != nil || !got.Expired || got.RenewedByRefresh {
 		t.Fatalf("no refresh token: %+v, %v", got, err)
 	}
 	// Go's zero time is a token that does not end.

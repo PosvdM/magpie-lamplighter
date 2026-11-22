@@ -109,6 +109,11 @@ type Credential struct {
 	// and cannot be renewed by Lamplighter. The engine then reads Magpie's
 	// kept quota for the account instead of asking the vendor.
 	Expired bool
+	// RenewedByRefresh is set with Expired when Magpie renews the token
+	// as it refreshes the account's quota (RefreshQuota): a Claude
+	// sign-in, whose refresh runs Claude Code, and a Codex sign-in. A
+	// Claude setup-token and an Antigravity token are not.
+	RenewedByRefresh bool
 	// Data holds provider-specific fields, such as an Antigravity
 	// user_agent.
 	Data map[string]any

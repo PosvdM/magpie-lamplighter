@@ -366,6 +366,38 @@ var (
 	replyMargin = time.Second
 )
 
+// A scheduled round has Magpie refresh the quota of an account whose token
+// has expired and is renewed by the refresh (host.Credential
+// RenewedByRefresh), at most once per scheduledRenewGap for each account
+// and for one account per round. Magpie reads no quota of its own for an
+// idle account, so without the refresh its kept reading stops changing. A
+// Claude refresh runs Claude Code's /usage in the account's configuration
+// directory, which also renews the token, so later rounds query Anthropic
+// directly again: an idle Claude account runs Claude Code about once per
+// token lifetime (8 hours). The gap bounds the runs while a refresh keeps
+// failing, and one refresh per round bounds how long a round holds the
+// background loop. scheduledRenewTimeout covers what one refresh of
+// package magpie takes (refreshLookTimeout and refreshTimeout).
+var (
+	scheduledRenewGap     = 30 * time.Minute
+	scheduledRenewTimeout = 45 * time.Second
+)
+
+// renewDue reports whether a scheduled round may have Magpie refresh the
+// quota of cred now, and if so records the refresh as tried.
+func (e *Engine) renewDue(cred *Cred) bool {
+	now := e.now()
+	if e.roundRenewed {
+		return false
+	}
+	if last, ok := e.renewedAt[cred.AuthIndex]; ok && now.Sub(last) < scheduledRenewGap {
+		return false
+	}
+	e.renewedAt[cred.AuthIndex] = now
+	e.roundRenewed = true
+	return true
+}
+
 // manualRefreshEnd is when a manual refresh started at start ends: after
 // manualRefreshBudget, or replyMargin before deadline, the deadline of the
 // request that asked for it (zero for none), when that is sooner.
@@ -494,6 +526,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 	}
 	errs := map[string]string{}
 	failed := map[string]error{}
+	e.roundRenewed = false
 	for _, cred := range creds {
 		if onlyAuth != "" && cred.AuthIndex != onlyAuth {
 			continue
@@ -511,7 +544,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 		if !force && e.shouldSkipActive(cfg, cred, slot, now) {
 			continue
 		}
-		if err := e.queryCredWith(ctx, cfg, cred, true, renew); err != nil {
+		if err := e.queryCredWith(ctx, cfg, cred, true, renew, renew == nil); err != nil {
 			errs[cred.AuthIndex] = err.Error()
 			failed[cred.AuthIndex] = err
 			e.logf("warn", "额度刷新失败：%s：%v", labelFor(providers.Title(cred.Provider), cred), err)
@@ -643,19 +676,20 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 
 // refreshCred runs the active query of one credential.
 func (e *Engine) refreshCred(ctx context.Context, cfg config.Config, cred *Cred) error {
-	return e.queryCredWith(ctx, cfg, cred, true, nil)
+	return e.queryCredWith(ctx, cfg, cred, true, nil, false)
 }
 
 // queryCred runs the active query of one credential. Without track, the
 // result does not change the credential state: no new or ended credential
 // problem, event or notification.
 func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, track bool) error {
-	return e.queryCredWith(ctx, cfg, cred, track, nil)
+	return e.queryCredWith(ctx, cfg, cred, track, nil, false)
 }
 
 // queryCredWith is queryCred; with renew set, an expired credential has
-// Magpie refresh its quota first (refreshKept).
-func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context) error {
+// Magpie refresh its quota first (refreshKept). A scheduled round does the
+// same at most once per scheduledRenewGap for each account (renewDue).
+func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context, scheduled bool) error {
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
 		return fmt.Errorf("读取凭证失败：%w", err)
@@ -674,6 +708,11 @@ func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cre
 		// owns it; Magpie's own last reading stands in.
 		if renew != nil {
 			return e.refreshKept(ctx, renew, cfg, cred)
+		}
+		if scheduled && credential.RenewedByRefresh && e.renewDue(cred) {
+			scheduledRenew, cancel := context.WithTimeout(ctx, scheduledRenewTimeout)
+			defer cancel()
+			return e.refreshKept(ctx, scheduledRenew, cfg, cred)
 		}
 		return e.keptFallback(ctx, cfg, cred)
 	}

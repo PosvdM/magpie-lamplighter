@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -81,15 +82,20 @@ func TestExpiredTokenFallsBackToTheKeptQuota(t *testing.T) {
 	}
 }
 
-// expiredHost reports the credential of pin as expired.
+// expiredHost reports the credential of pin, and of the pins in also, as
+// expired: an OAuth sign-in that a quota refresh renews, or with setup a
+// token that it does not.
 type expiredHost struct {
 	*fakeHost
-	pin string
+	pin   string
+	also  []string
+	setup bool
 }
 
 func (h *expiredHost) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
 	cred, err := h.fakeHost.Credential(ctx, account)
-	cred.Expired = account.Pin == h.pin
+	cred.Expired = account.Pin == h.pin || slices.Contains(h.also, account.Pin)
+	cred.RenewedByRefresh = cred.Expired && !h.setup
 	return cred, err
 }
 
@@ -131,7 +137,6 @@ func manualRefresh(e *Engine, pin string) error {
 
 func TestManualRefreshAsksMagpieToRefreshAnExpiredCredential(t *testing.T) {
 	e, h, renew, c := newRenewEngine(t)
-	ctx := context.Background()
 	c.add(time.Minute)
 	h.kept = []host.KeptQuota{keptClaude("3", c.t.Add(-30*time.Minute), 70)}
 	renew.refresh = func(ctx context.Context, pin string) error {
@@ -159,12 +164,79 @@ func TestManualRefreshAsksMagpieToRefreshAnExpiredCredential(t *testing.T) {
 	if len(renew.refreshed) != 1 || renew.refreshed[0] != "3" {
 		t.Fatalf("refreshed %v, want [3]", renew.refreshed)
 	}
-	// Scheduled rounds and the reset probes only read the kept quota.
-	renew.refreshed = nil
+}
+
+func TestScheduledRoundsRenewAnExpiredCredentialAtMostOncePerGap(t *testing.T) {
+	e, h, renew, c := newRenewEngine(t)
+	ctx := context.Background()
+	c.add(time.Minute)
+	h.kept = []host.KeptQuota{keptClaude("3", c.t.Add(-2*time.Hour), 70)}
+	renew.refresh = func(ctx context.Context, pin string) error {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > scheduledRenewTimeout {
+			t.Errorf("refresh deadline = %v, %v", deadline, ok)
+		}
+		h.kept = []host.KeptQuota{keptClaude("3", c.t, 33)}
+		return nil
+	}
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 1 || renew.refreshed[0] != "3" {
+		t.Fatalf("refreshed %v, want [3]", renew.refreshed)
+	}
+	if w := claudeWindow(e); w.Remaining != 33 {
+		t.Fatalf("the refreshed reading was not applied: %+v", w)
+	}
+	// Within the gap, scheduled rounds and the reset probes read the kept
+	// quota only.
+	c.add(scheduledRenewGap - time.Minute)
 	e.poll(ctx, e.config(), c.t, "", false)
 	e.poll(ctx, e.config(), c.t, "3", true)
-	if len(renew.refreshed) != 0 {
-		t.Fatalf("a scheduled round refreshed %v", renew.refreshed)
+	if len(renew.refreshed) != 1 {
+		t.Fatalf("refreshed %v within the gap", renew.refreshed)
+	}
+	// A failed refresh counts too: the next one waits for the gap.
+	c.add(time.Minute)
+	renew.refresh = func(context.Context, string) error { return errors.New("Claude Code 启动失败") }
+	e.poll(ctx, e.config(), c.t, "", false)
+	c.add(time.Minute)
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 2 {
+		t.Fatalf("refreshed %v, want two refreshes", renew.refreshed)
+	}
+	if w := claudeWindow(e); w.Remaining != 33 {
+		t.Fatalf("the kept reading was not kept: %+v", w)
+	}
+	// Ignition's query after a start does not refresh.
+	c.add(scheduledRenewGap)
+	if err := e.queryCred(ctx, e.config(), e.creds["3"], false); err != nil {
+		t.Fatal(err)
+	}
+	if len(renew.refreshed) != 2 {
+		t.Fatalf("refreshed %v outside a scheduled round", renew.refreshed)
+	}
+	// A token the refresh does not renew, such as a Claude setup-token,
+	// only reads the kept quota.
+	renew.setup = true
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 2 {
+		t.Fatalf("refreshed %v for a setup-token", renew.refreshed)
+	}
+}
+
+func TestScheduledRoundsRenewOneAccountPerRound(t *testing.T) {
+	e, h, renew, c := newRenewEngine(t)
+	ctx := context.Background()
+	renew.also = []string{"1"}
+	h.kept = []host.KeptQuota{keptClaude("3", c.t, 60)}
+	renew.refresh = func(context.Context, string) error { return nil }
+	c.add(time.Minute)
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 1 {
+		t.Fatalf("refreshed %v in one round, want one account", renew.refreshed)
+	}
+	c.add(5 * time.Minute)
+	e.poll(ctx, e.config(), c.t, "", false)
+	if len(renew.refreshed) != 2 || renew.refreshed[0] == renew.refreshed[1] {
+		t.Fatalf("refreshed %v, want each account once over two rounds", renew.refreshed)
 	}
 }
 
@@ -201,7 +273,7 @@ func TestRefreshesShareTheManualBudget(t *testing.T) {
 	renewCtx, cancel := context.WithCancelCause(context.Background())
 	cancel(errManualTimeUp)
 	// A refresh whose budget has run out still applies the kept reading.
-	err := e.queryCredWith(context.Background(), cfg, e.creds["3"], true, renewCtx)
+	err := e.queryCredWith(context.Background(), cfg, e.creds["3"], true, renewCtx, false)
 	if err == nil || !strings.Contains(err.Error(), "超过") {
 		t.Fatalf("err = %v", err)
 	}
