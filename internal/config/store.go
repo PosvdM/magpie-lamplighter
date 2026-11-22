@@ -88,8 +88,10 @@ func (s *Store) Raw() map[string]json.RawMessage {
 }
 
 // Patch replaces the given top-level keys, a null value deleting the key.
-// The result must parse and pass Config.Check; it is then written to the
-// file whole (a temporary file and a rename) and returned.
+// chart_view and chart_expanded are dropped while remember_chart_filters
+// and remember_chart_expanded are off. The result must parse and pass
+// Config.Check; it is then written to the file whole (a temporary file and
+// a rename) and returned.
 //
 // Patch does not apply the result; a caller that applies it holds its own
 // lock across Patch and the apply, so that the order of the saved
@@ -108,11 +110,28 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 		}
 		next[key] = value
 	}
-	data, err := json.MarshalIndent(next, "", "  ")
+	cfg, err := parseKeys(next)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg, err := Parse(data)
+	// The state a remember switch keeps is not kept while the switch is
+	// off: a page opened before the switch was turned off elsewhere may
+	// still write it.
+	dropped := false
+	if !cfg.RememberChartFilters && next["chart_view"] != nil {
+		delete(next, "chart_view")
+		dropped = true
+	}
+	if !cfg.RememberChartExpanded && next["chart_expanded"] != nil {
+		delete(next, "chart_expanded")
+		dropped = true
+	}
+	if dropped {
+		if cfg, err = parseKeys(next); err != nil {
+			return Config{}, err
+		}
+	}
+	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return Config{}, err
 	}
@@ -124,6 +143,14 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	}
 	s.raw = next
 	return cfg, nil
+}
+
+func parseKeys(keys map[string]json.RawMessage) (Config, error) {
+	data, err := json.MarshalIndent(keys, "", "  ")
+	if err != nil {
+		return Config{}, err
+	}
+	return Parse(data)
 }
 
 func writeFile(path string, data []byte) error {

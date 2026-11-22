@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -156,31 +158,47 @@ func TestMCPOnlyConfigAdvancesTokenAndRotatesAuthentication(t *testing.T) {
 // The keys the page writes for its own state change neither the runtime
 // config (notification channels, timeouts, time zone) nor the poll interval,
 // so saving them only confirms the new token.
-func TestPageStateLeavesRuntimeConfig(t *testing.T) {
+// A save of only the page's state updates the config the status shows,
+// without waking the background loop, which would run the ignitions due
+// within its lead early, or moving the applied token.
+func TestPageStateLeavesTheLoopAsleep(t *testing.T) {
 	e := New(Options{})
 	before := config.Default()
-	e.Configure(before, nil)
-	applied, _ := e.applyPendingConfig(config.Default())
-	alerts := e.alerts
-	cfg := applied
-	cfg.ConfigToken = "page"
+	before.ConfigToken = "settings"
+	e.MCPConfigured(e.Configure(before, nil))
+	e.applyPendingConfig(config.Default())
+	<-e.wakeCh
+	revision := e.cfgRevision
+	cfg := before
+	cfg.BarkURL = "https://example.com/not-applied"
 	cfg.RememberChartFilters = true
 	cfg.RememberChartExpanded = true
 	cfg.ChartView = &config.ChartView{Window: "7d", Sort: "low", Ranges: map[string]string{"7d": "15d"}}
-	cfg.ChartExpanded = []string{"Claude"}
+	cfg.ChartExpanded = []string{"claude|Claude"}
 	cfg.MCPPublicURL = "https://mcp.example.com"
 	cfg.MaskAccounts = true
 	cfg.EventsShow5hResets = true
-	if !sameRuntimeConfig(applied, cfg) {
-		t.Fatal("page state must not count as a runtime change")
+	if !e.ConfigurePageState(cfg) {
+		t.Fatal("page state refused")
 	}
-	rev := e.Configure(cfg, nil)
-	e.MCPConfigured(rev)
-	_, pollChanged := e.applyPendingConfig(applied)
-	if pollChanged || e.alerts != alerts {
-		t.Fatalf("page state restarted the poll (%v) or rebuilt the notifications", pollChanged)
+	select {
+	case <-e.wakeCh:
+		t.Fatal("page state woke the background loop")
+	default:
 	}
-	if got := e.configAppliedToken; got != "page" {
-		t.Fatalf("applied token %q", got)
+	got := e.Status()
+	if e.cfgRevision != revision || got.ConfigAppliedToken != "settings" {
+		t.Fatalf("revision %d, applied token %q", e.cfgRevision, got.ConfigAppliedToken)
+	}
+	want := before
+	want.SetPageState(cfg)
+	if !reflect.DeepEqual(e.config(), want) || e.config().BarkURL != "" {
+		t.Fatalf("config %+v", e.config())
+	}
+	// After a config that did not parse, the next save goes through
+	// Configure, which clears the error.
+	e.Configure(config.Config{}, errors.New("bad"))
+	if e.ConfigurePageState(cfg) {
+		t.Fatal("page state taken over a config error")
 	}
 }

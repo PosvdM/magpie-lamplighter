@@ -41,13 +41,13 @@ func TestParseRememberChartFilters(t *testing.T) {
 
 func TestParsePageState(t *testing.T) {
 	cfg, err := Parse([]byte(`{"remember_chart_expanded": true, "chart_view": {"window": "7d", "sort": "low", "ranges": {"5h": "12h", "7d": "15d"}},
-		"chart_expanded": ["Claude", "Codex"], "mcp_public_url": "https://mcp.example.com", "mask_accounts": true, "events_show_5h_resets": true}`))
+		"chart_expanded": ["claude|Claude", "codex|GPT"], "mcp_public_url": "https://mcp.example.com", "mask_accounts": true, "events_show_5h_resets": true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := ChartView{Window: "7d", Sort: "low", Ranges: map[string]string{"5h": "12h", "7d": "15d"}}
 	if !cfg.RememberChartExpanded || cfg.ChartView == nil || !reflect.DeepEqual(*cfg.ChartView, want) ||
-		!reflect.DeepEqual(cfg.ChartExpanded, []string{"Claude", "Codex"}) || cfg.MCPPublicURL != "https://mcp.example.com" ||
+		!reflect.DeepEqual(cfg.ChartExpanded, []string{"claude|Claude", "codex|GPT"}) || cfg.MCPPublicURL != "https://mcp.example.com" ||
 		!cfg.MaskAccounts || !cfg.EventsShow5hResets {
 		t.Fatalf("page state %+v", cfg)
 	}
@@ -78,17 +78,17 @@ func TestStorePatchesPageState(t *testing.T) {
 		"remember_chart_filters":  json.RawMessage(`true`),
 		"remember_chart_expanded": json.RawMessage(`true`),
 		"chart_view":              json.RawMessage(view),
-		"chart_expanded":          json.RawMessage(`["Claude"]`),
+		"chart_expanded":          json.RawMessage(`["claude|Claude"]`),
 		"mask_accounts":           json.RawMessage(`true`),
 	})
 	if err != nil || cfg.ChartView == nil || cfg.ChartView.Ranges["7d"] != "8d" || len(cfg.ChartExpanded) != 1 || !cfg.MaskAccounts {
 		t.Fatalf("patch %+v %v", cfg, err)
 	}
-	if string(store.Raw()["chart_view"]) != view || string(store.Raw()["chart_expanded"]) != `["Claude"]` {
+	if string(store.Raw()["chart_view"]) != view || string(store.Raw()["chart_expanded"]) != `["claude|Claude"]` {
 		t.Fatalf("raw %s", store.Raw())
 	}
 	_, cfg, err = Open(path)
-	if err != nil || !cfg.RememberChartExpanded || cfg.ChartView == nil || cfg.ChartView.Window != "5h" || cfg.ChartExpanded[0] != "Claude" {
+	if err != nil || !cfg.RememberChartExpanded || cfg.ChartView == nil || cfg.ChartView.Window != "5h" || cfg.ChartExpanded[0] != "claude|Claude" {
 		t.Fatalf("reopened %+v %v", cfg, err)
 	}
 	cfg, err = store.Patch(map[string]json.RawMessage{"chart_view": json.RawMessage(`null`), "chart_expanded": json.RawMessage(`null`), "mask_accounts": json.RawMessage(`null`)})
@@ -103,6 +103,88 @@ func TestStorePatchesPageState(t *testing.T) {
 	}
 	if string(raw["remember_chart_filters"]) != "true" {
 		t.Fatalf("other keys must stay: %s", raw)
+	}
+}
+
+// The state of a remember switch is not kept while the switch is off,
+// whoever writes it.
+func TestStoreDropsTheStateOfASwitchThatIsOff(t *testing.T) {
+	store, _, err := Open(filepath.Join(t.TempDir(), FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := json.RawMessage(`{"window":"7d"}`)
+	cfg, err := store.Patch(map[string]json.RawMessage{"chart_view": view, "chart_expanded": json.RawMessage(`["claude|Claude"]`)})
+	if err != nil || cfg.ChartView != nil || cfg.ChartExpanded != nil {
+		t.Fatalf("state saved with the switches off: %+v %v", cfg, err)
+	}
+	if raw := store.Raw(); raw["chart_view"] != nil || raw["chart_expanded"] != nil {
+		t.Fatalf("raw %s", raw)
+	}
+	cfg, err = store.Patch(map[string]json.RawMessage{"remember_chart_filters": json.RawMessage(`true`), "chart_view": view,
+		"remember_chart_expanded": json.RawMessage(`true`), "chart_expanded": json.RawMessage(`["claude|Claude"]`)})
+	if err != nil || cfg.ChartView == nil || len(cfg.ChartExpanded) != 1 {
+		t.Fatalf("switches on: %+v %v", cfg, err)
+	}
+	// Turning a switch off deletes its state even when the patch leaves the
+	// state out.
+	cfg, err = store.Patch(map[string]json.RawMessage{"remember_chart_filters": json.RawMessage(`null`)})
+	if err != nil || cfg.ChartView != nil || store.Raw()["chart_view"] != nil || len(cfg.ChartExpanded) != 1 {
+		t.Fatalf("switch off: %+v %v %s", cfg, err, store.Raw())
+	}
+}
+
+func TestMCPPublicURLValid(t *testing.T) {
+	for value, want := range map[string]bool{
+		"":                                true,
+		"https://mcp.example.com":         true,
+		"http://10.0.0.2:8318":            true,
+		"mcp.example.com/lamplighter/mcp": true,
+		"HTTPS://MCP.example.com/":        true,
+		"ftp://mcp.example.com":           false,
+		"javascript:alert(1)":             false,
+		"javascript://x.com":              false,
+		"https://":                        false,
+		"https://x.com/a b":               false,
+		"https://x.com/\nrm -rf ~":        false,
+		"https://x.com/a\u00a0b":          false,
+		"https://x.com/'$(id)'":           true,
+		"https://x.com/?a=1":              false,
+		"https://x.com/#a":                false,
+		"https://x.com:port":              false,
+	} {
+		cfg := Config{MCPPublicURL: value}
+		if got := cfg.MCPPublicURLValid(); got != want {
+			t.Errorf("%q: valid %v, want %v", value, got, want)
+		}
+	}
+	store, _, err := Open(filepath.Join(t.TempDir(), FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Patch(map[string]json.RawMessage{"mcp_public_url": json.RawMessage(`"ftp://x.com"`)}); !errors.Is(err, ErrMCPPublicURL) {
+		t.Fatalf("patch: %v", err)
+	}
+	if cfg, err := store.Patch(map[string]json.RawMessage{"mcp_public_url": json.RawMessage(`" https://x.com "`)}); err != nil || cfg.MCPPublicURL != "https://x.com" {
+		t.Fatalf("patch: %+v %v", cfg, err)
+	}
+}
+
+func TestIsPageState(t *testing.T) {
+	raw := func(keys ...string) map[string]json.RawMessage {
+		patch := map[string]json.RawMessage{}
+		for _, key := range keys {
+			patch[key] = json.RawMessage(`null`)
+		}
+		return patch
+	}
+	if !IsPageState(raw("chart_view", "remember_chart_filters", "chart_expanded", "remember_chart_expanded", "mask_accounts", "events_show_5h_resets", "mcp_public_url")) {
+		t.Fatal("page keys")
+	}
+	for _, patch := range []map[string]json.RawMessage{raw(), raw("chart_view", "config_token"), raw("mask_accounts", "bark_url")} {
+		if IsPageState(patch) {
+			t.Fatalf("%v is not page state", patch)
+		}
 	}
 }
 

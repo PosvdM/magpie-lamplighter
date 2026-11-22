@@ -6,13 +6,17 @@ import (
 	// Embedded so that timezone works without tzdata in the container.
 	_ "time/tzdata"
 
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"gopkg.in/yaml.v3"
@@ -339,6 +343,7 @@ func (c *Config) normalize() {
 		c.PublicListen = "127.0.0.1:8318"
 	}
 	c.AdminKey = strings.TrimSpace(c.AdminKey)
+	c.MCPPublicURL = strings.TrimSpace(c.MCPPublicURL)
 	c.AdminKeySet = false
 	c.MCPKey = strings.TrimSpace(c.MCPKey)
 	c.MCPKeySet = false
@@ -407,6 +412,10 @@ var ErrSameKeys = errors.New("admin_key 与 mcp_key 不能相同")
 // name known to time.LoadLocation, or is "Local"; see loadTimezone.
 var ErrTimezone = errors.New("timezone 不是有效的 IANA 时区名")
 
+// ErrMCPPublicURL is the error of an mcp_public_url that is not an http or
+// https address; see MCPPublicURLValid.
+var ErrMCPPublicURL = errors.New("mcp_public_url 不是有效的 http 或 https 地址")
+
 // SameKeys reports whether admin_key and mcp_key are the same non-empty
 // key. Both are trimmed by Parse.
 func (c Config) SameKeys() bool { return c.AdminKey != "" && c.AdminKey == c.MCPKey }
@@ -442,7 +451,76 @@ func (c Config) Check() error {
 	if !c.TimezoneValid() {
 		return ErrTimezone
 	}
+	if !c.MCPPublicURLValid() {
+		return ErrMCPPublicURL
+	}
 	return nil
+}
+
+// hasScheme matches an address that starts with a URL scheme, the way the
+// page tells whether to put https:// in front.
+var hasScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
+// MCPPublicURLValid reports whether mcp_public_url is empty or an http or
+// https address with a host and without spaces, control characters, a
+// query or a fragment. An address without a scheme counts as https, as the
+// page shows it. The page copies the address into shell commands, quoted;
+// the check keeps a value shared by every device a plain address.
+func (c Config) MCPPublicURLValid() bool {
+	value := c.MCPPublicURL
+	if value == "" {
+		return true
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	if !hasScheme.MatchString(value) {
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" &&
+		u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+}
+
+// pageStateKeys are the keys that only the page uses: its own state and
+// the switches that keep it, and the public address of MCP shown in its
+// client configs. See IsPageState.
+var pageStateKeys = map[string]bool{
+	"remember_chart_filters":  true,
+	"remember_chart_expanded": true,
+	"chart_view":              true,
+	"chart_expanded":          true,
+	"mask_accounts":           true,
+	"events_show_5h_resets":   true,
+	"mcp_public_url":          true,
+}
+
+// IsPageState reports whether a patch changes only keys that the plugin
+// does not use, so that saving it needs nothing applied. An empty patch is
+// not page state.
+func IsPageState(patch map[string]json.RawMessage) bool {
+	for key := range patch {
+		if !pageStateKeys[key] {
+			return false
+		}
+	}
+	return len(patch) > 0
+}
+
+// SetPageState copies the keys of IsPageState from cfg.
+func (c *Config) SetPageState(cfg Config) {
+	c.RememberChartFilters = cfg.RememberChartFilters
+	c.RememberChartExpanded = cfg.RememberChartExpanded
+	c.ChartView = cfg.ChartView
+	c.ChartExpanded = cfg.ChartExpanded
+	c.MaskAccounts = cfg.MaskAccounts
+	c.EventsShow5hResets = cfg.EventsShow5hResets
+	c.MCPPublicURL = cfg.MCPPublicURL
 }
 
 // Location returns the time zone used for display and the ignition window:

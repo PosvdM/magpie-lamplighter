@@ -21,6 +21,13 @@
   <p id="key-error" class="error-text" hidden></p>
 </div>
 
+<!-- Shown while the page waits for its first valid config, or when that
+     fails; see loadPage in page.js. -->
+<div id="load-section" class="card" hidden>
+  <p id="load-text" class="secondary" role="status">加载中…</p>
+  <button id="load-retry" class="btn btn-secondary" type="button" data-i18n="retry" hidden>重试</button>
+</div>
+
 <main id="app" hidden>
   <header>
     <!-- web.Page fills in the logo as a data: URI. page.js makes the logo

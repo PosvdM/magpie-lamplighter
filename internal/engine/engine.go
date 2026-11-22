@@ -221,6 +221,20 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	return revision
 }
 
+// ConfigurePageState 只更新内存配置中页面自己的状态（见 config.IsPageState），
+// 供状态接口返回。它不增加接收序号、不撤销点火、不唤醒后台循环，
+// 所以 config_applied_token 和各项计划都不变。上一份配置解析失败时
+// 返回 false，调用方改走 Configure，以便清除错误。
+func (e *Engine) ConfigurePageState(cfg config.Config) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfgErr != "" {
+		return false
+	}
+	e.cfg.SetPageState(cfg)
+	return true
+}
+
 // MCPConfigured 确认该配置已完成监听器配置，包括停用和绑定失败。
 func (e *Engine) MCPConfigured(revision uint64) {
 	e.mu.Lock()

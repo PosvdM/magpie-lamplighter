@@ -81,24 +81,77 @@ func TestConfigPatchIsSavedAndApplied(t *testing.T) {
 func TestPageStateRoundTrip(t *testing.T) {
 	s, _ := newServer(t)
 	h := s.Handler()
-	body := `{"config_token":"t1","chart_view":{"window":"7d","sort":"low","ranges":{"7d":"15d"}},"chart_expanded":["Claude"],` +
+	body := `{"remember_chart_filters":true,"chart_view":{"window":"7d","sort":"low","ranges":{"7d":"15d"}},` +
+		`"remember_chart_expanded":true,"chart_expanded":["claude|Claude"],` +
 		`"mcp_public_url":"https://mcp.example.com","mask_accounts":true,"events_show_5h_resets":true}`
 	if code, _ := do(t, h, http.MethodPatch, "/api/config", body); code != http.StatusOK {
 		t.Fatalf("patch: %d", code)
 	}
 	_, raw := do(t, h, http.MethodGet, "/api/config", "")
 	view, _ := raw["chart_view"].(map[string]any)
-	if view == nil || view["window"] != "7d" || fmt.Sprint(raw["chart_expanded"]) != "[Claude]" ||
+	if view == nil || view["window"] != "7d" || fmt.Sprint(raw["chart_expanded"]) != "[claude|Claude]" ||
 		raw["mcp_public_url"] != "https://mcp.example.com" || raw["mask_accounts"] != true || raw["events_show_5h_resets"] != true {
 		t.Fatalf("config %v", raw)
 	}
-	body = `{"config_token":"t2","chart_view":null,"chart_expanded":null,"mcp_public_url":null,"mask_accounts":null,"events_show_5h_resets":null}`
+	// The status shows the page state too.
+	_, status := do(t, h, http.MethodGet, "/api/status", "")
+	if cfg := status["config"].(map[string]any); cfg["mask_accounts"] != true || cfg["remember_chart_expanded"] != true {
+		t.Fatalf("status config %v", cfg)
+	}
+	body = `{"remember_chart_filters":null,"chart_view":null,"remember_chart_expanded":null,"chart_expanded":null,` +
+		`"mcp_public_url":null,"mask_accounts":null,"events_show_5h_resets":null}`
 	if code, _ := do(t, h, http.MethodPatch, "/api/config", body); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
 	_, raw = do(t, h, http.MethodGet, "/api/config", "")
-	if len(raw) != 1 || raw["config_token"] != "t2" {
+	if len(raw) != 0 {
 		t.Fatalf("deleted keys remain: %v", raw)
+	}
+}
+
+// A patch of only page state is saved but not applied: the engine keeps
+// the runtime settings it has, and the token of the last applied save. A
+// patch with any other key is applied whole, as before.
+func TestPageStatePatchIsNotApplied(t *testing.T) {
+	s, store := newServer(t)
+	h := s.Handler()
+	if code, _ := do(t, h, http.MethodPatch, "/api/config", `{"config_token":"t1"}`); code != http.StatusOK {
+		t.Fatalf("patch: %d", code)
+	}
+	// A runtime change saved without being applied shows whether a later
+	// patch applies the file.
+	if _, err := store.Patch(map[string]json.RawMessage{"bark_url": json.RawMessage(`"https://b/k"`)}); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := do(t, h, http.MethodPatch, "/api/config", `{"mask_accounts":true,"mcp_public_url":"mcp.example.com"}`); code != http.StatusOK {
+		t.Fatalf("page patch: %d", code)
+	}
+	_, status := do(t, h, http.MethodGet, "/api/status", "")
+	cfg := status["config"].(map[string]any)
+	if cfg["mask_accounts"] != true || cfg["mcp_public_url"] != "mcp.example.com" || cfg["bark_url"] != "" || cfg["config_token"] != "t1" {
+		t.Fatalf("page patch applied the file: %v", cfg)
+	}
+	if code, _ := do(t, h, http.MethodPatch, "/api/config", `{"mask_accounts":null,"config_token":"t2"}`); code != http.StatusOK {
+		t.Fatalf("mixed patch: %d", code)
+	}
+	_, status = do(t, h, http.MethodGet, "/api/status", "")
+	cfg = status["config"].(map[string]any)
+	if cfg["mask_accounts"] != nil || cfg["bark_url"] != "已设置" || cfg["config_token"] != "t2" {
+		t.Fatalf("mixed patch not applied: %v", cfg)
+	}
+}
+
+func TestInvalidMCPPublicURLIsRefused(t *testing.T) {
+	s, store := newServer(t)
+	h := s.Handler()
+	for _, value := range []string{`"ftp://x.com"`, `"https://x.com/a b"`, `"https://x.com/?q=1"`} {
+		code, body := do(t, h, http.MethodPatch, "/api/config", `{"mcp_public_url":`+value+`}`)
+		if code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(body["error"]), "mcp_public_url") {
+			t.Fatalf("%s: %d %v", value, code, body)
+		}
+	}
+	if _, ok := store.Raw()["mcp_public_url"]; ok {
+		t.Fatalf("saved %s", store.Raw())
 	}
 }
 

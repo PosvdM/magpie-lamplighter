@@ -201,7 +201,7 @@ Authentication and listener details are in [对外监听](./docs/architecture.md
 
 How the chart is computed is in [页面功能](./docs/architecture.md#页面功能) (Chinese).
 
-The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the Lamplighter config and shared by every device; when the page opens, nothing that names an account shows before the config is read. Blurring only affects the display and does not remove anything from the API or the page.
+The eye buttons in the page header, the card area header and the detail chart header share one **Blur accounts** / **Show accounts** switch. Blurring covers account names, emails and the fields under **Accounts** (a name such as **Claude#rk** blurs only its suffix, so the service stays readable), and old account names kept in events and the history chart; upstream errors and other text that may name an account are blurred whole. The state is kept in the Lamplighter config and shared by every device; when the page opens, it shows only **Loading…** until the config is read, or the reason and a **Retry** button when reading fails. Blurring only affects the display and does not remove anything from the API or the page.
 
 The camera buttons on each account card, the card area header and the detail chart header copy one card, all cards or the detail chart as a PNG image. The image keeps the current theme and blur state and leaves out the buttons. In Magpie, the image is handed to Magpie, which puts it on the clipboard; when the page is opened on its own, the browser must support image clipboard and grant clipboard permission in a secure context such as HTTPS or localhost.
 
@@ -285,15 +285,15 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `history_retention_days` | `40` | Days of quota history to keep |
 | `remember_chart_filters` | `false` | Remember the quota window, range and order last chosen in the quota history chart, in `chart_view`, shared by every device |
 | `remember_chart_expanded` | `false` | Remember the multi-account groups expanded in the quota history chart, in `chart_expanded`, shared by every device |
-| `chart_view`, `chart_expanded` | empty | Written by the page: the window, order and range of each window, and the expanded group names, while the two settings above are on; deleted when they are turned off |
+| `chart_view`, `chart_expanded` | empty | Written by the page: the window, order and range of each window, and the expanded group IDs (service and name, such as `claude\|Claude`), while the two settings above are on; deleted when they are turned off, and not saved while their setting is off |
 | `mask_accounts` | `false` | Written by the page: the state of the blur switch |
 | `events_show_5h_resets` | `false` | Written by the page: **Show 5-hour resets** of the event list |
 | `account_names` | empty | Account names, keyed by the account's identifier in Magpie (such as `codex/<id>`) |
 | `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
 | `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
 | `public_listen`, `web_enabled`, `admin_key`, `mcp_enabled`, `mcp_key` | | See [Public access](#public-access) |
-| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page; empty uses the public listen address. See [MCP](#mcp) |
-| `config_token` | empty | A confirmation token the page generates on each save; no need to set it |
+| `mcp_public_url` | empty | The public address of MCP, such as the HTTPS address of a reverse proxy, used in the client configurations on the page. Only http and https addresses are accepted; an address without a scheme counts as `https://`, and spaces, `?` and `#` are refused. Empty uses the public listen address. See [MCP](#mcp) |
+| `config_token` | empty | A confirmation token the page generates when it saves settings; no need to set it. Saves of page state only (the keys written by the page above, the two remember settings and `mcp_public_url`) leave it as it is, and the plugin does not apply the config again |
 
 The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.
 
