@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -21,8 +22,10 @@ type WindowState struct {
 	Remaining        float64 `json:"remaining"`
 	Reset            string  `json:"reset,omitempty"`
 	LastSeen         int64   `json:"last_seen,omitempty"`
-	ResetNotice1hFor string  `json:"reset_notice_1h_for,omitempty"`
-	ResetNotice1dFor string  `json:"reset_notice_1d_for,omitempty"`
+	// ResetNotices maps a reminder lead, the hours before the reset written
+	// by ReminderKey, to the reset time of the cycle whose reset reminder
+	// for that lead was sent.
+	ResetNotices map[string]string `json:"reset_notices,omitempty"`
 	// Exhausted is set when the window was seen used up in its current cycle.
 	Exhausted bool `json:"exhausted,omitempty"`
 	// Long is set once the window was seen more than a day before its
@@ -47,6 +50,39 @@ type WindowState struct {
 	// Rebase 表示套餐变化或主动查询确认窗口缺席；窗口返回后的首次读数
 	// 只记录新基线。窗口是否允许被动更新由 GroupState.ActiveWindows 决定。
 	Rebase bool `json:"rebase,omitempty"`
+}
+
+// ReminderKey returns the ResetNotices key of a reminder sent hours before
+// the reset, such as "24" or "0.5".
+func ReminderKey(hours float64) string {
+	return strconv.FormatFloat(hours, 'f', -1, 64)
+}
+
+// UnmarshalJSON reads a window state. The reset_notice_1h_for and
+// reset_notice_1d_for keys of older states hold the reminders sent 1 and 24
+// hours before a reset; they are read into ResetNotices, so that a reminder
+// already sent is not sent again.
+func (ws *WindowState) UnmarshalJSON(data []byte) error {
+	type plain WindowState
+	var aux struct {
+		*plain
+		Notice1hFor string `json:"reset_notice_1h_for"`
+		Notice1dFor string `json:"reset_notice_1d_for"`
+	}
+	aux.plain = (*plain)(ws)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	for key, reset := range map[string]string{ReminderKey(1): aux.Notice1hFor, ReminderKey(24): aux.Notice1dFor} {
+		if reset == "" || ws.ResetNotices[key] != "" {
+			continue
+		}
+		if ws.ResetNotices == nil {
+			ws.ResetNotices = map[string]string{}
+		}
+		ws.ResetNotices[key] = reset
+	}
+	return nil
 }
 
 // PendingRecovery is a detected reset of one window, kept until its
