@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"time"
@@ -30,6 +31,12 @@ var severityRank = map[string]int{
 // resetTolerance treats two reset times as the same cycle when they differ
 // by at most this much; providers return slightly different values per call.
 const resetTolerance = 10 * time.Second
+
+// reminderResetTolerance is the resetTolerance of reset reminders. Claude
+// Code's /usage, the source of Magpie's passive readings, drops the seconds
+// of the reset time (19:59:00 for 19:59:59), so a reminder sent for one
+// reading would otherwise be sent again for the other.
+const reminderResetTolerance = 2 * time.Minute
 
 // RecoveryJump is the rise, in percentage points since the previous reading,
 // that counts as a recovery when the reset time has not changed. Smaller
@@ -88,6 +95,12 @@ func parseReset(value string) time.Time {
 
 // SameResetCycle reports whether two stored reset times belong to the same window.
 func SameResetCycle(left, right string) bool {
+	return resetsWithin(left, right, resetTolerance)
+}
+
+// resetsWithin reports whether two stored reset times differ by at most
+// tolerance.
+func resetsWithin(left, right string, tolerance time.Duration) bool {
 	if left == "" || right == "" {
 		return false
 	}
@@ -102,7 +115,7 @@ func SameResetCycle(left, right string) bool {
 	if diff < 0 {
 		diff = -diff
 	}
-	return diff <= resetTolerance
+	return diff <= tolerance
 }
 
 // CompactDuration formats a duration as 05h, 03d or 12m.
@@ -160,10 +173,12 @@ type recovery struct {
 	previous *float64
 }
 
+// reminder is a reset reminder of one window. keys are the ResetNotices
+// keys of the leads that are due; one message covers all of them.
 type reminder struct {
 	window quota.Window
 	reset  string
-	stage  string
+	keys   []string
 }
 
 func (a *Alerts) buildChangeMessage(g Group, changes []change, now time.Time) Message {
@@ -345,7 +360,7 @@ func (a *Alerts) newBaseline(w quota.Window, keep *store.WindowState, now time.T
 		Long:             long,
 	}
 	if keep != nil {
-		ws.ResetNotice1hFor, ws.ResetNotice1dFor = keep.ResetNotice1hFor, keep.ResetNotice1dFor
+		ws.ResetNotices = maps.Clone(keep.ResetNotices)
 		ws.EndedReset, ws.Long = keep.EndedReset, keep.Long || long
 	}
 	if !w.Reset.IsZero() && now.Before(w.Reset) {
@@ -405,6 +420,37 @@ func renewed(old *store.WindowState, w quota.Window) bool {
 		return true
 	}
 	return w.Remaining-old.Remaining >= RecoveryJump
+}
+
+// dueReminders returns the ResetNotices keys of the leads in hours that
+// are due for the cycle ending at reset, untilReset from now: the reset is
+// at most that many hours away and no reminder for the lead was sent in
+// this cycle. Leads already passed when first checked are all due at once,
+// so a gap in readings sends one reminder for them, not one each.
+func dueReminders(ws *store.WindowState, hours []float64, reset string, untilReset time.Duration) []string {
+	if untilReset <= 0 {
+		return nil
+	}
+	var keys []string
+	for _, h := range hours {
+		key := store.ReminderKey(h)
+		if untilReset <= time.Duration(h*float64(time.Hour)) && !resetsWithin(ws.ResetNotices[key], reset, reminderResetTolerance) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// recordReminders marks the leads of r as sent for its cycle. Entries of
+// other cycles stay: a reading that reports another cycle by mistake must
+// not clear the leads already sent for the actual one.
+func recordReminders(ws *store.WindowState, r reminder) {
+	if ws.ResetNotices == nil {
+		ws.ResetNotices = make(map[string]string, len(r.keys))
+	}
+	for _, key := range r.keys {
+		ws.ResetNotices[key] = r.reset
+	}
 }
 
 // send reports whether msg is done with: delivered, or dropped because
@@ -507,12 +553,8 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 		mode := a.Cfg.ResetReminder.For(sevenDay)
 		if resetValue != "" && mode != config.ReminderOff &&
 			(mode == config.ReminderAll || w.Remaining > math.Max(a.Cfg.CriticalThreshold, ExhaustedRemaining)) {
-			untilReset := w.Reset.Sub(now)
-			switch {
-			case !sevenDay && untilReset > 0 && untilReset <= time.Hour && !SameResetCycle(old.ResetNotice1hFor, resetValue):
-				reminders = append(reminders, reminder{window: w, reset: resetValue, stage: "1h"})
-			case sevenDay && untilReset > 0 && untilReset <= 24*time.Hour && !SameResetCycle(old.ResetNotice1dFor, resetValue):
-				reminders = append(reminders, reminder{window: w, reset: resetValue, stage: "1d"})
+			if keys := dueReminders(old, a.Cfg.ResetReminderHours.For(sevenDay), resetValue, w.Reset.Sub(now)); len(keys) > 0 {
+				reminders = append(reminders, reminder{window: w, reset: resetValue, keys: keys})
 			}
 		}
 
@@ -543,12 +585,7 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 		msg := a.buildReminderMessage(g, reminders, now)
 		if a.send(ctx, msg) {
 			for _, r := range reminders {
-				ws := groupState.Windows[r.window.ID]
-				if r.stage == "1h" {
-					ws.ResetNotice1hFor = r.reset
-				} else {
-					ws.ResetNotice1dFor = r.reset
-				}
+				recordReminders(groupState.Windows[r.window.ID], r)
 			}
 		}
 	}

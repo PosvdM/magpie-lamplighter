@@ -415,8 +415,8 @@ func TestNotificationsOffClearRecoveriesAndReminders(t *testing.T) {
 	st := store.NewState()
 	run(a, st)
 	ws := st.Group("g").Windows[quota.WindowFiveHour]
-	if failures != 0 || ws.PendingRecovery != nil || ws.ResetNotice1hFor == "" {
-		t.Fatalf("failures %d, pending %+v, reminder for %q", failures, ws.PendingRecovery, ws.ResetNotice1hFor)
+	if failures != 0 || ws.PendingRecovery != nil || ws.ResetNotices["1"] == "" {
+		t.Fatalf("failures %d, pending %+v, reminder for %q", failures, ws.PendingRecovery, ws.ResetNotices["1"])
 	}
 	good := &channelSender{}
 	f.Channels = []Channel{{Name: "Bark", Sender: good}}

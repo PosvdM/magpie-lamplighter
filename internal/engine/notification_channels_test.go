@@ -100,3 +100,14 @@ func TestInvalidWebhookFailsAlertsUnlessBarkWorks(t *testing.T) {
 		t.Fatalf("Bark delivers next to an invalid webhook: %v", err)
 	}
 }
+
+func TestReminderHoursChangeTheRuntimeConfig(t *testing.T) {
+	a, b := config.Default(), config.Default()
+	if !sameRuntimeConfig(a, b) {
+		t.Fatal("equal configs must compare the same")
+	}
+	b.ResetReminderHours.SevenDay = []float64{24, 10}
+	if sameRuntimeConfig(a, b) {
+		t.Fatal("a reset_reminder_hours change must apply to the alerts")
+	}
+}

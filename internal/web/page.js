@@ -251,11 +251,15 @@
       recovery_notify: "额度恢复时通知", reset_reminder: "重置前提醒",
       recovery_notify_5h: "额度恢复时通知 · 5 小时窗口", recovery_notify_7d: "额度恢复时通知 · 7 天窗口",
       reset_reminder_5h: "重置前提醒 · 5 小时窗口", reset_reminder_7d: "重置前提醒 · 7 天窗口",
+      reminder_hours: "提前（小时）",
+      reminder_hours_5h: "重置前提醒 · 提前（小时） · 5 小时窗口", reminder_hours_7d: "重置前提醒 · 提前（小时） · 7 天窗口",
+      hours_empty: "至少填一个小时数；不想提醒请选“关闭”", hours_too_many: "最多填 3 个小时数",
+      hours_invalid_5h: "填 0.5～4.5 之间的小时数，用逗号分隔", hours_invalid_7d: "填 1～167 之间的小时数，用逗号分隔",
       mode_off: "关闭", recovery_all: "每次", recovery_after_exhausted: "用完后",
       reminder_all: "每次", reminder_has_remaining: "有余量",
       mode_off_title: "关闭", recovery_all_title: "每次重置都通知", recovery_after_exhausted_title: "窗口用完后，在下一次重置时通知一次",
       reminder_all_title: "每次重置前都提醒", reminder_has_remaining_title: "剩余高于告急阈值时才提醒",
-      notify_modes_hint: "“用完后”：窗口用完后，在下一次重置时通知一次。“有余量”：剩余高于告急阈值时才提醒。重置前提醒在 5 小时窗口重置前 1 小时、7 天窗口重置前 1 天发送。恢复通知附带上一周期的剩余额度，取自每次重置前 30 秒的查询。",
+      notify_modes_hint: "“用完后”：窗口用完后，在下一次重置时通知一次。“有余量”：剩余高于告急阈值时才提醒。重置前提醒按“提前（小时）”中填的时间发送，可填 1～3 个，用逗号分隔；每个时间每个周期提醒一次。恢复通知附带上一周期的剩余额度，取自每次重置前 30 秒的查询。",
       quota_queries: "额度查询",
       poll_interval: "查询间隔（秒）", request_timeout: "请求超时（秒）", history_retention: "历史保留（天）",
       passive_skip: "被动数据跳过窗口（秒）", passive_skip_max: "最多连续跳过（分钟）",
@@ -435,11 +439,15 @@
       recovery_notify: "Notify when quota recovers", reset_reminder: "Remind before resets",
       recovery_notify_5h: "Notify when quota recovers · 5-hour window", recovery_notify_7d: "Notify when quota recovers · 7-day window",
       reset_reminder_5h: "Remind before resets · 5-hour window", reset_reminder_7d: "Remind before resets · 7-day window",
+      reminder_hours: "Hours before",
+      reminder_hours_5h: "Remind before resets · Hours before · 5-hour window", reminder_hours_7d: "Remind before resets · Hours before · 7-day window",
+      hours_empty: "Enter at least one number of hours. To stop reminders, choose Off", hours_too_many: "Enter at most 3 numbers of hours",
+      hours_invalid_5h: "Enter hours from 0.5 to 4.5, separated by commas", hours_invalid_7d: "Enter hours from 1 to 167, separated by commas",
       mode_off: "Off", recovery_all: "Always", recovery_after_exhausted: "After out",
       reminder_all: "Always", reminder_has_remaining: "If left",
       mode_off_title: "Off", recovery_all_title: "Notify at every reset", recovery_after_exhausted_title: "After the window runs out, notify once at its next reset",
       reminder_all_title: "Remind before every reset", reminder_has_remaining_title: "Remind only when more than the Critical threshold is left",
-      notify_modes_hint: "\"After out\": after the window runs out, notify once at its next reset. \"If left\": remind only when more than the Critical threshold is left. Reminders are sent 1 hour before a 5-hour window resets and 1 day before a 7-day window resets. Recovery notifications include what was left of the ended cycle, from the query 30 seconds before every reset.",
+      notify_modes_hint: "\"After out\": after the window runs out, notify once at its next reset. \"If left\": remind only when more than the Critical threshold is left. Reminders are sent at the times in \"Hours before\"; enter 1 to 3, separated by commas, and each is sent once per cycle. Recovery notifications include what was left of the ended cycle, from the query 30 seconds before every reset.",
       quota_queries: "Quota queries",
       poll_interval: "Query interval (s)", request_timeout: "Request timeout (s)", history_retention: "History retention (days)",
       passive_skip: "Passive data window (s)", passive_skip_max: "Longest skip (min)",
@@ -4242,17 +4250,47 @@
   }
 
   // Fields with data-format edit an object as text: "headers" as one
-  // "Name: value" line per header, "json" as JSON.
+  // "Name: value" line per header, "json" as JSON, "hours" a list of
+  // numbers as "24, 10".
   function formatValue(format, value) {
+    if (format === "hours") return Array.isArray(value) ? value.join(", ") : "";
     if (!value || typeof value !== "object" || !Object.keys(value).length) return "";
     if (format === "headers") return Object.keys(value).map(function (name) { return name + ": " + value[name]; }).join("\n");
     return JSON.stringify(value);
   }
 
-  // parseValue returns the object for the text of a data-format field, null
-  // for empty text, or throws with a message for the field.
-  function parseValue(format, text) {
+  // The lead times of the reset reminders, in hours, by window kind: the
+  // range config.Parse keeps them in, and the message for a value outside it.
+  var REMINDER_HOURS = {
+    five_hour: { min: 0.5, max: 4.5, invalid: "hours_invalid_5h" },
+    seven_day: { min: 1, max: 167, invalid: "hours_invalid_7d" }
+  };
+  var REMINDER_HOURS_MAX = 3;
+
+  // The lead times in the text of an "hours" field, for the window kind
+  // named by the last part of name: numbers separated by commas (English or
+  // Chinese) or spaces, without duplicates, largest first. Throws with a
+  // message for the field when the text is empty, holds anything but numbers
+  // in range, or more than REMINDER_HOURS_MAX of them.
+  function parseHours(text, name) {
+    var range = REMINDER_HOURS[name.split(".").pop()];
+    var parts = text.split(/[,，\s]+/).filter(Boolean);
+    if (!parts.length) throw new Error(translate("hours_empty"));
+    var hours = [];
+    parts.forEach(function (part) {
+      var value = /^(\d+(\.\d*)?|\.\d+)$/.test(part) ? Number(part) : NaN;
+      if (!(value >= range.min && value <= range.max)) throw new Error(translate(range.invalid));
+      if (hours.indexOf(value) < 0) hours.push(value);
+    });
+    if (hours.length > REMINDER_HOURS_MAX) throw new Error(translate("hours_too_many"));
+    return hours.sort(function (a, b) { return b - a; });
+  }
+
+  // parseValue returns the object for the text of a data-format field named
+  // name, null for empty text, or throws with a message for the field.
+  function parseValue(format, text, name) {
     text = text.trim();
+    if (format === "hours") return parseHours(text, name);
     if (!text) return null;
     if (format === "headers") {
       var headers = {};
@@ -4412,7 +4450,9 @@
       var i = intent ? intent.inputs.indexOf(input) : -1;
       return i >= 0 ? intent.states[i] : { value: input.value, checked: input.checked };
     };
-    if (top === "ignition" && !base) base = status.config && status.config.ignition;
+    // Without a saved object, start from the effective one, so a field whose
+    // text does not parse keeps the value the plugin uses.
+    if ((top === "ignition" || top === "reset_reminder_hours") && !base) base = status.config && status.config[top];
     if (base && typeof base === "object") patch[top] = JSON.parse(JSON.stringify(base));
     Array.prototype.forEach.call($("settings").elements, function (input) {
       if (!input.name || topKey(input.name) !== top) return;
@@ -4420,7 +4460,7 @@
       var format = input.getAttribute("data-format");
       if (format) {
         // Text that does not parse keeps the saved value.
-        try { value = parseValue(format, saved.value); } catch (err) { return; }
+        try { value = parseValue(format, saved.value, input.name); } catch (err) { return; }
         if (value === null) {
           var parts = input.name.split(".");
           var parent = getPath(patch, parts.slice(0, -1).join("."));
@@ -4503,7 +4543,7 @@
     if (service) return providerTitle(service) + " · " + translate(input.getAttribute("data-label") || "col_ignition_model", providerTitle(service));
     if (input.hasAttribute("data-group")) return providerTitle(input.closest("[data-groups]").getAttribute("data-groups")) + " · " + input.getAttribute("data-group");
     var label = input.closest("label"), text = label && label.querySelector("span");
-    return text ? text.textContent : input.name || input.id;
+    return text ? text.textContent : input.getAttribute("aria-label") || input.name || input.id;
   }
 
   // key, when given, names an item of its own that shares the control, such
@@ -4538,7 +4578,8 @@
   function saveText(text) {
     var keys = ["save_saved", "save_saving", "save_waiting", "save_applied", "save_unconfirmed",
       "mcp_error", "public_error", "weight_invalid",
-      "thresholds_order", "headers_invalid", "json_invalid", "mcp_public_url_invalid"];
+      "thresholds_order", "headers_invalid", "json_invalid", "mcp_public_url_invalid",
+      "hours_empty", "hours_too_many", "hours_invalid_5h", "hours_invalid_7d"];
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i], languages = Object.keys(I18N);
       for (var j = 0; j < languages.length; j++) {
@@ -4695,7 +4736,7 @@
     var format = input.getAttribute("data-format");
     if (format) {
       try {
-        parseValue(format, input.value);
+        parseValue(format, input.value, input.name);
         input.setCustomValidity("");
       } catch (err) {
         input.setCustomValidity(err.message);

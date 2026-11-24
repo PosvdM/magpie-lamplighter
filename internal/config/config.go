@@ -12,6 +12,7 @@ import (
 	"log"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,60 @@ func (m WindowModes) For(sevenDay bool) string {
 	return m.FiveHour
 }
 
+// WindowHours holds lists of hours for 5-hour windows and for 7-day
+// windows.
+type WindowHours struct {
+	FiveHour []float64 `yaml:"five_hour" json:"five_hour"`
+	SevenDay []float64 `yaml:"seven_day" json:"seven_day"`
+}
+
+// For returns the hours for a 7-day window when sevenDay is true and for a
+// 5-hour window otherwise.
+func (h WindowHours) For(sevenDay bool) []float64 {
+	if sevenDay {
+		return h.SevenDay
+	}
+	return h.FiveHour
+}
+
+// Limits and defaults of reset_reminder_hours. A reminder must come before
+// the reset and after the window started, so the hours stay inside the
+// window with half an hour or an hour to spare on each side.
+const (
+	MaxReminderHours = 3
+	minFiveHourLead  = 0.5
+	maxFiveHourLead  = 4.5
+	minSevenDayLead  = 1
+	maxSevenDayLead  = 167
+)
+
+// DefaultResetReminderHours returns the default of reset_reminder_hours.
+func DefaultResetReminderHours() WindowHours {
+	return WindowHours{FiveHour: []float64{1}, SevenDay: []float64{24}}
+}
+
+// reminderHours limits hours to [minimum, maximum], drops values that are
+// not finite and duplicates, and keeps the MaxReminderHours largest, largest
+// first. An empty result yields fallback.
+func reminderHours(hours []float64, minimum, maximum float64, fallback []float64) []float64 {
+	out := make([]float64, 0, len(hours))
+	for _, h := range hours {
+		if !math.IsNaN(h) && !math.IsInf(h, 0) {
+			out = append(out, math.Max(minimum, math.Min(h, maximum)))
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	// Sorted first, so that removing duplicates compares neighbors only.
+	sort.Sort(sort.Reverse(sort.Float64Slice(out)))
+	out = slices.Compact(out)
+	if len(out) > MaxReminderHours {
+		out = out[:MaxReminderHours]
+	}
+	return out
+}
+
 // Webhook is a user-defined HTTP endpoint that receives every notification.
 // Placeholders such as {{title}} in URL, Headers and Body are filled per
 // message; package notify lists them and checks the settings.
@@ -129,6 +184,9 @@ type Config struct {
 	// RecoveryNotify and ResetReminder hold one mode per window kind.
 	RecoveryNotify WindowModes `yaml:"recovery_notify" json:"recovery_notify"`
 	ResetReminder  WindowModes `yaml:"reset_reminder" json:"reset_reminder"`
+	// ResetReminderHours lists how many hours before a reset the reset
+	// reminder is sent, up to MaxReminderHours per window kind.
+	ResetReminderHours WindowHours `yaml:"reset_reminder_hours" json:"reset_reminder_hours"`
 	// Timezone is an IANA name such as Asia/Shanghai. When both Timezone and
 	// TimezoneOffsetHours are empty, the plugin uses the time zone of its
 	// process, which is UTC in Magpie's Docker image.
@@ -223,6 +281,7 @@ func Default() Config {
 		CriticalThreshold:     10,
 		RecoveryNotify:        WindowModes{FiveHour: RecoveryAfterExhausted, SevenDay: RecoveryAll},
 		ResetReminder:         WindowModes{FiveHour: ReminderOff, SevenDay: ReminderHasRemaining},
+		ResetReminderHours:    DefaultResetReminderHours(),
 		PollIntervalSeconds:   300,
 		RequestTimeoutSeconds: 20,
 		PassiveSkipSeconds:    60,
@@ -382,6 +441,9 @@ func (c *Config) normalize() {
 	c.RecoveryNotify.SevenDay = mode(c.RecoveryNotify.SevenDay, RecoveryOff, RecoveryAll, RecoveryAfterExhausted)
 	c.ResetReminder.FiveHour = mode(c.ResetReminder.FiveHour, ReminderOff, ReminderAll, ReminderHasRemaining)
 	c.ResetReminder.SevenDay = mode(c.ResetReminder.SevenDay, ReminderOff, ReminderAll, ReminderHasRemaining)
+	hours := DefaultResetReminderHours()
+	c.ResetReminderHours.FiveHour = reminderHours(c.ResetReminderHours.FiveHour, minFiveHourLead, maxFiveHourLead, hours.FiveHour)
+	c.ResetReminderHours.SevenDay = reminderHours(c.ResetReminderHours.SevenDay, minSevenDayLead, maxSevenDayLead, hours.SevenDay)
 	for name, provider := range c.Providers {
 		provider.Model = strings.TrimSpace(provider.Model)
 		c.Providers[name] = provider
