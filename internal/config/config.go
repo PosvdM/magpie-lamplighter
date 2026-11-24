@@ -132,18 +132,16 @@ func DefaultResetReminderHours() WindowHours {
 func reminderHours(hours []float64, minimum, maximum float64, fallback []float64) []float64 {
 	out := make([]float64, 0, len(hours))
 	for _, h := range hours {
-		if math.IsNaN(h) || math.IsInf(h, 0) {
-			continue
-		}
-		h = math.Max(minimum, math.Min(h, maximum))
-		if !slices.Contains(out, h) {
-			out = append(out, h)
+		if !math.IsNaN(h) && !math.IsInf(h, 0) {
+			out = append(out, math.Max(minimum, math.Min(h, maximum)))
 		}
 	}
 	if len(out) == 0 {
 		return fallback
 	}
+	// Sorted first, so that removing duplicates compares neighbors only.
 	sort.Sort(sort.Reverse(sort.Float64Slice(out)))
+	out = slices.Compact(out)
 	if len(out) > MaxReminderHours {
 		out = out[:MaxReminderHours]
 	}

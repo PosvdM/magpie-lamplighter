@@ -441,14 +441,10 @@ func dueReminders(ws *store.WindowState, hours []float64, reset string, untilRes
 	return keys
 }
 
-// recordReminders marks the leads of r as sent for its cycle and drops the
-// entries of earlier cycles.
+// recordReminders marks the leads of r as sent for its cycle. Entries of
+// other cycles stay: a reading that reports another cycle by mistake must
+// not clear the leads already sent for the actual one.
 func recordReminders(ws *store.WindowState, r reminder) {
-	for key, reset := range ws.ResetNotices {
-		if !resetsWithin(reset, r.reset, reminderResetTolerance) {
-			delete(ws.ResetNotices, key)
-		}
-	}
 	if ws.ResetNotices == nil {
 		ws.ResetNotices = make(map[string]string, len(r.keys))
 	}

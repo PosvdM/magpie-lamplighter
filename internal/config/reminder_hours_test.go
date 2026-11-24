@@ -44,3 +44,14 @@ func TestResetReminderHours(t *testing.T) {
 		t.Fatalf("JSON %s, %v", raw, err)
 	}
 }
+
+func TestManyResetReminderHours(t *testing.T) {
+	hours := make([]float64, 0, 100000)
+	for i := range 100000 {
+		hours = append(hours, float64(i%5000)/10)
+	}
+	got := reminderHours(hours, 1, 167, []float64{24})
+	if !reflect.DeepEqual(got, []float64{167, 166.9, 166.8}) {
+		t.Fatalf("got %v", got)
+	}
+}
