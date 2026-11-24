@@ -276,6 +276,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `critical_threshold` | `10` | Third alert threshold |
 | `recovery_notify` | 5-hour `after_exhausted`, 7-day `all` | Notify when the quota recovers; see below |
 | `reset_reminder` | 5-hour `off`, 7-day `has_remaining` | Remind before a reset; see below |
+| `reset_reminder_hours` | 5-hour `[1]`, 7-day `[24]` | How many hours before a reset to remind; see below |
 | `timezone` | empty | Time zone for displayed times and the ignition hours, an IANA name such as `Asia/Shanghai`; empty means ignition and notifications use the time zone of the system the program runs on (UTC in Magpie's Docker image), and the page shows times in the browser's time zone. To follow the system's time zone, leave it empty; `Local` counts as an invalid name. Checked on save, and an invalid name is not saved; an invalid name written by hand is logged as a warning at startup and treated as empty |
 | `timezone_offset_hours` | empty | A fixed UTC offset such as `8`; used only when `timezone` is empty |
 | `poll_interval_seconds` | `300` | Active query interval, at least 60 |
@@ -304,7 +305,10 @@ Recovery notices and pre-reset reminders are set per window: `five_hour` for the
 | Key | Values | Description |
 | --- | --- | --- |
 | `recovery_notify` | `off`, `all`, `after_exhausted` | `all`: notify on every reset; `after_exhausted`: after the window was used up, notify once at the next reset |
-| `reset_reminder` | `off`, `all`, `has_remaining` | Remind 1 hour before a 5-hour window resets and 1 day before a 7-day window resets; `has_remaining`: only while the remaining quota is above `critical_threshold` |
+| `reset_reminder` | `off`, `all`, `has_remaining` | `all`: remind at every lead time; `has_remaining`: remind only if the remaining quota is above `critical_threshold` at that time |
+| `reset_reminder_hours` | Array of hours, fractions allowed | How many hours before a reset to remind. 0.5 to 4.5 for the 5-hour window and 1 to 167 for the 7-day window; values outside the range are moved to the nearest bound. Duplicates are merged and each window keeps at most 3 values, the largest 3 if more are given; an empty array restores the default |
+
+A pre-reset reminder is sent once per lead time in each reset cycle. For example, `[24, 10]` for the 7-day window reminds 24 hours and again 10 hours before the reset. The reminder is sent by the first query after the lead time is passed; queries run every 5 minutes by default, so it can be up to one query interval late. When one query passes several lead times at once, only one reminder is sent, for example after the plugin was stopped for a while, when a window is first seen close to its reset, or when a newly added lead time has already passed. Removing a lead time does not resend reminders already sent in the current cycle. Under **Alert rules** in the Settings view, enter the values for each window in the **Hours before** row, separated by commas, such as `24, 10`.
 
 The first line of a recovery notice is the remaining quota at the end of the previous cycle. It comes from the active query 30 seconds before the reset, so use in the last 30 seconds is not counted. Without a reading in the last 15 minutes before the reset, the line is left out. A cycle that was never used (still 100% before the reset) is not notified.
 
