@@ -588,6 +588,49 @@ test("normal saves use the backend URL defaults and generate a key when enabling
   assert.deepEqual(patch("mcp_enabled", true, "checkbox"), { mcp_enabled: true, mcp_key: "llmcp_generated" });
 });
 
+test("reset reminder hours accept commas and spaces and save sorted without duplicates", () => {
+  const ctx = context(["parseHours", "parseValue", "formatValue"], {
+    REMINDER_HOURS: { five_hour: { min: 0.5, max: 4.5, invalid: "hours_invalid_5h" }, seven_day: { min: 1, max: 167, invalid: "hours_invalid_7d" } },
+    REMINDER_HOURS_MAX: 3,
+    translate: (key) => key,
+  });
+  const parse = (text, name) => plain(ctx.parseValue("hours", text, "reset_reminder_hours." + name));
+  const fails = (text, name, key) => assert.throws(() => ctx.parseValue("hours", text, "reset_reminder_hours." + name), { message: key });
+  assert.deepEqual(parse("10, 24", "seven_day"), [24, 10]);
+  assert.deepEqual(parse(" 1，0.5 2 ", "five_hour"), [2, 1, 0.5]);
+  assert.deepEqual(parse("24,24, 24.0", "seven_day"), [24]);
+  assert.deepEqual(parse("4.5,.5", "five_hour"), [4.5, 0.5]);
+  fails("", "five_hour", "hours_empty");
+  fails(" , ，", "seven_day", "hours_empty");
+  fails("5", "five_hour", "hours_invalid_5h");
+  fails("0.4", "five_hour", "hours_invalid_5h");
+  fails("168", "seven_day", "hours_invalid_7d");
+  fails("1h", "seven_day", "hours_invalid_7d");
+  fails("-2", "seven_day", "hours_invalid_7d");
+  fails("1e2", "seven_day", "hours_invalid_7d");
+  fails("1, 2, 3, 4", "seven_day", "hours_too_many");
+  assert.equal(ctx.formatValue("hours", [24, 10]), "24, 10");
+  assert.equal(ctx.formatValue("hours", undefined), "");
+});
+
+test("reset reminder hours save both windows, keeping the effective value of one that does not parse", () => {
+  let inputs = [];
+  const ctx = context(["topKey", "setPath", "getPath", "buildPatch", "parseHours", "parseValue"], {
+    rawConfig: {}, status: { config: { reset_reminder_hours: { five_hour: [1], seven_day: [24] } } },
+    $: () => ({ elements: inputs }),
+    REMINDER_HOURS: { five_hour: { min: 0.5, max: 4.5, invalid: "hours_invalid_5h" }, seven_day: { min: 1, max: 167, invalid: "hours_invalid_7d" } },
+    REMINDER_HOURS_MAX: 3,
+    translate: (key) => key,
+  });
+  const field = (name, value) => ({ name: "reset_reminder_hours." + name, value, type: "text", getAttribute: (a) => a === "data-format" ? "hours" : null });
+  inputs = [field("five_hour", "1"), field("seven_day", "10 24")];
+  assert.deepEqual(plain(ctx.buildPatch("reset_reminder_hours")), { reset_reminder_hours: { five_hour: [1], seven_day: [24, 10] } });
+  inputs = [field("five_hour", "x"), field("seven_day", "48")];
+  assert.deepEqual(plain(ctx.buildPatch("reset_reminder_hours")), { reset_reminder_hours: { five_hour: [1], seven_day: [48] } });
+  ctx.rawConfig.reset_reminder_hours = { five_hour: [2], seven_day: [24] };
+  assert.deepEqual(plain(ctx.buildPatch("reset_reminder_hours")), { reset_reminder_hours: { five_hour: [2], seven_day: [48] } });
+});
+
 test("threshold validation accepts equal levels and rejects reversed levels", () => {
   const elements = {};
   const ctx = context(["thresholdsInOrder"], {

@@ -647,6 +647,8 @@ form label.inline-input { flex-direction: row; align-items: center; gap: 6px; fo
 .inline-input input { width: 72px; text-align: right; font-family: var(--font-mono); }
 .checks { display: flex; flex-wrap: wrap; gap: 8px 24px; }
 .notify-modes { display: grid; grid-template-columns: auto auto auto; gap: 10px 18px; align-items: center; justify-content: start; }
+/* As wide as the switches above, whatever the size of an empty input. */
+.notify-modes .hours-input { width: 0; min-width: 100%; }
 
 /* Segmented controls: the chart's button groups (.segmented) and the
    settings' radio switches with three equal options (.mode-switch). The
