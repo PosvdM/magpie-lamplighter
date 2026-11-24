@@ -179,7 +179,17 @@ func TestRebaseKeepsReminderNotices(t *testing.T) {
 	}
 }
 
-func TestReminderNoticesOfEarlierCyclesAreDropped(t *testing.T) {
+func countReminders(sent []Message) int {
+	n := 0
+	for _, msg := range sent {
+		if msg.Kind == KindReminder {
+			n++
+		}
+	}
+	return n
+}
+
+func TestNextCycleIsRemindedAgain(t *testing.T) {
 	sender := &fakeSender{}
 	st := store.NewState()
 	a := reminderAlerts([]float64{24, 10}, sender)
@@ -187,16 +197,41 @@ func TestReminderNoticesOfEarlierCyclesAreDropped(t *testing.T) {
 	a.ProcessGroup(context.Background(), st, sevenDayGroup(previous), previous.Add(-30*time.Hour))
 	a.ProcessGroup(context.Background(), st, sevenDayGroup(previous), previous.Add(-9*time.Hour))
 	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-20*time.Hour))
-	reminders := 0
-	for _, msg := range sender.sent {
-		if msg.Kind == KindReminder {
-			reminders++
-		}
-	}
-	if reminders != 2 {
+	if n := countReminders(sender.sent); n != 2 {
 		t.Fatalf("want one reminder per cycle, got %+v", sender.sent)
 	}
-	if got := sevenDayNotices(st); !maps.Equal(got, map[string]string{"24": formatReset(sevenDayReset)}) {
-		t.Fatalf("notices %v", got)
+	want := map[string]string{"24": formatReset(sevenDayReset), "10": formatReset(previous)}
+	if got := sevenDayNotices(st); !maps.Equal(got, want) {
+		t.Fatalf("notices %v, want %v", got, want)
+	}
+}
+
+// A reading that reports the next cycle by mistake records the leads it
+// reminds of for that cycle only; the leads already sent for the actual
+// cycle stay recorded.
+func TestMisreportedCycleKeepsSentNotices(t *testing.T) {
+	sender := &fakeSender{}
+	st := store.NewState()
+	a := reminderAlerts([]float64{167, 24}, sender)
+	reset := formatReset(sevenDayReset)
+	next := sevenDayReset.Add(5 * 24 * time.Hour)
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-170*time.Hour))
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-160*time.Hour))
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-20*time.Hour))
+	if n := countReminders(sender.sent); n != 2 {
+		t.Fatalf("want the 167- and 24-hour reminders, got %+v", sender.sent)
+	}
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(next), sevenDayReset.Add(-19*time.Hour))
+	want := map[string]string{"167": formatReset(next), "24": reset}
+	if got := sevenDayNotices(st); countReminders(sender.sent) != 3 || !maps.Equal(got, want) {
+		t.Fatalf("sent %+v, notices %v, want %v", sender.sent, got, want)
+	}
+	// Back to the actual cycle: the 167-hour lead was overwritten and is
+	// sent once more, the 24-hour lead is not.
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-18*time.Hour))
+	a.ProcessGroup(context.Background(), st, sevenDayGroup(sevenDayReset), sevenDayReset.Add(-17*time.Hour))
+	want = map[string]string{"167": reset, "24": reset}
+	if got := sevenDayNotices(st); countReminders(sender.sent) != 4 || !maps.Equal(got, want) {
+		t.Fatalf("sent %+v, notices %v, want %v", sender.sent, got, want)
 	}
 }
