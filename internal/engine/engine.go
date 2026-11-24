@@ -699,6 +699,7 @@ func sameRuntimeConfig(a, b config.Config) bool {
 		a.RequestTimeoutSeconds == b.RequestTimeoutSeconds && a.NoticeThreshold == b.NoticeThreshold &&
 		a.LowThreshold == b.LowThreshold && a.CriticalThreshold == b.CriticalThreshold &&
 		a.RecoveryNotify == b.RecoveryNotify && a.ResetReminder == b.ResetReminder &&
+		reflect.DeepEqual(a.ResetReminderHours, b.ResetReminderHours) &&
 		a.Location().String() == b.Location().String() && a.PollIntervalSeconds == b.PollIntervalSeconds
 }
 
