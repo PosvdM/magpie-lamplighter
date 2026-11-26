@@ -12,20 +12,6 @@ import (
 // host. Fetch and Profile read the fields their provider needs.
 type Credential = host.Credential
 
-func firstString(primary, secondary map[string]any, keys ...string) string {
-	for _, source := range []map[string]any{primary, secondary} {
-		if source == nil {
-			continue
-		}
-		for _, key := range keys {
-			if value := scalarString(source[key]); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
-}
-
 func scalarString(value any) string {
 	switch v := value.(type) {
 	case string:

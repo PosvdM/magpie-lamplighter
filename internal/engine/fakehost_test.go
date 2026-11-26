@@ -5,23 +5,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
+	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
 // authEntry is an account the fake host lists. AuthIndex is its pin, and
 // Note its Magpie label.
 type authEntry struct {
-	ID, AuthIndex, Name, Provider, Email, Note, User string
-	Disabled                                         bool
+	ID, AuthIndex, Name, Provider, Email, Note, User, Plan string
+	Disabled                                               bool
 }
 
 func (a authEntry) account() host.Account {
-	return host.Account{Pin: a.AuthIndex, Provider: a.Provider, Label: a.Note, Email: a.Email, User: a.User, On: !a.Disabled}
+	return host.Account{Pin: a.AuthIndex, Provider: a.Provider, Label: a.Note, Email: a.Email, User: a.User, Plan: a.Plan, On: !a.Disabled}
 }
 
 // httpRequest and httpResponse are the quota requests the fake vendor sees.
@@ -82,9 +85,7 @@ func credentialFromFile(raw string) host.Credential {
 	cred := host.Credential{
 		AccessToken: str("access_token"),
 		AccountID:   str("account_id"),
-		ProjectID:   str("project_id"),
 		ProxyURL:    str("proxy_url"),
-		Data:        data,
 	}
 	for _, key := range []string{"refresh_token", "api_key", "access_token"} {
 		if value := str(key); value != "" {
@@ -98,3 +99,46 @@ func credentialFromFile(raw string) host.Credential {
 
 // fingerprintOf is the fingerprint of the credential in raw.
 func fingerprintOf(raw json.RawMessage) string { return credentialFromFile(string(raw)).Fingerprint }
+
+// agyReading is a complete Magpie reading of the agy-cli account pin, read
+// at readAt, as package magpie converts it.
+func agyReading(pin string, readAt time.Time, groups ...quota.RawGroup) host.KeptQuota {
+	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt, Complete: true}
+}
+
+// agyPool is the group of an Antigravity pool, such as "Gemini" or
+// "Claude & GPT", with a 5-hour window of remaining percent that resets at
+// reset.
+func agyPool(pool string, remaining float64, reset time.Time) quota.RawGroup {
+	g, _ := providers.AntigravityPool(pool)
+	return quota.RawGroup{Key: g.Key, SourceLabel: g.SourceLabel, Windows: []quota.Window{
+		{ID: g.FiveHour, Label: quota.LabelFiveHour, Remaining: remaining, Reset: reset, Period: quota.FiveHours},
+	}}
+}
+
+// withWeekly adds the 7-day window of the pool of g, with remaining percent
+// and reset.
+func withWeekly(g quota.RawGroup, pool string, remaining float64, reset time.Time) quota.RawGroup {
+	p, _ := providers.AntigravityPool(pool)
+	g.Windows = append(append([]quota.Window(nil), g.Windows...), quota.Window{ID: p.Weekly, Label: quota.LabelSevenDay, Remaining: remaining, Reset: reset, Period: quota.SevenDays})
+	return g
+}
+
+// logHost records the log lines of the engine.
+type logHost struct {
+	*fakeHost
+	mu    sync.Mutex
+	lines []string
+}
+
+func (h *logHost) Log(level, message string, fields map[string]any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lines = append(h.lines, fmt.Sprint(level, " ", message, " ", fields))
+}
+
+func (h *logHost) text() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return strings.Join(h.lines, "\n")
+}

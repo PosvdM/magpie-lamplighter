@@ -2,7 +2,6 @@ package magpie
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"log"
 	"strings"
@@ -27,27 +26,6 @@ func TestLogIsRedacted(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "[debug] ***et: GET https://vendor.example/v1 Bearer …") {
 		t.Fatalf("log = %q", out.String())
-	}
-}
-
-// The errors of an agy-cli login name no value of the files: the home
-// that logins.json gives is the key of plugin-auth.json, any text.
-func TestAgyErrorsLeaveOutTheHome(t *testing.T) {
-	const home = "carol.secret@corp.example"
-	logins := strings.ReplaceAll(loginsFile("", "{}"), "agy-cli#k3x9a2", home)
-	for name, auth := range map[string]string{
-		"no entry":        `{}`,
-		"not an object":   `{"` + home + `":[]}`,
-		"not api":         `{"` + home + `":{"type":"oauth","key":"agy"}}`,
-		"bad agyHome":     `{"` + home + `":{"type":"api","metadata":{"agyHome":"../../etc"}}}`,
-		"key not agyHome": `{"` + home + `":{"type":"api","key":"agy","metadata":{"agyHome":"0123456789abcdef"}}}`,
-	} {
-		h := &Host{ConfigDir: t.TempDir()}
-		writeFiles(t, h.ConfigDir, map[string]string{"logins.json": logins, "plugin-auth.json": auth})
-		_, err := h.Credential(context.Background(), agyAccount)
-		if err == nil || strings.Contains(err.Error(), "carol") || strings.Contains(err.Error(), "oauth") {
-			t.Errorf("%s: err = %v", name, err)
-		}
 	}
 }
 

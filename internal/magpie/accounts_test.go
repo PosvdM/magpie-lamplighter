@@ -166,6 +166,71 @@ func TestRefreshQuota(t *testing.T) {
 	}
 }
 
+// An agy-cli refresh runs agy's /usage: one per agyRefreshGap, except the
+// refreshes that confirm an ignition, which still start the gap.
+func TestRefreshQuotaAgyGap(t *testing.T) {
+	clock := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = time.Now })
+	agyCards := func(readAt string) string {
+		return `{"object":"list","data":[{"provider":"agy-cli","kind":"subscription","user":"c@example.com","readAt":"` + readAt + `","windows":[
+ {"name":"5 hours","used":10,"resetsAt":"2026-11-21T12:00:00Z","pool":"Gemini"}]}]}`
+	}
+	g, h := newGateway(t, map[string]string{
+		"GET /v1/magpie/accounts":        accountsJSON,
+		"GET /v1/magpie/quotas":          agyCards("2026-11-21T07:00:00Z"),
+		"POST /v1/magpie/quotas/refresh": agyCards("2026-11-21T08:00:00Z"),
+	})
+	const pin = "agy-cli/ffeeddccbbaa9988"
+	ctx := context.Background()
+	k, found, err := h.RefreshKept(ctx, pin)
+	if err != nil || !found || k.Groups[0].Key != "antigravity:gemini-models" || !k.Complete {
+		t.Fatalf("agy refresh: %+v, %v, %v", k, found, err)
+	}
+	last := g.requests[len(g.requests)-1]
+	if last.URL.Query().Get("provider") != "agy-cli" || last.URL.Query().Get("user") != "c@example.com" {
+		t.Fatalf("refresh request = %s", last.URL)
+	}
+	clock = clock.Add(agyRefreshGap - time.Second)
+	if err := h.RefreshQuota(ctx, pin); !errors.Is(err, ErrRefreshLimited) {
+		t.Fatalf("agy refresh within the gap: err = %v, want ErrRefreshLimited", err)
+	}
+	g.bodies["POST /v1/magpie/quotas/refresh"] = agyCards("2026-11-21T08:14:00Z")
+	sent := len(g.requests)
+	if err := h.RefreshQuota(host.ConfirmingIgnition(ctx), pin); err != nil || len(g.requests) == sent {
+		t.Fatalf("confirming refresh within the gap: err = %v", err)
+	}
+	// It started the gap again.
+	clock = clock.Add(agyRefreshGap - time.Second)
+	if err := h.RefreshQuota(ctx, pin); !errors.Is(err, ErrRefreshLimited) {
+		t.Fatalf("refresh within the gap of a confirming one: err = %v", err)
+	}
+	clock = clock.Add(time.Second)
+	g.bodies["POST /v1/magpie/quotas/refresh"] = agyCards("2026-11-21T08:30:00Z")
+	if err := h.RefreshQuota(ctx, pin); err != nil {
+		t.Fatalf("agy refresh after the gap: %v", err)
+	}
+}
+
+// An agy-cli refresh that agy did not finish (the plugin's "still
+// reading") brings no new reading.
+func TestRefreshQuotaAgyStillReading(t *testing.T) {
+	clock := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = time.Now })
+	_, h := newGateway(t, map[string]string{
+		"GET /v1/magpie/accounts": accountsJSON,
+		"GET /v1/magpie/quotas":   `{"object":"list","data":[]}`,
+		"POST /v1/magpie/quotas/refresh": `{"object":"list","data":[{"provider":"agy-cli","user":"c@example.com","windows":[],
+ "error":"agy is still reading this account's quota (its own read takes longer here: a slow network or proxy, or agy's first start)."}]}`,
+	})
+	_, found, err := h.RefreshKept(context.Background(), "agy-cli/ffeeddccbbaa9988")
+	var hostErr *host.Error
+	if found || !errors.As(err, &hostErr) || hostErr.Code != codeRefreshStale || !strings.Contains(hostErr.Message, "still reading") {
+		t.Fatalf("still reading: found %v, err %v", found, err)
+	}
+}
+
 // claudeOn is accountsJSON with the Claude account switched on.
 var claudeOn = strings.Replace(accountsJSON, `"plan":"max","on":false`, `"plan":"max","on":true`, 1)
 

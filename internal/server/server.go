@@ -326,6 +326,10 @@ func (s *Server) action(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	if errors.Is(err, engine.ErrIgnitionPending) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pending": true, "status": s.status()})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": redact.Text(err.Error()), "status": s.status()})
 		return

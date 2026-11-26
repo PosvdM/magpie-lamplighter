@@ -111,11 +111,6 @@ func watchStream(ctx context.Context, stop <-chan struct{}, first <-chan time.Ti
 type sentResponse struct {
 	host.ModelResponse
 	sentAt time.Time
-	// confirmed tells that the account of an agy-cli request
-	// (identityChecked) was confirmed right before it was sent, with the
-	// sign-in fingerprint.
-	confirmed   bool
-	fingerprint string
 }
 
 // executeStream retains headers for quota confirmation. A deliberate cutoff

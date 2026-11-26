@@ -3,15 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io/fs"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/failure"
-	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/redact"
@@ -133,134 +129,39 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 	e.logf("info", "%s 的凭证已更新，恢复自动点火", accountLabel(cred))
 }
 
-// agyCLI is Magpie's provider id of the agy-cli plugin.
-const agyCLI = "agy-cli"
-
-// identityChecked reports whether ignition of cred confirms the account
-// before every request, manual ignition too. The gateway sends an agy-cli
-// account's requests through agy, which uses whichever Google account it
-// is signed in to now; the pin alone does not tell which. Codex and Claude
-// requests use the account's own credential.
-func identityChecked(cred *Cred) bool {
-	return strings.EqualFold(cred.HostProvider, agyCLI)
-}
-
-// errIdentityUnsent prefixes an ignition refused for host.ErrIdentity
-// before any of its requests was sent.
-const errIdentityUnsent = "没有发送点火请求"
-
-// errNoIdentityChecker is why an agy-cli account is not confirmed by a
-// host that does not implement host.IdentityChecker: Credential alone
-// cannot tell that the gateway will use the account's own sign-in.
-var errNoIdentityChecker = errors.New("the host cannot confirm the sign-in of an agy-cli account")
-
-// identityUnconfirmed is an ignition request not sent because the
-// account could not be confirmed. It wraps host.ErrIdentity and the
-// host's error, but its text gives only identityReason.
-type identityUnconfirmed struct {
-	err error
-	// candidate is the number of the candidate model that was not sent,
-	// from 1; 0 or 1 means that the ignition sent no request.
-	candidate int
-}
-
-func (u identityUnconfirmed) Error() string {
-	unsent := errIdentityUnsent
-	if u.candidate > 1 {
-		unsent = fmt.Sprintf("第 %d 个候选模型未发送", u.candidate)
+// noteMagpieReading marks the credential problem of cred, an account whose
+// quota is read only from Magpie (providers.MagpieOnly), as changed when
+// Magpie read the account's quota at readAt, after the problem began:
+// Lamplighter reads no credential of such an account to compare
+// fingerprints with. Only a reading of every window (host.KeptQuota
+// Complete), which agy makes with the account's own sign-in, counts: agy
+// reads nothing while its token waits to be renewed or Google refuses the
+// account. Ignition then tries again; see noteFingerprint.
+func (e *Engine) noteMagpieReading(cred *Cred, readAt time.Time) {
+	if e.state == nil {
+		return
 	}
-	return unsent + "：" + identityReason(u.err)
-}
-
-func (u identityUnconfirmed) Unwrap() []error { return []error{host.ErrIdentity, u.err} }
-
-// identityReason is why the account of an ignition was not confirmed, as
-// events, logs and API answers show it. A host.ErrIdentity error gives the
-// host's own reason, which names the other account by a masked email
-// (redactDetail masks any other). The host's other errors can quote the
-// fields of a credential file, so they are told by kind alone.
-func identityReason(err error) string {
-	const unconfirmed = "无法确认账号身份："
-	switch {
-	case errors.Is(err, errNoIdentityChecker):
-		return unconfirmed + "宿主不支持核对 agy 账号的身份"
-	case errors.Is(err, host.ErrIdentity):
-		return redactDetail(err.Error())
-	case errors.Is(err, host.ErrFormat):
-		return unconfirmed + "凭证文件格式不对"
-	case errors.Is(err, fs.ErrNotExist):
-		return unconfirmed + "找不到凭证文件"
+	st := e.state.Credentials[cred.AuthIndex]
+	if st == nil || st.Reason == "" || st.Changed || !readAt.After(time.Unix(st.Since, 0)) {
+		return
 	}
-	return unconfirmed + "读取凭证失败"
-}
-
-// detailLimit bounds the text redactDetail keeps.
-const detailLimit = 200
-
-var (
-	detailEmail  = regexp.MustCompile(`[^\s@"'<>()\[\],;:（）：，；“”]+@[^\s@"'<>()\[\],;:（）：，；“”]+`)
-	detailQuoted = regexp.MustCompile(`"[^"]*"`)
-	detailSecret = regexp.MustCompile(`[A-Za-z0-9_\-./+=]{32,}`)
-)
-
-// redactDetail is the text of a host error, fit to show or log: one line,
-// emails masked (maskEmail), quoted values and long token-like strings
-// left out, at most detailLimit characters.
-func redactDetail(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	s = detailEmail.ReplaceAllStringFunc(s, maskEmail)
-	s = detailQuoted.ReplaceAllString(s, `"…"`)
-	s = detailSecret.ReplaceAllString(s, "…")
-	if r := []rune(s); len(r) > detailLimit {
-		s = string(r[:detailLimit]) + "…"
-	}
-	return s
-}
-
-// unconfirmed is identityUnconfirmed for err, the error of confirming cred
-// before the candidate-th candidate model (0 before the model list). The
-// host's error is logged at debug level, redacted (redactDetail).
-func (e *Engine) unconfirmed(cred *Cred, candidate int, err error) error {
-	e.logf("debug", "%s：无法确认账号身份：%s", accountLabel(cred), redactDetail(err.Error()))
-	return identityUnconfirmed{err: err, candidate: candidate}
-}
-
-// confirmIdentity confirms that the gateway sends cred's requests with
-// cred's own sign-in, and returns the sign-in's fingerprint, before the
-// candidate-th candidate model (0 before the model list). Only a
-// host.IdentityChecker can confirm it, from local files alone; a host
-// without one confirms no agy-cli account. Any error means the account is
-// not confirmed: it is returned as identityUnconfirmed, and no request may
-// be sent.
-func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred, candidate int) (string, error) {
-	checker, ok := e.host.(host.IdentityChecker)
-	if !ok {
-		return "", e.unconfirmed(cred, candidate, errNoIdentityChecker)
-	}
-	fingerprint, err := checker.ConfirmIdentity(ctx, hostAccount(cred))
-	if err != nil {
-		return "", e.unconfirmed(cred, candidate, err)
-	}
-	return fingerprint, nil
+	st.Changed = true
+	e.dirty = true
+	e.logf("info", "%s 在出现问题后读到了新的额度，恢复自动点火", accountLabel(cred))
 }
 
 // ignitionCredential reads the fingerprint of cred's credential before an
-// ignition, "" when it cannot be read. An agy-cli account
-// (identityChecked) must be confirmed (confirmIdentity), and any error
-// refuses the ignition. For other accounts it is an error only when the
-// host cannot confirm the account of the credential (host.ErrIdentity).
-func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
-	if identityChecked(cred) {
-		return e.confirmIdentity(ctx, cred, 0)
+// ignition, "" when it cannot be read. An account whose quota is read only
+// from Magpie (Antigravity) has no credential Lamplighter reads.
+func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) string {
+	if providers.MagpieOnly(providers.Lookup(cred.Provider)) {
+		return ""
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
-	if errors.Is(err, host.ErrIdentity) {
-		return "", e.unconfirmed(cred, 0, err)
-	}
 	if err != nil {
-		return "", nil
+		return ""
 	}
-	return credential.Fingerprint, nil
+	return credential.Fingerprint
 }
 
 // noteQueryFailure handles a failed quota query of cred. A suspended account

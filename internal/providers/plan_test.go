@@ -63,24 +63,25 @@ func TestClaudePlansFromTheProfile(t *testing.T) {
 	}
 }
 
-func TestAntigravityPlansFromLoadCodeAssist(t *testing.T) {
-	for body, want := range map[string]Plan{
-		// Measured on a Google AI Pro account on 2026-10-23; currentTier stays
-		// free-tier.
-		`{"currentTier":{"id":"free-tier","name":"Antigravity"},"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}`: {"Pro", 1},
-		`{"currentTier":{"id":"free-tier"},"paidTier":{"id":"g1-ultra-tier"}}`:                                           {"Ultra", 1},
-		`{"currentTier":{"id":"free-tier","name":"Antigravity"}}`:                                                        {"Free", 1},
-		`{"currentTier":{"id":"standard-tier"}}`:                                                                         {"standard-tier", 1},
+func TestAntigravityPlansFromMagpie(t *testing.T) {
+	for raw, want := range map[string]Plan{
+		"Google AI Pro":              {"Pro", 1},
+		"Google AI Ultra":            {"Ultra", 1},
+		"google ai  Plus":            {"Plus", 1},
+		"Antigravity Starter Quota":  {"Free", 1},
+		"g1-pro-tier":                {"Pro", 1},
+		"free-tier":                  {"Free", 1},
+		"standard-tier":              {"standard-tier", 1},
+		"Gemini Code Assist Premium": {"Gemini Code Assist Premium", 1},
 	} {
-		raw, err := ParseAntigravityProfile(decode(t, body))
-		if err != nil {
-			t.Fatal(err)
-		}
 		if got := PlanOf("antigravity", raw); got != want {
-			t.Errorf("%s: got %+v, want %+v", body, got, want)
+			t.Errorf("%q: got %+v, want %+v", raw, got, want)
 		}
 	}
-	if _, err := ParseAntigravityProfile(decode(t, `{"allowedTiers":[]}`)); err == nil {
-		t.Error("a response without a tier is an error")
+	// The tier ids a 0.1.7 state holds name the same plans, so reading the
+	// plan from Magpie announces no change.
+	if PlanOf("antigravity", "g1-pro-tier").Name != PlanOf("antigravity", "Google AI Pro").Name ||
+		PlanOf("antigravity", "free-tier").Name != PlanOf("antigravity", "Antigravity Starter Quota").Name {
+		t.Error("the tier id and the tier name of one plan differ")
 	}
 }

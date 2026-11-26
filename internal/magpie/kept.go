@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
+	"github.com/PosvdM/magpie-lamplighter/internal/redact"
 )
 
 const (
@@ -34,7 +36,13 @@ type keptQuota struct {
 	From     string       `json:"from"`
 	Windows  []keptWindow `json:"windows"`
 	ReadAt   *time.Time   `json:"readAt"`
-	AsOf     *time.Time   `json:"asOf"`
+	// AsOf is set on an earlier reading kept in place of one that failed,
+	// with ReadError or ReadDeferred; Error is why the reading failed
+	// when none is kept.
+	AsOf         *time.Time `json:"asOf"`
+	ReadDeferred bool       `json:"readDeferred"`
+	ReadError    string     `json:"readError"`
+	Error        string     `json:"error"`
 }
 
 // keptWindow is one window of a card (provider.QuotaSpan).
@@ -51,13 +59,15 @@ type keptWindow struct {
 	// of resetsAt. GET /v1/magpie/quotas turns it into resetsAt from the
 	// time it answers (quotaReport), and keptOf does the same.
 	ResetSecs int64 `json:"resetSecs"`
+	// Pool is the Antigravity quota pool a window draws on, such as
+	// "Gemini"; Family is set on the per-model windows of a pool.
+	Pool   string `json:"pool"`
+	Family string `json:"family"`
 }
 
-// KeptQuotas returns Magpie's last readings of the Codex and Claude
-// accounts. Antigravity is left out: Magpie names its windows by pool
-// ("Gemini · 5 hours") without the bucket ids that the Antigravity Fetch
-// uses as window IDs, so its readings would update no window. The call,
-// with the account list it reads, ends within keptTimeout.
+// KeptQuotas returns Magpie's last readings of the Codex, Claude and
+// agy-cli accounts. The call, with the account list it reads, ends within
+// keptTimeout.
 func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 	ctx, cancel := context.WithTimeout(ctx, keptTimeout)
 	defer cancel()
@@ -102,8 +112,9 @@ func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 
 // keptOf converts the card q of the account pin into a KeptQuota; ok is
 // false for a card without a reading time or windows Lamplighter reads,
-// such as an Antigravity card. A window that tells its reset only in
-// seconds (ResetSecs) is placed from at, the time of the answer.
+// and for an agy-cli card that failed (Error). A window that tells its
+// reset only in seconds (ResetSecs) is placed from at, the time of the
+// answer.
 func keptOf(q keptQuota, pin string, at time.Time) (k host.KeptQuota, ok bool, err error) {
 	readAt := q.ReadAt
 	if readAt == nil {
@@ -121,18 +132,29 @@ func keptOf(q keptQuota, pin string, at time.Time) (k host.KeptQuota, ok bool, e
 		ws[i] = w
 	}
 	var groups []quota.RawGroup
+	complete := false
 	switch q.Provider {
 	case "codex":
 		groups, err = keptCodex(ws)
 	case "claude":
 		groups, err = keptClaude(ws)
+	case agyCLI:
+		if q.Error != "" {
+			// agy did not read the quota, such as while its sign-in waits
+			// to be renewed: no reading, neither 0% nor 100%.
+			return host.KeptQuota{}, false, nil
+		}
+		groups, complete, err = keptAgy(ws)
+		// An earlier reading kept in place of one that failed is no
+		// reading of the account as it is now.
+		complete = complete && q.AsOf == nil && q.ReadError == "" && !q.ReadDeferred
 	default:
 		return host.KeptQuota{}, false, nil
 	}
 	if err != nil || len(groups) == 0 {
 		return host.KeptQuota{}, false, err
 	}
-	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC()}, true, nil
+	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC(), Complete: complete}, true, nil
 }
 
 // counted is whether w is a reading of a share used: not a text row, an
@@ -250,9 +272,87 @@ func keptClaude(ws []keptWindow) ([]quota.RawGroup, error) {
 	return groups, nil
 }
 
+// agyCLI is the provider id of the agy-cli plugin
+// (@magpie-community/opencode-agy-cli-auth), which serves Antigravity.
+const agyCLI = "agy-cli"
+
+// agyKept maps the length in the name of a pool's own window to the
+// window: "5 hours" and "7 days" (the plugin's cadence in usage.mjs).
+var agyKept = map[string]struct {
+	label  string
+	period time.Duration
+	weekly bool
+}{
+	"5 hours": {quota.LabelFiveHour, quota.FiveHours, false},
+	"7 days":  {quota.LabelSevenDay, quota.SevenDays, true},
+}
+
+// keptAgy converts an agy-cli card into one group per quota pool
+// (providers.AntigravityPool), with the pool's 5-hour and 7-day windows.
+//
+// The plugin reads agy's /usage (parseUsageReport in its usage.mjs): each
+// pool has windows of its own, {pool: "Gemini", name: "5 hours"}, and a
+// window per model family drawing on it, named after the family and with
+// family set. GET ?kept=1 puts the pool's name before its own windows'
+// ("Gemini · 5 hours", Magpie's PooledWindows) and leaves out the model
+// windows; the refresh answers the plugin's names as they are. Only the
+// pool's own 5-hour and 7-day windows are read.
+//
+// A pool window without a figure ("Limits not available", which Magpie
+// sends as a text row) is no reading: it is left out, and the card is not
+// complete, so that its group is not taken for one that is gone.
+func keptAgy(ws []keptWindow) (groups []quota.RawGroup, complete bool, err error) {
+	complete = true
+	index := map[string]int{}
+	for _, w := range ws {
+		pool := strings.TrimSpace(w.Pool)
+		if pool == "" || w.Family != "" {
+			continue
+		}
+		name := strings.TrimSpace(w.Name)
+		if before, after, ok := strings.Cut(name, " · "); ok && strings.EqualFold(strings.TrimSpace(before), pool) {
+			name = strings.TrimSpace(after)
+		}
+		spec, known := agyKept[strings.ToLower(name)]
+		g, named := providers.AntigravityPool(pool)
+		if !known || !named {
+			continue
+		}
+		if w.Text || w.Unlimited || w.Lane != "" || w.Balance != nil {
+			complete = false
+			continue
+		}
+		if w.Used == nil {
+			return nil, false, fmt.Errorf("%w: a pool window has no used", host.ErrFormat)
+		}
+		id := g.FiveHour
+		if spec.weekly {
+			id = g.Weekly
+		}
+		i, seen := index[g.Key]
+		if !seen {
+			i = len(groups)
+			index[g.Key] = i
+			groups = append(groups, quota.RawGroup{Key: g.Key, SourceLabel: g.SourceLabel})
+		}
+		windows := groups[i].Windows
+		if slices.ContainsFunc(windows, func(x quota.Window) bool { return x.ID == id }) {
+			return nil, false, fmt.Errorf("%w: pool window %q appears twice", host.ErrFormat, name)
+		}
+		groups[i].Windows = append(windows, keptWindowOf(w, id, spec.label, spec.period))
+	}
+	for _, g := range groups {
+		slices.SortStableFunc(g.Windows, func(a, b quota.Window) int { return int(a.Period - b.Period) })
+	}
+	return groups, complete, nil
+}
+
 // Minimum time between two quota refreshes of one account. A Claude
-// refresh runs Claude Code's /usage; the others ask the vendor once.
+// refresh runs Claude Code's /usage, and an agy-cli refresh agy's /usage,
+// which sends Google a dozen Code Assist requests; the others ask the
+// vendor once.
 const (
+	agyRefreshGap    = 15 * time.Minute
 	claudeRefreshGap = 10 * time.Minute
 	refreshGap       = time.Minute
 )
@@ -344,6 +444,10 @@ func refreshStale(card cardState, found bool, before *time.Time) string {
 	return ""
 }
 
+// maskEmail keeps the last two characters of the local part of email,
+// such as "***rk", as the MCP tools name an account (redact.Email).
+func maskEmail(email string) string { return redact.Email(email) }
+
 // Reasons Magpie gives are kept to reasonLimit characters, with emails
 // shown as maskEmail shows them and long token-like strings left out.
 const reasonLimit = 120
@@ -366,7 +470,7 @@ func shortReason(s string) string {
 }
 
 // ErrRefreshLimited is returned when an account's quota was refreshed too
-// recently; see claudeRefreshGap.
+// recently; see agyRefreshGap.
 var ErrRefreshLimited = errors.New("额度刷新过于频繁")
 
 // RefreshQuota asks Magpie to read the quota of the account pin again;
@@ -400,10 +504,13 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 // and the refresh itself within refreshTimeout, so that a slow reading
 // before it does not shorten the refresh. Both also end with caller.
 //
-// It refuses within claudeRefreshGap (Claude) or refreshGap (others) of
-// the last refresh sent for the same account, whatever its result. A call
-// that fails or whose caller has ended before the refresh is sent does
-// not count.
+// It refuses within agyRefreshGap (agy-cli), claudeRefreshGap (Claude) or
+// refreshGap (others) of the last refresh sent for the same account,
+// whatever its result. A call that fails or whose caller has ended before
+// the refresh is sent does not count. The refresh of an agy-cli account
+// that confirms an ignition (host.IsConfirmingIgnition) is not held by
+// the gap, and still starts it; the engine sends at most three of them
+// per ignition.
 func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, bool, error) {
 	look, cancelLook := context.WithTimeout(caller, refreshLookTimeout)
 	defer cancelLook()
@@ -430,7 +537,8 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	case !*a.On:
 		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
 	}
-	if err := h.refreshAllowed(a, false); err != nil {
+	confirming := host.IsConfirmingIgnition(caller)
+	if err := h.refreshAllowed(a, false, confirming); err != nil {
 		return host.KeptQuota{}, false, err
 	}
 	var kept struct {
@@ -453,7 +561,7 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		return host.KeptQuota{}, false, fmt.Errorf("%s: %w", route, ended(caller))
 	}
 	// Checked again: another call may have sent a refresh meanwhile.
-	if err := h.refreshAllowed(a, true); err != nil {
+	if err := h.refreshAllowed(a, true, confirming); err != nil {
 		return host.KeptQuota{}, false, err
 	}
 	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
@@ -494,8 +602,8 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: stale}
 	case !usable:
 		// Magpie read the account again, but its card has no window
-		// Lamplighter reads, such as an Antigravity card or a Claude
-		// account none of whose windows has started. Its kept quota has
+		// Lamplighter reads, such as a Claude account none of whose
+		// windows has started. Its kept quota has
 		// no newer reading either, so the refresh brought none to apply.
 		return host.KeptQuota{}, false, fmt.Errorf("%s: %s: %w: %s", route, a.Pin, host.ErrFormat, errNoWindows)
 	}
@@ -566,16 +674,24 @@ type refreshedCard struct {
 // kept converts c, the card of the account pin, as keptOf does with at
 // the time of the answer.
 func (c refreshedCard) kept(pin string, at time.Time) (host.KeptQuota, bool, error) {
-	return keptOf(keptQuota{Provider: c.Provider, Kind: "subscription", User: c.User, Windows: c.Windows, ReadAt: c.ReadAt, AsOf: c.AsOf}, pin, at)
+	return keptOf(keptQuota{Provider: c.Provider, Kind: "subscription", User: c.User, Windows: c.Windows, ReadAt: c.ReadAt,
+		AsOf: c.AsOf, ReadDeferred: c.ReadDeferred, ReadError: c.ReadError, Error: c.Error}, pin, at)
 }
 
 // refreshAllowed returns ErrRefreshLimited when a refresh of a was sent
-// within its gap (claudeRefreshGap or refreshGap). With send, an allowed
+// within its gap (agyRefreshGap, claudeRefreshGap or refreshGap), unless
+// confirming lets an agy-cli refresh through. With send, an allowed
 // refresh is recorded as sent now.
-func (h *Host) refreshAllowed(a listedAccount, send bool) error {
+func (h *Host) refreshAllowed(a listedAccount, send, confirming bool) error {
 	gap := refreshGap
-	if a.Provider == "claude" {
+	switch a.Provider {
+	case "claude":
 		gap = claudeRefreshGap
+	case agyCLI:
+		gap = agyRefreshGap
+		if confirming {
+			gap = 0
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

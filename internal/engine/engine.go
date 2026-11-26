@@ -153,8 +153,13 @@ type Engine struct {
 	// quota of an account whose token had expired (renewDue).
 	renewedAt map[string]time.Time
 	// roundRenewed is set once a scheduled round has had Magpie refresh
-	// one account (renewDue).
-	roundRenewed bool
+	// one account (renewDue), and roundMagpieRefreshed once it has had
+	// Magpie refresh one account read only from Magpie (magpieRefreshDue).
+	roundRenewed         bool
+	roundMagpieRefreshed bool
+	// magpieConfirms are the ignitions whose window the loop still
+	// confirms, by target key (runMagpieConfirms).
+	magpieConfirms map[string]*magpieConfirm
 	// refused holds when the provider refused a model for a quota group,
 	// keyed by group key and model.
 	refused map[string]time.Time
@@ -627,6 +632,7 @@ func (e *Engine) run() {
 			nextKept = e.now().Add(keptInterval)
 		}
 		e.runProbes(ctx, cfg, e.now())
+		e.runMagpieConfirms(ctx, cfg)
 		if cfg.Ignition.Enabled {
 			e.performDue(ctx, cfg)
 		}
@@ -648,8 +654,8 @@ func (e *Engine) run() {
 		e.mu.Unlock()
 
 		wakeAt := now.Add(maxSleep)
-		for _, candidate := range []time.Time{nextPoll, nextKept, nextPrune} {
-			if candidate.Before(wakeAt) {
+		for _, candidate := range []time.Time{nextPoll, nextKept, nextPrune, e.nextMagpieConfirm()} {
+			if !candidate.IsZero() && candidate.Before(wakeAt) {
 				wakeAt = candidate
 			}
 		}

@@ -192,7 +192,8 @@ func (e *Engine) Refresh(ctx context.Context, authIndex string) error {
 	return e.send(ctx, "refresh", authIndex)
 }
 
-// Ignite ignites one target now.
+// Ignite ignites one target now. ErrIgnitionPending reports a request sent
+// whose window is still to be confirmed.
 func (e *Engine) Ignite(ctx context.Context, key string) error { return e.send(ctx, "ignite", key) }
 
 // ChannelResult is the outcome of a test notification on one channel.

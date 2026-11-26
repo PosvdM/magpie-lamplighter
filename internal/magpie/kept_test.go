@@ -2,7 +2,9 @@ package magpie
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"strconv"
 	"testing"
@@ -15,7 +17,8 @@ import (
 
 // keptJSON is a GET /v1/magpie/quotas?kept=1 answer in the shape of
 // provider.Quota (internal/provider/quotas.go), with the window names
-// Magpie gives Codex (quotaDurationName) and Claude (claudeKinds).
+// Magpie gives Codex (quotaDurationName), Claude (claudeKinds) and an
+// agy-cli pool (PooledWindows).
 const keptJSON = `{"object":"list","data":[
  {"provider":"codex","name":"Codex","kind":"subscription","plan":"team","user":"A@example.com · Team","readAt":"2026-11-21T07:58:00Z","windows":[
    {"name":"5 hours","used":12.5,"remaining":87.5,"resetsAt":"2026-11-21T10:00:00Z"},
@@ -62,6 +65,11 @@ func TestKeptQuotas(t *testing.T) {
 			}},
 			{Key: providers.FableGroupKey, SourceLabel: "Fable", Windows: []quota.Window{
 				{ID: quota.WindowFable, Label: quota.LabelFable, Remaining: 50, Reset: at("2026-11-27T00:00:00Z"), Period: quota.SevenDays},
+			}},
+		}},
+		{Pin: "agy-cli/ffeeddccbbaa9988", ReadAt: at("2026-11-21T07:58:00Z"), Complete: true, Groups: []quota.RawGroup{
+			{Key: "antigravity:gemini-models", SourceLabel: "Gemini", Windows: []quota.Window{
+				{ID: "gemini-5h", Label: quota.LabelFiveHour, Remaining: 90, Reset: at("2026-11-21T10:00:00Z"), Period: quota.FiveHours},
 			}},
 		}},
 	}
@@ -140,5 +148,150 @@ func TestKeptQuotasFormat(t *testing.T) {
 		if _, err := h.KeptQuotas(context.Background()); !errors.Is(err, host.ErrFormat) {
 			t.Errorf("%s: err = %v, want ErrFormat", body, err)
 		}
+	}
+}
+
+// agyKeptJSON is an agy-cli card of GET ?kept=1: the pools' own windows
+// behind the pool's name, a model window that no pool window stands in
+// for (PooledWindows keeps it), and a pool without a figure.
+const agyKeptJSON = `{"provider":"agy-cli","kind":"subscription","user":"c@example.com","plan":"Google AI Pro","readAt":"2026-11-21T07:58:00Z","windows":[
+ {"name":"Gemini · 7 days","used":20.5,"remaining":79.5,"resetsAt":"2026-11-25T00:00:00Z","pool":"Gemini"},
+ {"name":"Gemini · 5 hours","used":0.000123,"remaining":99.999877,"resetsAt":"2026-11-21T10:00:00Z","pool":"Gemini"},
+ {"name":"Claude & GPT · 5 hours","used":40,"remaining":60,"resetsAt":"2026-11-21T11:00:00Z","pool":"Claude & GPT"},
+ {"name":"Claude & GPT · 7 days","used":30,"remaining":70,"resetsAt":"2026-11-26T00:00:00Z","pool":"Claude & GPT"},
+ {"name":"Gemini 3.1 Pro","used":20.5,"remaining":79.5,"resetsAt":"2026-11-25T00:00:00Z","pool":"Gemini","family":"Gemini"},
+ {"name":"Image · 5 hours","used":0,"remaining":100,"pool":"Image","text":true,"display":"Limits not available"}]}`
+
+// agyRefreshJSON is the same reading as POST /v1/magpie/quotas/refresh
+// answers it (provider.SubscriptionQuota): the plugin's names, every
+// model window, and resetSecs in place of resetsAt.
+const agyRefreshJSON = `{"provider":"agy-cli","name":"Antigravity","user":"c@example.com","readAt":"2026-11-21T07:58:00Z","windows":[
+ {"name":"Claude Sonnet","used":40,"resetSecs":10800,"pool":"Claude & GPT","family":"Claude"},
+ {"name":"Gemini 3.1 Pro","used":20.5,"resetsAt":"2026-11-25T00:00:00Z","pool":"Gemini","family":"Gemini"},
+ {"name":"5 hours","used":0.000123,"resetsAt":"2026-11-21T10:00:00Z","pool":"Gemini"},
+ {"name":"7 days","used":20.5,"resetsAt":"2026-11-25T00:00:00Z","pool":"Gemini"},
+ {"name":"5 hours","used":40,"resetSecs":10800,"pool":"Claude & GPT"},
+ {"name":"7 days","used":30,"resetsAt":"2026-11-26T00:00:00Z","pool":"Claude & GPT"},
+ {"name":"5 hours","used":0,"pool":"Image","text":true,"display":"Limits not available"}],
+ "routing":[{"model":"claude-sonnet"},{"model":"gemini-3.1-pro"},{},{},{},{},{}]}`
+
+// Both shapes of an agy-cli card give the groups and window IDs that the
+// history and the settings (hidden_groups, ignition groups) are keyed by;
+// the per-model windows and a pool without a figure are left out.
+func TestKeptAgyPools(t *testing.T) {
+	at := func(s string) time.Time { v, _ := time.Parse(time.RFC3339, s); return v }
+	answered := at("2026-11-21T08:00:00Z")
+	want := []quota.RawGroup{
+		{Key: "antigravity:gemini-models", SourceLabel: "Gemini", Windows: []quota.Window{
+			{ID: "gemini-5h", Label: quota.LabelFiveHour, Remaining: 99.999877, Reset: at("2026-11-21T10:00:00Z"), Period: quota.FiveHours},
+			{ID: "gemini-weekly", Label: quota.LabelSevenDay, Remaining: 79.5, Reset: at("2026-11-25T00:00:00Z"), Period: quota.SevenDays},
+		}},
+		{Key: "antigravity:claude-and-gpt-models", SourceLabel: "Claude / GPT", Windows: []quota.Window{
+			{ID: "3p-5h", Label: quota.LabelFiveHour, Remaining: 60, Reset: at("2026-11-21T11:00:00Z"), Period: quota.FiveHours},
+			{ID: "3p-weekly", Label: quota.LabelSevenDay, Remaining: 70, Reset: at("2026-11-26T00:00:00Z"), Period: quota.SevenDays},
+		}},
+	}
+	var kept keptQuota
+	if err := json.Unmarshal([]byte(agyKeptJSON), &kept); err != nil {
+		t.Fatal(err)
+	}
+	var refreshed refreshedCard
+	if err := json.Unmarshal([]byte(agyRefreshJSON), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	fromKept, ok1, err1 := keptOf(kept, "agy-cli/x", answered)
+	fromRefresh, ok2, err2 := refreshed.kept("agy-cli/x", answered)
+	for name, got := range map[string]struct {
+		k   host.KeptQuota
+		ok  bool
+		err error
+	}{"kept": {fromKept, ok1, err1}, "refresh": {fromRefresh, ok2, err2}} {
+		if got.err != nil || !got.ok || !reflect.DeepEqual(shape(got.k.Groups), shape(want)) {
+			t.Errorf("%s: %v, %v\n got %v\nwant %v", name, got.ok, got.err, shape(got.k.Groups), shape(want))
+		}
+		// The Image pool has no figure: its group may still exist.
+		if got.k.Complete || !got.k.ReadAt.Equal(at("2026-11-21T07:58:00Z")) {
+			t.Errorf("%s: complete %v, read at %v", name, got.k.Complete, got.k.ReadAt)
+		}
+	}
+}
+
+// A card agy did not read (its error) is no reading, neither 0% nor 100%;
+// an earlier reading kept in place of a failed one converts but is not
+// complete; a reading of every pool is.
+func TestKeptAgyStates(t *testing.T) {
+	answered := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+	used := func(v float64) *float64 { return &v }
+	read := answered.Add(-time.Minute)
+	gemini := []keptWindow{{Name: "Gemini · 5 hours", Pool: "Gemini", Used: used(10)}, {Name: "Gemini · 7 days", Pool: "Gemini", Used: used(5)}}
+	card := func(q keptQuota) keptQuota {
+		q.Provider, q.Kind, q.User = "agy-cli", "subscription", "c@example.com"
+		return q
+	}
+	for name, c := range map[string]struct {
+		q            keptQuota
+		ok, complete bool
+	}{
+		"due for renewal": {card(keptQuota{Error: "agy's sign-in is due to be renewed, and agy renews it itself on this account's next chat", Windows: []keptWindow{}}), false, false},
+		"still reading":   {card(keptQuota{Error: "agy is still reading this account's quota", Windows: []keptWindow{}, ReadAt: &read}), false, false},
+		"kept reading":    {card(keptQuota{AsOf: &read, ReadError: "agy is still reading this account's quota", Windows: gemini}), true, false},
+		"deferred":        {card(keptQuota{ReadAt: &read, ReadDeferred: true, Windows: gemini}), true, false},
+		"no pool windows": {card(keptQuota{ReadAt: &read, Windows: []keptWindow{{Name: "Gemini 3.1 Pro", Pool: "Gemini", Family: "Gemini", Used: used(1)}}}), false, false},
+		"every pool read": {card(keptQuota{ReadAt: &read, Windows: gemini}), true, true},
+	} {
+		k, ok, err := keptOf(c.q, "agy-cli/x", answered)
+		if err != nil || ok != c.ok || k.Complete != c.complete {
+			t.Errorf("%s: ok %v, complete %v, err %v", name, ok, k.Complete, err)
+		}
+	}
+	// A pool window without used is a format Lamplighter does not know.
+	if _, _, err := keptOf(card(keptQuota{ReadAt: &read, Windows: []keptWindow{{Name: "5 hours", Pool: "Gemini"}}}), "agy-cli/x", answered); !errors.Is(err, host.ErrFormat) {
+		t.Errorf("pool window without used: err = %v", err)
+	}
+}
+
+// agy-cli 0.1.147's cards as Magpie answered them (testdata): an account
+// whose windows have not started, and one that agy reads no quota of.
+// Magpie lists both, the second switched off; KeptQuotas converts the card
+// with a reading, each pool's two windows under the IDs of the history.
+func TestKeptAgyCards(t *testing.T) {
+	b, err := os.ReadFile("testdata/agy-cli-cards.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cards struct{ Kept, Live, Accounts json.RawMessage }
+	if err := json.Unmarshal(b, &cards); err != nil {
+		t.Fatal(err)
+	}
+	at := func(s string) time.Time { v, _ := time.Parse(time.RFC3339Nano, s); return v }
+	want := []string{
+		"antigravity:gemini-models|Gemini",
+		"gemini-5h|5 小时|5h0m0s|100|2026-11-26T22:33:47Z",
+		"gemini-weekly|7 Day|168h0m0s|100|2026-12-03T17:33:47Z",
+		"antigravity:claude-and-gpt-models|Claude / GPT",
+		"3p-5h|5 小时|5h0m0s|100|2026-11-26T22:33:47Z",
+		"3p-weekly|7 Day|168h0m0s|100|2026-12-03T17:33:47Z",
+	}
+	for _, body := range []json.RawMessage{cards.Kept, cards.Live} {
+		_, h := newGateway(t, map[string]string{
+			"GET /v1/magpie/accounts": string(cards.Accounts),
+			"GET /v1/magpie/quotas":   string(body),
+		})
+		got, err := h.KeptQuotas(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Pin != "agy-cli/a1a1a1a1a1a1a1a1" || !got[0].Complete || !got[0].ReadAt.Equal(at("2026-11-26T17:33:47.68376168Z")) {
+			t.Fatalf("kept %+v", got)
+		}
+		if !reflect.DeepEqual(shape(got[0].Groups), want) {
+			t.Fatalf("groups\n got %v\nwant %v", shape(got[0].Groups), want)
+		}
+	}
+	// The account list gives the plan.
+	_, h := newGateway(t, map[string]string{"GET /v1/magpie/accounts": string(cards.Accounts)})
+	accounts, err := h.Accounts(context.Background())
+	if err != nil || len(accounts) != 2 || accounts[0].Plan != "Google AI Pro" || accounts[1].On {
+		t.Fatalf("accounts %+v, %v", accounts, err)
 	}
 }

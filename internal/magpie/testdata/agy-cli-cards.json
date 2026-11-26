@@ -1,0 +1,142 @@
+{
+ "_comment": "agy-cli 0.1.147 cards as Magpie answered them on 2026-11-26, account names and ids replaced: kept is GET /v1/magpie/quotas?kept=1, live GET /v1/magpie/quotas, accounts the agy-cli entries of GET /v1/magpie/accounts.",
+ "kept": {
+  "object": "list",
+  "data": [
+   {
+    "provider": "agy-cli",
+    "name": "Antigravity (local agy CLI)",
+    "kind": "subscription",
+    "plan": "Google AI Pro",
+    "user": "pro@example.com",
+    "windows": [
+     {
+      "name": "Gemini · 7 days",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-12-03T17:33:47Z",
+      "pool": "Gemini",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Gemini · 5 hours",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-11-26T22:33:47Z",
+      "pool": "Gemini",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Claude & GPT · 7 days",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-12-03T17:33:47Z",
+      "pool": "Claude & GPT",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Claude & GPT · 5 hours",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-11-26T22:33:47Z",
+      "pool": "Claude & GPT",
+      "holdsWhy": "low"
+     }
+    ],
+    "readAt": "2026-11-26T17:33:47.68376168Z"
+   },
+   {
+    "provider": "agy-cli",
+    "name": "Antigravity (local agy CLI)",
+    "kind": "subscription",
+    "plan": "Google AI Pro",
+    "user": "refused@example.com",
+    "windows": [],
+    "error": "agy reports that this account is not eligible for Antigravity."
+   }
+  ]
+ },
+ "live": {
+  "object": "list",
+  "data": [
+   {
+    "provider": "agy-cli",
+    "name": "Antigravity (local agy CLI)",
+    "kind": "subscription",
+    "plan": "Google AI Pro",
+    "user": "pro@example.com",
+    "windows": [
+     {
+      "name": "Gemini · 7 days",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-12-03T17:33:47Z",
+      "pool": "Gemini",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Gemini · 5 hours",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-11-26T22:33:47Z",
+      "pool": "Gemini",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Claude & GPT · 7 days",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-12-03T17:33:47Z",
+      "pool": "Claude & GPT",
+      "holdsWhy": "low"
+     },
+     {
+      "name": "Claude & GPT · 5 hours",
+      "used": 0,
+      "remaining": 100,
+      "resetsAt": "2026-11-26T22:33:47Z",
+      "pool": "Claude & GPT",
+      "holdsWhy": "low"
+     }
+    ],
+    "readAt": "2026-11-26T17:33:47.68376168Z"
+   },
+   {
+    "provider": "agy-cli",
+    "name": "Antigravity (local agy CLI)",
+    "kind": "subscription",
+    "plan": "Google AI Pro",
+    "user": "refused@example.com",
+    "windows": [],
+    "error": "agy reports that this account is not eligible for Antigravity."
+   }
+  ]
+ },
+ "accounts": {
+  "object": "list",
+  "data": [
+   {
+    "provider": "agy-cli",
+    "providerName": "Antigravity (local agy CLI)",
+    "id": "a1a1a1a1a1a1a1a1",
+    "pin": "agy-cli/a1a1a1a1a1a1a1a1",
+    "kind": "account",
+    "label": "pro@example.com",
+    "user": "pro@example.com",
+    "plan": "Google AI Pro",
+    "on": true
+   },
+   {
+    "provider": "agy-cli",
+    "providerName": "Antigravity (local agy CLI)",
+    "id": "b2b2b2b2b2b2b2b2",
+    "pin": "agy-cli/b2b2b2b2b2b2b2b2",
+    "kind": "account",
+    "label": "refused@example.com",
+    "user": "refused@example.com",
+    "plan": "Google AI Pro",
+    "on": false
+   }
+  ]
+ }
+}

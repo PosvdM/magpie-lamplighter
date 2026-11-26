@@ -156,13 +156,14 @@ func TestManualRefreshAsksMagpieToRefreshAnExpiredCredential(t *testing.T) {
 	if w := claudeWindow(e); w.Remaining != 33 {
 		t.Fatalf("the refreshed reading was not applied: %+v", w)
 	}
-	// A refresh of all accounts refreshes the expired one only.
+	// A refresh of all accounts refreshes the expired one, and the
+	// Antigravity account, whose quota is read only from Magpie.
 	renew.refreshed = nil
 	if err := manualRefresh(e, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(renew.refreshed) != 1 || renew.refreshed[0] != "3" {
-		t.Fatalf("refreshed %v, want [3]", renew.refreshed)
+	if strings.Join(renew.refreshed, ",") != "3,4" {
+		t.Fatalf("refreshed %v, want [3 4]", renew.refreshed)
 	}
 }
 

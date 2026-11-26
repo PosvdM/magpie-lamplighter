@@ -30,7 +30,7 @@ Lamplighter（点灯人）是 [Magpie](https://github.com/yetone/magpie) 的插�
 | Claude | Magpie 的 Claude 账号 | 5 小时、7 天，以及 Fable 等单独计算的额度 | 支持，只点 5 小时窗口 |
 | Antigravity | agy-cli 插件（`@magpie-community/opencode-agy-cli-auth`）的账号 | Gemini、Claude / GPT 等额度组 | 默认不点；开启后默认只点 Gemini |
 
-Lamplighter 只监控 Magpie 中服务为 `codex`、`claude` 和 `agy-cli` 的订阅账号。Magpie 自带的 Antigravity 账号（服务为 `antigravity`）读不到凭证，不监控；需要监控 Antigravity 时，经 agy-cli 插件添加账号。没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。Magpie 中的 API key 没有额度窗口，不显示。
+Lamplighter 只监控 Magpie 中服务为 `codex`、`claude` 和 `agy-cli` 的订阅账号。Magpie 自带的 Antigravity 账号（服务为 `antigravity`）不监控；需要监控 Antigravity 时，经 agy-cli 插件添加账号。没有 5 小时窗口的账号（例如 ChatGPT Pro）只监控其他窗口，不点火。Magpie 中的 API key 没有额度窗口，不显示。
 
 ### 账号名称
 
@@ -38,7 +38,7 @@ Lamplighter 只监控 Magpie 中服务为 `codex`、`claude` 和 `agy-cli` 的�
 
 ### 多账号权重
 
-同一服务有多个账号时，图表中的合计按权重平均各账号的剩余额度，权重表示账号的额度是该服务最便宜付费套餐的几倍。默认权重按识别到的套餐确定，账号卡片底部显示套餐名；ChatGPT 的套餐取自额度查询的结果；Claude 和 Antigravity 的套餐每个账号每天读取一次账号资料，账号返回的额度窗口有增减时立即重读，例如 Google AI Pro 到期后 Gemini 的 5 小时窗口消失时。读取失败时沿用上次读到的套餐，从未读到时权重为 1。在“设置”视图的“账号”区填写“权重”可以手动设置，可带小数，留空则恢复输入框中提示的套餐默认值；手动设置的权重保存在 `account_weights` 中，优先于默认值。权重不是 1 时，账号标题后显示倍数，例如 `×5`。
+同一服务有多个账号时，图表中的合计按权重平均各账号的剩余额度，权重表示账号的额度是该服务最便宜付费套餐的几倍。默认权重按识别到的套餐确定，账号卡片底部显示套餐名；ChatGPT 的套餐取自额度查询的结果；Claude 的套餐每个账号每天读取一次账号资料，账号返回的额度窗口有增减时立即重读，例如套餐到期后 5 小时窗口消失时；Antigravity 的套餐取自 Magpie 账号列表中 agy-cli 插件给出的套餐，例如 `Google AI Pro`。读取失败时沿用上次读到的套餐，从未读到时权重为 1。在“设置”视图的“账号”区填写“权重”可以手动设置，可带小数，留空则恢复输入框中提示的套餐默认值；手动设置的权重保存在 `account_weights` 中，优先于默认值。权重不是 1 时，账号标题后显示倍数，例如 `×5`。
 
 | 服务 | 套餐 | 默认权重 |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ Lamplighter 只监控 Magpie 中服务为 `codex`、`claude` 和 `agy-cli` 的�
 | Claude | Pro、Team、Enterprise | 1 |
 | Claude | Max 5x | 5 |
 | Claude | Max 20x | 20 |
-| Antigravity | Free、Pro、Ultra | 1 |
+| Antigravity | Free、Plus、Pro、Ultra，其他套餐照 Magpie 给出的名称显示 | 1 |
 
 未识别的套餐默认权重为 1。
 
@@ -216,9 +216,11 @@ quotas.example.com {
 
 **主动查询**：默认每 5 分钟一次，固定在每小时的 `00 / 05 / 10 / ... / 55` 分钟。此外，每个额度窗口重置前 30 秒和重置后 30 秒，插件各对这个账号再查询一次：前一次记录这个周期最后的剩余额度，后一次确认新周期并及时发出恢复通知。这段时间里已有新读数时不再查询。查询直接发给厂商的额度接口，不经过 Magpie 网关，也不经过 Claude Code。
 
-**Magpie 的额度记录**：Magpie 转发请求时会记下各账号的额度，插件每 60 秒读取一次，不额外向厂商发请求。Codex 和 Claude 有这类数据，Antigravity 只能主动查询。某个账号在整点前 60 秒内刚有过新读数时，这一轮跳过对它的主动查询；同一账号最多连续跳过 30 分钟，到时一定主动查询一次。
+**Magpie 的额度记录**：Magpie 转发请求时会记下各账号的额度，插件每 60 秒读取一次，不额外向厂商发请求。Codex 和 Claude 的账号在整点前 60 秒内刚有过新读数时，这一轮跳过对它的主动查询；同一账号最多连续跳过 30 分钟，到时一定主动查询一次。
 
-**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度；定时查询时每个账号每 30 分钟最多让 Magpie 重新读取一次（Claude 的 setup-token 除外）。Claude 的重新读取会运行一次 Claude Code，同时更新 token，所以空闲的 Claude 账号大约每 8 小时运行一次 Claude Code。刷新单个账号失败时，页面和 `refresh_quotas` 给出原因，例如账号在 Magpie 中已关闭、Magpie 中找不到这个账号或 Magpie 网关不可用；Magpie 这次没有读到新额度时，页面显示 Magpie 记下的旧读数，刷新仍报告失败，原因以“Magpie 这次没有读到新额度”开头；`refresh_quotas` 不返回上游的错误原文，其他错误提示用 `list_quotas` 查看各账号的状态。Antigravity 的 token 由插件自己在内存中刷新，不写回文件。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
+**Antigravity**：插件不直接请求 Google，额度只从 Magpie 读取。Magpie 的 agy-cli 插件运行官方 agy CLI 的 `/usage` 读取额度，每次约 5 到 10 秒。读数已超过 15 分钟时，定时查询请 Magpie 重新读取，每个账号每 15 分钟最多一次，每轮最多一个账号；手动刷新同样受这个间隔限制，过早时报告“额度刷新过于频繁”。Magpie 按额度池给出窗口，“Gemini”池对应“Gemini”额度组，“Claude & GPT”池对应“Claude / GPT”额度组；按模型拆出的窗口不读取。读数不完整时（例如某个池没有给出数值）只更新给出的窗口；Magpie 读取出错时不当作额度用完或已满。
+
+**凭证**：插件从 Magpie 的配置目录读取各账号的 token，只在内存中使用。Claude 和 Codex 的 token 只读取、不刷新：这两个服务刷新 token 时会更换 refresh token，插件刷新后 Magpie 或代理 CLI 手中的 token 就会失效，账号随之掉线。这两个服务的 token 过期、还没有被 Magpie 刷新时，插件不向厂商查询，改用 Magpie 记下的最近读数；手动刷新（页面的刷新按钮或 MCP 的 `refresh_quotas`）时，插件先让 Magpie 重新读取这个账号的额度；定时查询时每个账号每 30 分钟最多让 Magpie 重新读取一次（Claude 的 setup-token 除外）。Claude 的重新读取会运行一次 Claude Code，同时更新 token，所以空闲的 Claude 账号大约每 8 小时运行一次 Claude Code。刷新单个账号失败时，页面和 `refresh_quotas` 给出原因，例如账号在 Magpie 中已关闭、Magpie 中找不到这个账号或 Magpie 网关不可用；Magpie 这次没有读到新额度时，页面显示 Magpie 记下的旧读数，刷新仍报告失败，原因以“Magpie 这次没有读到新额度”开头；`refresh_quotas` 不返回上游的错误原文，其他错误提示用 `list_quotas` 查看各账号的状态。插件不读取 Antigravity 账号的凭证。具体规则见[凭证](./docs/architecture.md#凭证)和[额度记录](./docs/architecture.md#额度记录)。
 
 **网络出口**：主动查询和 Magpie 对同一账号的请求使用同一个出口：Magpie 中为该账号或该服务设置的代理，其次是 Magpie 的全局代理，再次是 Magpie 使用的系统代理，都没有时直连。代理无法解析时，插件跳过这次查询，不改用直连。见[网络出口](./docs/architecture.md#网络出口)。
 
@@ -233,7 +235,7 @@ Claude 和 Codex 的额度精确到 1%，Antigravity 的额度带小数。窗口
 - 请求经 Magpie 网关发送，用请求头锁定到这个账号，网关不会改用其他账号。Claude 的请求在 Magpie 中由 Claude Code 转发，带有 Claude Code 自己的系统提示词，输入 token 比直接请求多。
 - 请求只要求模型回复 `OK`，不带工具。收到首次输出后 2 秒关闭请求；每个候选模型的请求从发出到结束最长 2 分钟；网关返回错误状态码时，读取错误内容另有最多 10 秒。换用下一个候选模型和之后的确认另计时间，所以一次点火可能更久。
 - 点火模型自动选择：ChatGPT 用最新的 Luna，Claude 用最新的 Haiku，Antigravity 的 Gemini 组用最新的 Flash。Magpie 列出新模型后，下一次点火就会使用它；账号不能使用这个模型时，这次点火改用下一个候选模型，被上游拒绝的模型 24 小时内不再尝试。也可以在配置中指定。
-- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 和 Antigravity 的点火靠之后几次主动查询确认：分多次确认，间隔合计约 75 秒，另计每次查询的耗时。
+- 请求发出后，插件确认 5 小时窗口有了一个固定的未来重置时间，才算点火成功。Magpie 网关不转发 Codex 的额度响应头，Codex 的点火靠之后几次主动查询确认：分多次确认，间隔合计约 75 秒，另计每次查询的耗时。Antigravity 的点火请 Magpie 重新读取额度来确认，不受 15 分钟的刷新间隔限制：请求发出约 5 秒后读取一次，没有确认到时在后台再读取最多 2 次，每次间隔至少 1 分钟，期间不耽误其他点火；“立即点火”这时提示请求已发出，结果稍后记入事件。三次都没有确认到时按失败处理。还没有开始的窗口，重置时间是读取时间加 5 小时，每次读取都向后移，插件不把它当作已开始的窗口。
 
 每次点火的模型、回复、usage 和耗时写入 Magpie 的日志，见[调用日志](./docs/architecture.md#调用日志)。
 
@@ -245,7 +247,7 @@ Magpie 自带的预热（内置插件“预热与签到”）也会在窗口重�
 
 以下重试和暂停规则用于自动点火。“立即点火”失败时只显示错误并记录事件，不自动重试、不计入失败次数，也不改变已有自动点火计划；成功时照常记录。
 
-- 凭证失效（401 等）或账号被停用（例如 Google 返回 `TOS_VIOLATION`）时，这个账号停止自动点火，不再每天重试，推送一次 🔑 或 ⛔ 通知（停用通知附申诉链接）。在 Magpie 中重新登录后自动恢复；“立即点火”成功也会恢复。额度查询持续认证失败（连续 3 次、30 分钟以上）或发现账号停用时同样提醒；同一个问题只提醒一次，插件重启后也不重复。问题解除时推送 ✅ 凭证已恢复。
+- 凭证失效（401 等）或账号被停用（例如 Google 返回 `TOS_VIOLATION`）时，这个账号停止自动点火，不再每天重试，推送一次 🔑 或 ⛔ 通知（停用通知附申诉链接）。在 Magpie 中重新登录后自动恢复（Antigravity 账号在问题出现后 Magpie 读到新额度时恢复）；“立即点火”成功也会恢复。额度查询持续认证失败（连续 3 次、30 分钟以上）或发现账号停用时同样提醒；同一个问题只提醒一次，插件重启后也不重复。问题解除时推送 ✅ 凭证已恢复。
 - 厂商限流（429）、模型不可用，或请求成功但窗口没有开始，都会让这个额度组停止点火到第二天 07:00，并推送一次通知；限流的通知为 ⏳ 被限流。通知只写上游错误的第一句话，完整错误在页面的事件详情中。
 - 网络错误和服务端错误先在 5 分钟、15 分钟后重试；第三次仍失败，同样停到第二天。
 - Magpie 在账号被限流或额度用完后让它休息到厂商的重置时间。点火撞上这段休息、且休息在 10 分钟内结束时，等休息结束后重试，不算失败。
@@ -491,14 +493,15 @@ npx mcp-remote http://127.0.0.1:8318/mcp --header "Authorization: Bearer <key>"
 ## 已知限制
 
 - Lamplighter 随 Magpie 的插件宿主运行。Magpie 只在启动时和有插件调用时启动插件宿主；安装、更新插件或修改插件选项后，以及插件宿主因内存占用过高被替换后，Lamplighter 随旧宿主停止，要等到下一次插件调用才重新启动，期间不查询、不点火、不通知。打开 Lamplighter 的页面、调用它的工具，或经 agy-cli 等插件服务发送请求都会启动插件宿主，所以安装插件或修改选项后请打开一次页面。常驻后台需要 Magpie 支持，已向上游提出（[yetone/magpie#7114](https://github.com/yetone/magpie/issues/7114)）。
-- macOS 和 Windows 上，agy 自己登录的第一个 Antigravity 账号的凭证在系统钥匙串中。Lamplighter 不读取钥匙串，无法确认 agy 当前登录的是哪个账号，所以这个账号既不查询也不点火，状态中显示原因。在 Magpie 中用“添加另一个 Google 账号”重新添加该账号后即可查询和点火。
-- Linux 上，agy 自己登录的第一个 Antigravity 账号读 agy 的默认凭证文件，其中存放的是 agy 当前登录的账号。agy 改登其他 Google 账号，或文件、Magpie 没有记下账号邮箱时，身份对不上，这个账号既不查询也不点火，状态中显示原因。agy 改登了其他账号时，在 agy 中改回原账号登录即可。Magpie 没有记下邮箱时，在 agy 中重新登录不能补上（邮箱只在 Magpie 中登录时记下），要在 Magpie 中用“添加另一个 Google 账号”重新添加该账号；文件没有记下账号时同样这样处理。
-- Antigravity 账号的凭证中 `auth_method` 不为空、也不是 `consumer`（个人 Google 账号）时，查询额度会显示错误。
+- agy 的登录需要续期时，agy-cli 插件不为读取额度运行 agy，要等这个账号下一次对话时由 agy 自己续期。空闲的 Antigravity 账号的读数因此会过期，图表缺一段数据。
+- 被 agy 的资格检查拒绝的账号（例如所在地区不支持）读不到额度。这样的账号可能仍能对话，点火请求能发出，却确认不到新窗口：每次点火最多补读 3 次，之后按失败保护暂停；定时查询每 15 分钟请 Magpie 读取一次。
+- Antigravity 账号只有 Magpie 账号列表中的套餐名，插件不提供其他账号资料。
+- Antigravity 的点火由 agy-cli 插件用它为这个账号保存的登录发出。Lamplighter 不读取 agy 的凭证，agy-cli 插件把请求发到了别的账号时，Lamplighter 发现不了。
 - Magpie 的 `MAGPIE_ADDR` 设为局域网地址时，网关要求网关密钥，Lamplighter 无法访问网关。
 
 ## 安全与风险
 
-- 插件只在内存中读取 Magpie 保存的 token，用于查询额度，不写入日志或磁盘。
+- 插件只在内存中读取 Magpie 保存的 Codex 和 Claude 的 token，用于查询额度，不写入日志或磁盘。插件不读取 Antigravity 的凭证，也不直接请求 Google。
 - 错误文字写入日志、状态、事件和历史，以及在页面、接口、MCP 和推送中显示之前，邮箱只留用户名的最后两个字符（如 `***rk`），网址去掉查询参数和用户信息，看起来像 token 的字符串换成省略号。规则见[错误文本的脱敏](./docs/architecture.md#错误文本的脱敏)。
 - `bark_url`、`webhook`、`admin_key` 和 `mcp_key` 以明文保存在 `config.json` 中（文件权限 600），能访问内部监听或持有管理密钥的人都可以读取。
 - 内部监听不需要密钥，同一台机器（Docker 部署时为同一个容器）上的程序都可以访问；浏览器中的其他网页不能调用它的接口。

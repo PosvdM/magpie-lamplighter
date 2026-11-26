@@ -151,7 +151,7 @@ func (e *Engine) nextDue(cfg config.Config) time.Time {
 	now := e.now()
 	var next time.Time
 	for _, t := range e.collectTargets(cfg) {
-		if e.credentialBlocked(t.cred.AuthIndex) {
+		if e.credentialBlocked(t.cred.AuthIndex) || e.confirmPending(t.group.Key) {
 			continue
 		}
 		due := schedule.DueAt(e.state.Target(t.group.Key), t.reset, now)
@@ -234,6 +234,10 @@ func (e *Engine) performDue(ctx context.Context, cfg config.Config) bool {
 		// A rejected credential or a disabled account waits for a new
 		// credential; see credentialBlocked.
 		if e.credentialBlocked(t.cred.AuthIndex) {
+			continue
+		}
+		// The last ignition is still being confirmed (runMagpieConfirms).
+		if e.confirmPending(t.group.Key) {
 			continue
 		}
 		due := schedule.DueAt(e.state.Target(t.group.Key), t.reset, now)
@@ -408,36 +412,30 @@ func overrideID(override string, cred *Cred) string {
 
 // igniteTarget sends the ignition request, confirms it and records the
 // outcome. It returns the error shown for a manual ignition.
+//
+// The ignition of an account whose quota is read only from Magpie
+// (Antigravity) may end before its confirmation: confirmMagpie leaves the
+// later checks to the loop (runMagpieConfirms), and igniteTarget returns
+// ErrIgnitionPending without recording an outcome.
 func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, manual bool) error {
+	if e.confirmPending(t.group.Key) {
+		return errConfirmBusy
+	}
 	ts := e.state.Target(t.group.Key)
-	schedule := e.schedule(cfg)
 	start := e.now()
 	ts.LastAttemptEpoch = float64(start.UnixNano()) / 1e9
 	e.dirty = true
 	// The fingerprint of the credential the request goes out with; a
 	// rejection waits for another one. When it cannot be read, a rejection
 	// keeps it unknown: the file read after the request may already hold a
-	// new login the request did not use. See noteFingerprint. For an
-	// agy-cli account it is the sign-in confirmed before the last request
-	// that went out (sentResponse.fingerprint).
-	//
-	// The gateway sends an agy-cli account's request with whichever Google
-	// account its agy is signed in to. The account is confirmed before
-	// every ignition, manual ones too, and again before each request
-	// (execute); an account that cannot be confirmed gets no request. See
-	// identityChecked.
+	// new login the request did not use. See noteFingerprint.
 	fingerprint := ""
-	var err error
-	if !manual || identityChecked(t.cred) {
-		fingerprint, err = e.ignitionCredential(ctx, t.cred)
+	if !manual {
+		fingerprint = e.ignitionCredential(ctx, t.cred)
 	}
 	base := e.ignitionBase(t.group.Key, start)
 
-	var model string
-	var resp sentResponse
-	if err == nil {
-		model, resp, err = e.execute(ctx, cfg, t, manual)
-	}
+	model, resp, err := e.execute(ctx, cfg, t, manual)
 	if err == nil {
 		// Confirmation needs a reading taken after the request that
 		// worked was sent; the model list and refused candidates before it
@@ -445,18 +443,24 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		if resp.sentAt.After(base.start) {
 			base.start = resp.sentAt
 		}
-		err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+		if providers.MagpieOnly(providers.Lookup(t.group.Provider)) {
+			err = e.confirmMagpie(ctx, cfg, t, base, model, fingerprint, manual)
+		} else {
+			err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+		}
 	}
-	if resp.confirmed {
-		// The sign-in confirmed right before the last request that went
-		// out, which agy may have changed since the first confirmation.
-		fingerprint = resp.fingerprint
+	if errors.Is(err, ErrIgnitionPending) {
+		return err
 	}
-	if errors.Is(err, host.ErrIdentity) {
-		// An unconfirmed sign-in has no fingerprint to wait on; the first
-		// readable credential counts as changed (noteFingerprint).
-		fingerprint = ""
-	}
+	return e.finishIgnition(ctx, cfg, t, manual, model, fingerprint, err)
+}
+
+// finishIgnition records the outcome of the ignition of t: err is the
+// error of its request or confirmation, nil for a confirmed window. It
+// returns the error shown for a manual ignition.
+func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target, manual bool, model, fingerprint string, err error) error {
+	ts := e.state.Target(t.group.Key)
+	schedule := e.schedule(cfg)
 	now := e.now()
 	if errors.Is(err, errIgnitionWithdrawn) {
 		// Not a failure: the target no longer qualifies for automatic
@@ -474,11 +478,6 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	}
 	if err != nil {
 		d := failure.Diagnose(err)
-		if errors.Is(err, host.ErrIdentity) {
-			// A credential problem: retrying cannot help until the account
-			// can be confirmed, and no provider limited anything.
-			d.Reason = failure.ReasonAuth
-		}
 		if manual {
 			// Keep the automatic retry, circuit and credential state
 			// unchanged. manual=1 without retry_seconds tells the page that
@@ -580,17 +579,11 @@ func (e *Engine) group(key string) (GroupView, bool) {
 // execute sends the ignition request with the newest candidate model. It
 // tries the next candidate when Magpie refuses a model for the pinned
 // account, and once per ignition when the provider refuses a model. The
-// response carries when the returned candidate was sent, and for an
-// agy-cli account the sign-in confirmed before the last request that went
-// out, also with an error.
+// response carries when the returned candidate was sent.
 //
 // Each request of an automatic ignition passes admit, which checks that
 // the target still qualifies; otherwise the requests not sent yet are
-// dropped with errIgnitionWithdrawn. Each request of an agy-cli account
-// confirms the account right before it is sent (confirmIdentity): agy can
-// sign in to another account while the model list is read or a candidate
-// is refused. An account not confirmed before a later candidate returns
-// an error that names that candidate, as the ones before it went out.
+// dropped with errIgnitionWithdrawn.
 //
 // A model list that fails because the engine stops or ctx ends returns
 // context.Canceled.
@@ -636,9 +629,6 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 
 	var lastErr, refusedErr error
 	refused := ""
-	// sent is the sign-in of the last request that went out, for the
-	// returns after the loop.
-	var sent sentResponse
 	for i, model := range candidates {
 		if ctx.Err() != nil || e.stopping() {
 			return model, empty, context.Canceled
@@ -647,20 +637,12 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		if err != nil {
 			return "", empty, err
 		}
-		fingerprint := ""
-		if identityChecked(t.cred) {
-			if fingerprint, err = e.confirmIdentity(ctx, t.cred, i+1); err != nil {
-				return model, empty, err
-			}
-		}
 		resp, err := e.executeStream(ctx, t, host.ModelRequest{
 			Account:  t.cred.AuthIndex,
 			Protocol: protocol,
 			Model:    model,
 			Body:     body,
 		}, ignitionOutputWindow)
-		resp.confirmed, resp.fingerprint = identityChecked(t.cred), fingerprint
-		sent = sentResponse{confirmed: resp.confirmed, fingerprint: fingerprint}
 		if err == nil {
 			if refused != "" {
 				e.noteRefused(t, refused, model)
@@ -693,9 +675,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		return model, resp, err
 	}
 	if refused != "" {
-		return "", sent, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
+		return "", empty, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
 	}
-	return "", sent, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
+	return "", empty, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
 }
 
 // refusedFor is how long a model the provider refused for a quota group is
@@ -834,9 +816,9 @@ func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 
 // confirm checks that the ignition started a window. Claude responses carry
 // the new reset in their headers, which Magpie's gateway writes back. The
-// gateway does not pass on Codex's x-codex-* headers, and Antigravity has no
-// quota in its headers: for them, and when the headers carry no new window,
-// the credential is queried actively. The queries of a manual ignition
+// gateway does not pass on Codex's x-codex-* headers: for Codex, and when
+// the headers carry no new window, the credential is queried actively.
+// Antigravity is confirmed by confirmMagpie. The queries of a manual ignition
 // leave the credential state alone, like its failure. A stop or an ended
 // ctx before the window is confirmed returns context.Canceled, also when
 // it cuts a query short.

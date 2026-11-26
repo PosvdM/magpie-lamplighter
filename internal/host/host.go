@@ -2,9 +2,9 @@
 //
 // The engine sees Magpie only through Host. Package magpie implements it
 // against a running Magpie: the account list and quotas from the gateway at
-// MAGPIE_ADDR, the credentials from Magpie's configuration directory, and
-// ignition requests through the gateway with X-Magpie-Account. Tests use a
-// fake Host.
+// MAGPIE_ADDR, the Codex and Claude credentials from Magpie's configuration
+// directory, and ignition requests through the gateway with
+// X-Magpie-Account. Tests use a fake Host.
 package host
 
 import (
@@ -53,13 +53,6 @@ var ErrNotImplemented = errors.New("not implemented")
 // not know. Implementations wrap it and never guess a field.
 var ErrFormat = errors.New("unknown Magpie format")
 
-// ErrIdentity is wrapped by Credential when it cannot confirm that the
-// credential belongs to the account: agy's own sign-in of an agy-cli
-// account holds whichever Google account agy is signed in to, and the
-// gateway sends that account's requests with it. Ignition sends no request
-// for such an account; see docs/architecture.md.
-var ErrIdentity = errors.New("credential of another or an unconfirmed account")
-
 // Account is one subscription account that Magpie serves.
 type Account struct {
 	// Pin is Magpie's "<provider>/<id>" from GET /v1/magpie/accounts. It is
@@ -67,7 +60,7 @@ type Account struct {
 	// and account_names, and the value of X-Magpie-Account.
 	Pin string `json:"pin"`
 	// Provider is Magpie's provider id, such as "codex", "claude" or
-	// "antigravity". The engine maps it to a Lamplighter provider with
+	// "agy-cli". The engine maps it to a Lamplighter provider with
 	// providers.Lookup.
 	Provider string `json:"provider"`
 	// Label is the name Magpie shows; Email is the account's email when
@@ -85,9 +78,10 @@ type Account struct {
 	On bool `json:"on"`
 }
 
-// Credential is what a provider needs to read the quota of an account.
-// Implementations read it from Magpie's files and never refresh a token
-// that Magpie or an agent CLI owns; see docs/architecture.md.
+// Credential is what a provider needs to read the quota of a Codex or
+// Claude account. Implementations read it from Magpie's files and never
+// refresh a token; see docs/architecture.md. Antigravity has none: its
+// quota is read only from Magpie's quota cards.
 type Credential struct {
 	// Provider is Magpie's provider id; ID and Name are the account pin.
 	Provider    string
@@ -96,8 +90,6 @@ type Credential struct {
 	AccessToken string
 	// AccountID is the ChatGPT account id of a Codex account.
 	AccountID string
-	// ProjectID is the Cloud Code project of an Antigravity account.
-	ProjectID string
 	// ProxyURL is the proxy Magpie uses for this account's requests: the
 	// account's or provider's own, else Magpie's global proxy. "" means
 	// the environment proxy or a direct connection, "direct" a direct one.
@@ -112,23 +104,26 @@ type Credential struct {
 	// RenewedByRefresh is set with Expired when Magpie renews the token
 	// as it refreshes the account's quota (RefreshQuota): a Claude
 	// sign-in, whose refresh runs Claude Code, and a Codex sign-in. A
-	// Claude setup-token and an Antigravity token are not.
+	// Claude setup-token is not.
 	RenewedByRefresh bool
-	// Data holds provider-specific fields, such as an Antigravity
-	// user_agent.
-	Data map[string]any
 }
 
 // KeptQuota is Magpie's last reading of one account's quota, converted to
 // Lamplighter groups. Magpie sends no request to read it. The groups and
 // windows use the keys and IDs of the provider's own Fetch, such as
 // "claude:main" and quota.WindowFiveHour, so that they update the same
-// windows; a window the active query has not reported is ignored.
+// windows; a window the active query has not reported is ignored. An
+// Antigravity reading uses the keys and IDs of providers.AntigravityPool.
 type KeptQuota struct {
 	Pin    string
 	Groups []quota.RawGroup
 	// ReadAt is when Magpie took the reading.
 	ReadAt time.Time
+	// Complete is set on a reading of every window of the account: a
+	// group or window missing from it no longer exists. Only an
+	// Antigravity reading whose every pool window has a figure is
+	// complete; the engine applies it as an active query.
+	Complete bool
 }
 
 // ModelRequest is one ignition request through the Magpie gateway.
@@ -175,7 +170,8 @@ type Host interface {
 	// and the fallback for an account whose token has expired.
 	KeptQuotas(ctx context.Context) ([]KeptQuota, error)
 	// RefreshQuota asks Magpie to read one account's quota again. For
-	// Claude this runs Claude Code's /usage, so callers limit it.
+	// Claude this runs Claude Code's /usage, and for Antigravity agy's
+	// /usage, so callers limit it.
 	RefreshQuota(ctx context.Context, pin string) error
 	// Models lists the model ids the gateway serves.
 	Models(ctx context.Context) ([]string, error)
@@ -194,19 +190,6 @@ type Host interface {
 	Log(level, message string, fields map[string]any)
 }
 
-// IdentityChecker is implemented by a Host that can confirm, from local
-// files alone, whose sign-in the gateway will send an account's requests
-// with. Ignition of an agy-cli account calls it before every request, as
-// agy can sign in to another Google account at any time; without it no
-// agy-cli account is confirmed, and none is ignited. Every error means the
-// account is not confirmed, and no request is sent.
-type IdentityChecker interface {
-	// ConfirmIdentity returns the fingerprint of the account's sign-in
-	// (as in Credential) once the sign-in is confirmed to be the
-	// account's. It reads no proxy setting and renews no token.
-	ConfirmIdentity(ctx context.Context, account Account) (fingerprint string, err error)
-}
-
 // KeptRefresher is implemented by a Host whose RefreshQuota answers the
 // account's quota card: RefreshKept is RefreshQuota that also returns
 // that card as a KeptQuota, so that the caller need not read KeptQuotas
@@ -216,4 +199,20 @@ type IdentityChecker interface {
 // says the reading is not new.
 type KeptRefresher interface {
 	RefreshKept(ctx context.Context, pin string) (kept KeptQuota, found bool, err error)
+}
+
+type confirmingKey struct{}
+
+// ConfirmingIgnition marks ctx as that of a RefreshQuota or RefreshKept
+// that confirms an ignition. The engine sends at most a few such refreshes
+// per ignition, so a host may let them through within the refresh gap of
+// an account whose quota it reads only when asked.
+func ConfirmingIgnition(ctx context.Context) context.Context {
+	return context.WithValue(ctx, confirmingKey{}, true)
+}
+
+// IsConfirmingIgnition reports whether ctx was marked by ConfirmingIgnition.
+func IsConfirmingIgnition(ctx context.Context) bool {
+	v, _ := ctx.Value(confirmingKey{}).(bool)
+	return v
 }

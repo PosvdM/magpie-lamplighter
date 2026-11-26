@@ -313,6 +313,7 @@
       ignite_now: "立即点火",
       ignite_confirm: "立即向 {0} 发送一次点火请求？这会开始一个新的 5 小时窗口。",
       ignited: "{0} 点火成功",
+      ignite_pending: "{0} 点火请求已发出，确认结果稍后记入事件",
       ev_ignite: "点火成功", ev_ignite_manual: "手动点火", ev_ignite_failed: "点火失败", ev_ignite_paused: "点火暂停", ev_model_refused: "模型被拒",
       ev_plan_change: "套餐变化", ev_notify: "已推送", ev_notify_failed: "推送失败", ev_codex_reset: "重置信号", ev_error: "错误",
       ev_ignited: "{0} · 下次重置 {1}",
@@ -502,6 +503,7 @@
       ignite_now: "Ignite now",
       ignite_confirm: "Send an ignition request to {0} now? This starts a new 5-hour window.",
       ignited: "{0} ignited",
+      ignite_pending: "{0}: ignition request sent; the confirmation is recorded in the events later",
       ev_ignite: "Ignited", ev_ignite_manual: "Manual ignition", ev_ignite_failed: "Ignition failed", ev_ignite_paused: "Ignition paused", ev_model_refused: "Model refused",
       ev_plan_change: "Plan changed", ev_notify: "Notified", ev_notify_failed: "Notification failed", ev_codex_reset: "Reset signal", ev_error: "Error",
       ev_ignited: "{0} · next reset {1}",
@@ -1621,7 +1623,7 @@
       var st = targetStatus(t), title = groupTitle(t.key, t.label);
       var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), onclick: function () {
         if (!confirmed(button, translate("ignite_confirm", title))) return;
-        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", title));
+        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", title), translate("ignite_pending", title));
       } });
       var next = parseTime(t.next_due), reset = parseTime(t.reset), last = parseTime(t.last_success);
       var statusCell = el("td", {}, [badge(st.kind, st.text)]);
@@ -2251,11 +2253,13 @@
     return fetchStatus(timeout).then(useStatus);
   }
 
-  function runAction(button, path, body, success) {
+  // pending is shown for an action the plugin finishes later (an ignition
+  // whose window Magpie is still to confirm).
+  function runAction(button, path, body, success, pending) {
     button.disabled = true;
     return api("POST", path, body).then(function (data) {
       if (data.status) { status = data.status; renderStatus(); }
-      toast(data.ok ? success : translate("failed", data.error));
+      toast(data.ok ? (data.pending && pending ? pending : success) : translate("failed", data.error));
       loadHistory(true);
     }).catch(function (err) {
       if (err.message !== "unauthorized") toast(translate("failed", err.message));
