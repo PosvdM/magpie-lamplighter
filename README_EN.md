@@ -207,6 +207,13 @@ The camera buttons on each account card, the card area header and the detail cha
 
 The Settings view has **Accounts**, **Notification channels**, **Alert rules**, **Time zone**, **Ignition**, **Services** and **Advanced**. Switches and checkboxes save on click; text and numbers save when the field loses focus or on Enter. The result is shown to the right of the section title: **Saved; waiting to take effect**, then **In effect** once the plugin confirms, or **Not confirmed in effect** after 15 seconds. When a save fails, the title shows the field and the reason, the field is outlined in red and the draft is kept. Under **Accounts** you can set names and weights and drag the handles to reorder accounts (saved as `account_order`); Esc cancels a drag. **Send test** under **Notification channels** sends to every configured channel once the settings are in effect and shows each result.
 
+Under **Services**, check the services whose quota to monitor. A service with several quota groups (such as **Gemini** and **Claude / GPT** of Antigravity, or a Claude account that reports Fable) lists them under **Quota groups shown**, all checked by default; a service with one quota group shows no such row. Uncheck a quota group you do not need, such as a **Claude / GPT** that always stays at 100%. The choice is saved in `hidden_groups` and applies to every account of the service:
+
+- The account cards leave the quota group out; an account whose quota groups are all hidden shows no card.
+- The rows, totals, detail chart and data table of the quota history chart leave it out, and **Lowest first** does not count it. The history of a deleted account keeps only an internal key that does not name the quota group, so those lines stay.
+- It sends no quota notifications (drops, exhaustion, recoveries and reset reminders), and the reminders due while it was hidden are not sent once it is shown again. Account-level notifications, such as a rejected credential or a plan change, and Did Codex Reset are not affected.
+- The plugin still queries and records its quota, so the chart is continuous once it is shown again; the events, the ignition table and the MCP tools are unchanged.
+
 ## How quota is read
 
 **Active queries**: every 5 minutes by default, at fixed minutes `00 / 05 / 10 / ... / 55` of each hour. In addition, 30 seconds before and 30 seconds after each quota window resets, the plugin queries that account once more: the first records the last remaining quota of the cycle, the second confirms the new cycle and sends the recovery notice promptly. A query is skipped when a newer reading already arrived. Queries go straight to the vendor's quota endpoint, not through the Magpie gateway and not through Claude Code.
@@ -289,6 +296,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 | `chart_view`, `chart_expanded` | empty | Written by the page: the window, order and range of each window, and the expanded group IDs (service and name, such as `claude\|Claude`), while the two settings above are on; deleted when they are turned off, and not saved while their setting is off |
 | `mask_accounts` | `false` | Written by the page: the state of the blur switch |
 | `events_show_5h_resets` | `false` | Written by the page: **Show 5-hour resets** of the event list |
+| `hidden_groups` | empty | Hidden quota groups, each written as "service ID\|quota group name", such as `["antigravity\|Claude / GPT"]`; set under **Quota groups shown** in **Services**, see [Page contents](#page-contents) |
 | `account_names` | empty | Account names, keyed by the account's identifier in Magpie (such as `codex/<id>`) |
 | `account_weights` | empty | Weight of each account in a multi-account total, keyed the same way, a number above 0; accounts without one use the plan default |
 | `account_order` | empty | Account order, as a list of account identifiers; accounts not listed follow in the default order |
@@ -298,7 +306,7 @@ The configuration is kept in `config.json` in the [data directory](#data-directo
 
 The thresholds are adjusted so that `100 ≥ notice_threshold ≥ low_threshold ≥ critical_threshold ≥ 0`; a later threshold cannot be above an earlier one.
 
-With both `bark_url` and `webhook.url` empty, notifications are off: nothing is sent and no delivery failure is recorded. Quota alerts from that time are not sent later when an address is filled in.
+With both `bark_url` and `webhook.url` empty, notifications are off: nothing is sent and no delivery failure is recorded. Quota alerts from that time are not sent later when an address is filled in. The quota groups in `hidden_groups` send no quota notifications either; see [Page contents](#page-contents).
 
 Recovery notices and pre-reset reminders are set per window: `five_hour` for the 5-hour window, `seven_day` for the 7-day window:
 
