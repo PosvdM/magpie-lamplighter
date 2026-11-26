@@ -3402,7 +3402,7 @@ function shownGroupsDom(ids) {
 function shownGroupsContext(accounts) {
   const dom = shownGroupsDom(["antigravity", "claude", "codex"]);
   const ctx = context(["shownGroupChoices", "renderShownGroups", "renderAllShownGroups"], {
-    ...dom.globals, status: { accounts },
+    ...dom.globals, status: { accounts }, shownEdits: {},
     providerList: () => [{ id: "antigravity", groups: ["Gemini", "Claude / GPT"] }, { id: "claude" }, { id: "codex" }],
   });
   // Labels keep their inputs in the list for the next render.
@@ -3431,9 +3431,9 @@ test("Services lists the quota groups of each service to show, checked unless hi
   ctx.renderAllShownGroups({ hidden_groups: ["codex|GPT", "codex|Gone"] }, null);
   assert.deepEqual(shown("codex"), [["codex|GPT", false], ["codex|Gone", false]]);
   assert.equal(boxes.codex.hidden, false);
-  // A checkbox being edited keeps its state.
+  // A checkbox with an edit not yet applied shows the edit.
   const fable = boxes.claude.list.inputs[1];
-  fable.checked = false; fable.settingsDirty = true;
+  ctx.shownEdits["claude|Fable"] = { shown: false };
   ctx.renderAllShownGroups({}, null);
   assert.equal(boxes.claude.list.inputs[1], fable);
   assert.equal(fable.checked, false);
@@ -3444,11 +3444,11 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
   const box = (id, checked) => ({ type: "checkbox", name: "", checked, value: "on", attrs: { "data-shown-group": id },
     getAttribute(name) { return this.attrs[name] ?? null; }, hasAttribute(name) { return name in this.attrs; },
     closest: () => null, checkValidity: () => true });
-  const inputs = [box("antigravity|Gemini", true), box("antigravity|Claude / GPT", false), box("claude|Fable", true)];
+  const inputs = [box("antigravity|Gemini", true), box("antigravity|Claude / GPT", false), box("claude|Fable", false)];
   const writes = [], refilled = [];
   const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
-    rawConfig: { hidden_groups: ["codex|Gone", "claude|Fable"] }, status: { config: {} },
+    rawConfig: { hidden_groups: ["codex|Gone", "claude|Fable"] }, status: { config: {} }, shownEdits: {},
     saveHost: () => ({}), claimState: () => () => true,
     patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
     loadConfig: async () => {}, showApplied: async () => true,
@@ -3460,9 +3460,11 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
   ctx.saveField({ target: inputs[1] });
   await ctx.saveQueue;
   await settle();
-  assert.deepEqual(writes.at(-1), { hidden_groups: ["codex|Gone", "antigravity|Claude / GPT"] });
+  assert.deepEqual(writes.at(-1), { hidden_groups: ["codex|Gone", "claude|Fable", "antigravity|Claude / GPT"] });
   assert.deepEqual(refilled.at(-1), { hidden_groups: true });
   assert.equal(inputs[1].settingsDirty, false);
+  // Applied, the edit is done with; the checkboxes follow the config again.
+  assert.deepEqual(plain(ctx.shownEdits), {});
   // Showing every group deletes the key.
   ctx.rawConfig.hidden_groups = ["antigravity|Claude / GPT"];
   inputs[1].checked = true;
@@ -3475,7 +3477,7 @@ function shownSaveContext(inputs, rawConfig) {
   const writes = [];
   const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
-    rawConfig, status: { config: {} },
+    rawConfig, status: { config: {} }, shownEdits: {},
     saveHost: () => ({}), claimState: () => () => true,
     patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
     loadConfig: async () => {}, showApplied: async () => true,
@@ -3511,6 +3513,49 @@ test("a queued save of hidden_groups keeps a checkbox that left the form meanwhi
   release();
   await ctx.saveQueue;
   assert.deepEqual(writes, [{ hidden_groups: ["claude|Fable"] }]);
+});
+
+test("an edit waiting to be saved survives its checkbox going and coming back, and the next edit keeps it", async () => {
+  const dom = shownGroupsDom(["claude"]);
+  const list = dom.boxes.claude.list;
+  list.appendChild = (label) => list.inputs.push(label.children[0]);
+  const both = [{ provider: "claude", groups: [{ source_label: "Claude" }, { source_label: "Fable" }] }];
+  const writes = [];
+  const ctx = context(["shownGroupChoices", "renderShownGroups", "renderAllShownGroups", "saveField", "captureIntent", "buildPatch", "refillSaved",
+    "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
+    ...dom.globals, status: { accounts: both, config: {} }, shownEdits: {},
+    providerList: () => [{ id: "claude" }],
+    $: () => ({ elements: list.inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(), rawConfig: {},
+    saveHost: () => ({}), claimState: () => () => true,
+    patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
+    loadConfig: async () => {}, showApplied: async () => true, fillSettings: () => {}, renderIgnitionOff: () => {},
+  });
+  vm.runInContext(pageVar("PUBLIC_URL_TRIM"), ctx);
+  const input = (id) => list.inputs.find((i) => i.getAttribute("data-shown-group") === id);
+  ctx.renderAllShownGroups({}, null);
+  let release;
+  ctx.saveQueue = new Promise((resolve) => { release = resolve; });
+  const fable = input("claude|Fable");
+  fable.checked = false;
+  ctx.saveField({ target: fable });
+  // While the save waits, the config still shows Fable: its account stops
+  // reporting it and reports it again, and the boxes are made anew.
+  ctx.status.accounts = [{ provider: "claude", groups: [{ source_label: "Claude" }] }];
+  ctx.renderAllShownGroups({}, null);
+  list.inputs = [];
+  ctx.status.accounts = both;
+  ctx.renderAllShownGroups({}, null);
+  assert.notEqual(input("claude|Fable"), fable);
+  assert.equal(input("claude|Fable").checked, false);
+  // An edit of another group saves Fable's edit with it.
+  const claude = input("claude|Claude");
+  claude.checked = false;
+  ctx.saveField({ target: claude });
+  release();
+  await ctx.saveQueue;
+  await settle();
+  assert.deepEqual(writes, [{ hidden_groups: ["claude|Fable"] }, { hidden_groups: ["claude|Fable", "claude|Claude"] }]);
+  assert.deepEqual(plain(ctx.shownEdits), {});
 });
 
 test("the shown groups have their text in both languages", () => {

@@ -94,9 +94,9 @@ type Engine struct {
 	nextPoll           time.Time
 	pollErrs           map[string]string
 	modelsErr          string
-	// shownAt is when each quota group of hidden_groups was last shown
-	// again, by config.GroupID. Reminders due before then are not sent.
-	shownAt map[string]time.Time
+	// hidden is when each quota group of hidden_groups, by config.GroupID,
+	// was last hidden and shown again; see noteHiddenLocked.
+	hidden map[string]hiddenSpan
 	// notifyErr is the reason the webhook settings were not applied.
 	notifyErr string
 	lang      string // notification language, a copy of state.Language
@@ -215,9 +215,9 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 		e.mu.Unlock()
 		return 0
 	}
+	e.noteHiddenLocked(e.cfg.HiddenGroups, cfg.HiddenGroups, e.cfgRevision == 0)
 	e.cfgRevision++
 	revision := e.cfgRevision
-	e.noteShownLocked(e.cfg.HiddenGroups, cfg.HiddenGroups)
 	e.cfg = cfg
 	e.cfgErr = ""
 	e.withdrawLocked()
@@ -226,28 +226,48 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	return revision
 }
 
-// noteShownLocked records the groups that were hidden and are not any
-// more. The time is taken when the config is received, not when a round
-// applies it: readings in between, also passive ones read with the new
-// config, must not send what came due while the group was hidden.
-func (e *Engine) noteShownLocked(was, now []string) {
+// hiddenSpan is when a quota group was last hidden, zero when it was
+// hidden in the first config of the process, and when it was then shown
+// again, zero while it is hidden.
+type hiddenSpan struct {
+	from, to time.Time
+}
+
+// noteHiddenLocked records when the groups of hidden_groups were hidden
+// and shown again, so that the reminders due in between are not sent
+// (notify.Group.HiddenSince). The times are taken when the config is
+// received, not when a round applies it: passive readings in between use
+// the new config already. The groups of the first config are hidden since
+// a time unknown.
+func (e *Engine) noteHiddenLocked(was, now []string, first bool) {
+	if e.hidden == nil {
+		e.hidden = map[string]hiddenSpan{}
+	}
+	at := e.now()
+	for _, id := range now {
+		if !slices.Contains(was, id) {
+			span := hiddenSpan{from: at}
+			if first {
+				span.from = time.Time{}
+			}
+			e.hidden[id] = span
+		}
+	}
 	for _, id := range was {
-		if slices.Contains(now, id) {
-			continue
+		if span := e.hidden[id]; !slices.Contains(now, id) {
+			span.to = at
+			e.hidden[id] = span
 		}
-		if e.shownAt == nil {
-			e.shownAt = map[string]time.Time{}
-		}
-		e.shownAt[id] = e.now()
 	}
 }
 
-// groupShown returns when the quota group sourceLabel of provider was last
-// shown again after it was hidden, zero when it was not in this process.
-func (e *Engine) groupShown(provider, sourceLabel string) time.Time {
+// groupHiddenSpan returns the hiddenSpan of the quota group sourceLabel of
+// provider, and whether it was hidden in this process.
+func (e *Engine) groupHiddenSpan(provider, sourceLabel string) (hiddenSpan, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.shownAt[config.GroupID(provider, sourceLabel)]
+	span, ok := e.hidden[config.GroupID(provider, sourceLabel)]
+	return span, ok
 }
 
 // ConfigurePageState 只更新内存配置中页面自己的状态（见 config.IsPageState），

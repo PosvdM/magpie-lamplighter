@@ -1063,8 +1063,11 @@ func (e *Engine) applyGroupsFrom(ctx context.Context, cfg config.Config, cred *C
 		e.recordQuotaTransitions(group, previous[group.Key], now)
 		e.recordSamples(group, source, now)
 		if e.alerts != nil && alerts {
-			e.alerts.ProcessGroup(ctx, e.state, notify.Group{Key: group.Key, Label: group.Label, Windows: group.windows(),
-				Hidden: cfg.GroupHidden(group.Provider, group.SourceLabel), Shown: e.groupShown(group.Provider, group.SourceLabel)}, now)
+			g := notify.Group{Key: group.Key, Label: group.Label, Windows: group.windows(), Hidden: cfg.GroupHidden(group.Provider, group.SourceLabel)}
+			if span, ok := e.groupHiddenSpan(group.Provider, group.SourceLabel); ok {
+				g.HiddenSince, g.Shown = span.from, span.to
+			}
+			e.alerts.ProcessGroup(ctx, e.state, g, now)
 		}
 	}
 	e.dirty = true

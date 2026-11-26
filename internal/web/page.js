@@ -4243,24 +4243,33 @@
     return providerList().filter(function (p) { return p.groups && p.groups.length; });
   }
 
+  // The edits of "Quota groups shown" not yet known to be applied, by
+  // "<provider>|<source label>": {shown}, a new object for each edit. They
+  // are what the page saves in hidden_groups; the checkboxes show them and
+  // record changes in them, so a refill, or a checkbox made again after its
+  // group left and came back, does not undo an edit still being saved.
+  // refillSaved drops an edit once a save of it is applied.
+  var shownEdits = {};
+
   // Quota groups offered under "Quota groups shown": the provider's groups,
-  // the groups seen on its accounts and the hidden ones, in a stable order.
-  // hidden lists hidden_groups.
+  // the groups seen on its accounts, the hidden ones and those of
+  // shownEdits, in a stable order. hidden lists hidden_groups.
   function shownGroupChoices(p, hidden) {
     var names = (p.groups || []).slice(), prefix = p.id + "|";
     (status.accounts || []).forEach(function (a) {
       if (a.provider !== p.id) return;
       (a.groups || []).forEach(function (g) { if (g.source_label && names.indexOf(g.source_label) < 0) names.push(g.source_label); });
     });
-    (hidden || []).forEach(function (id) {
+    (hidden || []).concat(Object.keys(shownEdits)).forEach(function (id) {
       if (typeof id === "string" && id.indexOf(prefix) === 0 && names.indexOf(id.slice(prefix.length)) < 0) names.push(id.slice(prefix.length));
     });
     return names;
   }
 
-  // One checkbox per quota group of p, checked while the group shows, with
-  // the value "<provider>|<source label>" of hidden_groups. A service with
-  // a single group shows no checkboxes unless that group is hidden.
+  // One checkbox per quota group of p, checked while the group shows, or
+  // while its edit in shownEdits shows it, with the value
+  // "<provider>|<source label>" of hidden_groups. A service with a single
+  // group shows no checkboxes unless that group is hidden.
   function renderShownGroups(p, hidden) {
     var box = document.querySelector("[data-shown-groups='" + p.id + "']");
     if (!box) return;
@@ -4271,7 +4280,8 @@
     names.forEach(function (name) {
       var id = p.id + "|" + name;
       var input = existing.get(id) || el("input", { type: "checkbox", "data-shown-group": id });
-      if (!input.settingsDirty && !input.hasAttribute("aria-invalid")) input.checked = (hidden || []).indexOf(id) < 0;
+      var edit = Object.prototype.hasOwnProperty.call(shownEdits, id) ? shownEdits[id] : null;
+      input.checked = edit ? edit.shown : (hidden || []).indexOf(id) < 0;
       if (!input.checked) anyHidden = true;
       list.appendChild(el("label", { class: "inline" }, [input, document.createTextNode(name)]));
     });
@@ -4543,6 +4553,8 @@
   // change what it saves.
   function captureIntent(tops) {
     var intent = { inputs: [], states: [], submitted: [] };
+    // hidden_groups is saved from the edits, not from the checkboxes.
+    if (tops.indexOf("hidden_groups") >= 0) intent.shown = Object.assign({}, shownEdits);
     Array.prototype.forEach.call($("settings").elements, function (input) {
       if (tops.indexOf(inputTop(input)) < 0) return;
       intent.inputs.push(input);
@@ -4606,21 +4618,19 @@
         ).map(function (input) { return input.getAttribute("data-group"); });
       });
     }
-    // hidden_groups lists the unchecked groups and keeps the hidden groups
-    // the page does not offer; an empty list deletes the key. The saved list
-    // is read as the plugin reads it, so a checkbox removes an entry written
-    // with spaces or twice. A save that waits in the queue takes the
-    // checkboxes of its intent: one may have left the form meanwhile, when
-    // the only account that reports its group went.
+    // hidden_groups is the saved list with the edits of shownEdits, as the
+    // intent took them; other hidden groups stay, and an empty list deletes
+    // the key. The saved list is read as the plugin reads it, so an edit
+    // removes an entry written with spaces or twice. The checkboxes are not
+    // read: one may have left the form, or been made again, meanwhile.
     if (top === "hidden_groups") {
-      var hidden = hiddenList(base);
-      Array.prototype.forEach.call(intent ? intent.inputs : $("settings").elements, function (input) {
-        if (!input.hasAttribute || !input.hasAttribute("data-shown-group")) return;
-        var id = input.getAttribute("data-shown-group"), at = hidden.indexOf(id);
-        if (intent) intent.submitted.push(input);
-        if (state(input).checked) { if (at >= 0) hidden.splice(at, 1); }
+      var hidden = hiddenList(base), edits = intent && intent.shown || shownEdits;
+      Object.keys(edits).forEach(function (id) {
+        var at = hidden.indexOf(id);
+        if (edits[id].shown) { if (at >= 0) hidden.splice(at, 1); }
         else if (at < 0) hidden.push(id);
       });
+      if (intent) intent.inputs.forEach(function (input) { if (input.hasAttribute && input.hasAttribute("data-shown-group")) intent.submitted.push(input); });
       patch[top] = hidden.length ? hidden : null;
     }
     // Turning MCP on without a key also saves a new key, since the plugin
@@ -4828,6 +4838,10 @@
   // its intent was captured. Independent failures remain owned by their item.
   function refillSaved(intent) {
     var keys = {}, any = false;
+    if (intent.shown) {
+      Object.keys(intent.shown).forEach(function (id) { if (shownEdits[id] === intent.shown[id]) delete shownEdits[id]; });
+      keys.hidden_groups = any = true;
+    }
     intent.submitted.forEach(function (input) {
       var saved = intent.states[intent.inputs.indexOf(input)];
       if (!saved || (input.settingsEdit || 0) !== saved.edit || input.hasAttribute("aria-invalid")) return;
@@ -4886,6 +4900,7 @@
       return;
     }
     if (input.name === "ignition.enabled") renderIgnitionOff();
+    if (top === "hidden_groups") shownEdits[input.getAttribute("data-shown-group")] = { shown: input.checked };
     var say = claimState(host, input);
     noteEdit(input);
     var intent = captureIntent(tops);

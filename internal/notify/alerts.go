@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,15 +51,17 @@ type Group struct {
 	Label   string
 	Windows []quota.Window
 	// Hidden drops the notifications of the group, as when notifications
-	// are off: the baseline, the recoveries and the reminders sent advance
-	// as if they were delivered, so showing the group again sends nothing
-	// from the time it was hidden.
+	// are off: the baseline and the recoveries advance as if they were
+	// delivered, and so do the reminders due since HiddenSince, so showing
+	// the group again sends nothing from the time it was hidden.
 	Hidden bool
-	// Shown is when the group was last shown again after it was hidden.
-	// Reset reminders due by then came due while it was hidden, also when
-	// no reading came in that time; they are marked sent without being
-	// sent.
-	Shown time.Time
+	// HiddenSince is when the group was last hidden, zero when that is not
+	// known, and Shown when it was then shown again, zero while it is
+	// hidden or was never. Reset reminders due in between came due while
+	// it was hidden, also when no reading came in that time; they are
+	// marked sent without being sent. A reminder due before HiddenSince
+	// and not sent yet waits until the group shows again.
+	HiddenSince, Shown time.Time
 }
 
 // Alerts turns quota changes into notifications.
@@ -451,6 +454,25 @@ func dueReminders(ws *store.WindowState, hours []float64, reset string, untilRes
 	return keys
 }
 
+// hiddenReminders returns the keys of dueReminders that came due while g
+// was hidden: after HiddenSince, and by Shown or, while it is hidden, by
+// now.
+func hiddenReminders(ws *store.WindowState, hours []float64, reset string, at time.Time, g Group, now time.Time) []string {
+	end := g.Shown
+	if g.Hidden || end.After(now) {
+		end = now
+	}
+	if end.IsZero() {
+		return nil
+	}
+	keys := dueReminders(ws, hours, reset, at.Sub(end))
+	if g.HiddenSince.IsZero() {
+		return keys
+	}
+	before := dueReminders(ws, hours, reset, at.Sub(g.HiddenSince))
+	return slices.DeleteFunc(keys, func(key string) bool { return slices.Contains(before, key) })
+}
+
 // recordReminders marks the leads of r as sent for its cycle. Entries of
 // other cycles stay: a reading that reports another cycle by mistake must
 // not clear the leads already sent for the actual one.
@@ -573,12 +595,10 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 		if resetValue != "" && mode != config.ReminderOff &&
 			(mode == config.ReminderAll || w.Remaining > math.Max(a.Cfg.CriticalThreshold, ExhaustedRemaining)) {
 			hours := a.Cfg.ResetReminderHours.For(sevenDay)
-			if !g.Shown.IsZero() && g.Shown.Before(now) {
-				if keys := dueReminders(old, hours, resetValue, w.Reset.Sub(g.Shown)); len(keys) > 0 {
-					recordReminders(old, reminder{window: w, reset: resetValue, keys: keys})
-				}
+			if keys := hiddenReminders(old, hours, resetValue, w.Reset, g, now); len(keys) > 0 {
+				recordReminders(old, reminder{window: w, reset: resetValue, keys: keys})
 			}
-			if keys := dueReminders(old, hours, resetValue, w.Reset.Sub(now)); len(keys) > 0 {
+			if keys := dueReminders(old, hours, resetValue, w.Reset.Sub(now)); len(keys) > 0 && !g.Hidden {
 				reminders = append(reminders, reminder{window: w, reset: resetValue, keys: keys})
 			}
 		}
