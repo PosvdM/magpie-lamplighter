@@ -654,11 +654,10 @@ func (e *Engine) run() {
 			nextKept = e.now().Add(keptInterval)
 		}
 		e.runProbes(ctx, cfg, e.now())
-		e.runMagpieConfirms(ctx, cfg)
 		if cfg.Ignition.Enabled {
 			e.performDue(ctx, cfg)
 		}
-		e.dispatchAgy()
+		e.dispatchAgy(ctx)
 		if !now.Before(nextPrune) {
 			e.history.Prune(e.now(), time.Duration(cfg.HistoryRetentionDays)*24*time.Hour)
 			nextPrune = e.now().Add(pruneInterval)

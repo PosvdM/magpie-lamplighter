@@ -145,7 +145,7 @@ func manualRefresh(e *Engine, pin string) error {
 			return reply.err
 		case d := <-e.agyDoneCh:
 			e.agyFinished(ctx, e.config(), d)
-			e.dispatchAgy()
+			e.dispatchAgy(ctx)
 		}
 	}
 }

@@ -41,6 +41,10 @@ type fakeHost struct {
 	// accountsHook may change the accounts Magpie lists, such as their
 	// plans, before each listing.
 	accountsHook func(auths []authEntry)
+	// now is Magpie's clock, which tells when a refresh is sent
+	// (host.RefreshSending); a refresh is sent at the zero time without
+	// it.
+	now func() time.Time
 	// listModels replaces the default model list when set.
 	listModels func() ([]string, error)
 	// credErrs makes Credential fail for the pins it holds.
@@ -82,7 +86,16 @@ func (f *fakeHost) KeptQuotas(context.Context) ([]host.KeptQuota, error) {
 	return out, nil
 }
 
+// RefreshQuota sends the refresh right away (host.RefreshSending), and
+// records it once it is sent.
 func (f *fakeHost) RefreshQuota(ctx context.Context, pin string) error {
+	var at time.Time
+	if f.now != nil {
+		at = f.now()
+	}
+	if err := host.RefreshSending(ctx, at); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	f.refreshed = append(f.refreshed, pin)
 	f.confirming = append(f.confirming, host.IsConfirmingIgnition(ctx))
@@ -178,6 +191,7 @@ func newTestEngineIn(t *testing.T, h *fakeHost, c *clock, dir string) (*Engine, 
 
 func standardHost(c *clock) *fakeHost {
 	return &fakeHost{
+		now: c.now,
 		auths: []authEntry{
 			{ID: "codex-a.json", AuthIndex: "1", Name: "codex-a.json", Provider: "codex", Email: "alice.work@example.com", User: "alice.work@example.com · Team"},
 			{ID: "codex-b.json", AuthIndex: "2", Name: "codex-b.json", Provider: "codex", Email: "bob.team@example.net"},

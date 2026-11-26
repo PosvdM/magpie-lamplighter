@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -22,7 +23,14 @@ import (
 //     (queryMagpie), the one whose last refresh of any kind was tried
 //     longest ago, at least magpieRefreshGap after it.
 //
-// Each refresh runs within scheduledRenewTimeout.
+// Each refresh runs within scheduledRenewTimeout. The time of an
+// account's last refresh (renewedAt) is when the host sent it, which
+// package magpie counts its own refresh gap from as well; a refresh the
+// host refused for that gap counts as none. Only the refreshes of accounts
+// still loaded whose service is monitored run: the queues drop the others
+// (pruneAgy), and the worker checks again right before the host sends a
+// refresh. A refresh the stop of the loop cut short counts as none
+// either: it changes neither the account's state nor a confirmation.
 
 // agyJobKind is why the worker refreshes an account.
 type agyJobKind int
@@ -35,12 +43,14 @@ const (
 
 // agyJob is one refresh for the worker: the account pin, and before, the
 // time of the account's reading applied when the job was taken. key is
-// the quota group a confirmation refresh is for.
+// the quota group a confirmation refresh is for. tried is the account's
+// renewedAt before the job, restored when the job counts as no refresh.
 type agyJob struct {
 	pin    string
 	kind   agyJobKind
 	key    string
 	before time.Time
+	tried  time.Time
 }
 
 // agyDone is the result of a job, handed back to the loop.
@@ -70,6 +80,11 @@ func (e *Engine) startAgyWorker(ctx context.Context) {
 				return
 			case job := <-jobs:
 				result := e.runAgyJob(ctx, job)
+				if ctx.Err() != nil {
+					// The run of the loop ended: its result is not
+					// applied, and the next run runs the job again.
+					return
+				}
 				select {
 				case done <- agyDone{job: job, result: result}:
 				case <-ctx.Done():
@@ -80,9 +95,11 @@ func (e *Engine) startAgyWorker(ctx context.Context) {
 	}()
 }
 
-// runAgyJob runs the refresh of job. It touches no state of the engine.
-// A refresh that confirms an ignition is not held by the account's gap in
-// package magpie (host.ConfirmingIgnition).
+// runAgyJob runs the refresh of job. It changes no state of the engine;
+// right before the host sends the refresh, it checks that the account may
+// still be refreshed (agyRefreshable). A refresh that confirms an
+// ignition is not held by the account's gap in package magpie
+// (host.ConfirmingIgnition).
 func (e *Engine) runAgyJob(ctx context.Context, job agyJob) refreshResult {
 	renew := ctx
 	if job.kind == agyConfirm {
@@ -90,7 +107,61 @@ func (e *Engine) runAgyJob(ctx context.Context, job agyJob) refreshResult {
 	}
 	renew, cancel := context.WithTimeout(renew, scheduledRenewTimeout)
 	defer cancel()
-	return e.fetchRefresh(ctx, renew, job.pin)
+	return e.fetchRefresh(ctx, renew, job.pin, func() error { return e.agyRefreshable(job.pin) })
+}
+
+// agyRefreshable returns errRefreshAccountGone when the account pin may no
+// longer be refreshed: it is no longer loaded, or the settings as they
+// are now no longer monitor its service. Changing the settings does not
+// reload the accounts. Safe for the worker.
+func (e *Engine) agyRefreshable(pin string) error {
+	cfg := e.config()
+	e.mu.Lock()
+	cred := e.creds[pin]
+	e.mu.Unlock()
+	if cred == nil || !cfg.Provider(cred.Provider).Monitor {
+		return errRefreshAccountGone
+	}
+	return nil
+}
+
+// pruneAgy drops the refreshes of accounts that may no longer be
+// refreshed (agyRefreshable): a confirmation ends as withdrawn, not as a
+// failure, and the manual refreshes waiting for the account get
+// errRefreshAccountGone.
+func (e *Engine) pruneAgy(ctx context.Context, cfg config.Config) {
+	pins := map[string]bool{}
+	for _, c := range e.magpieConfirms {
+		if !c.running {
+			pins[c.target.cred.AuthIndex] = true
+		}
+	}
+	for _, pin := range e.agyManualQ {
+		pins[pin] = true
+	}
+	for pin := range e.agyStale {
+		pins[pin] = true
+	}
+	for pin := range pins {
+		if (e.agyBusy == nil || e.agyBusy.pin != pin) && e.agyRefreshable(pin) != nil {
+			e.dropAgy(ctx, cfg, pin)
+		}
+	}
+}
+
+// dropAgy drops every refresh of the account pin; see pruneAgy.
+func (e *Engine) dropAgy(ctx context.Context, cfg config.Config, pin string) {
+	for key, c := range e.magpieConfirms {
+		if c.target.cred.AuthIndex == pin {
+			e.finishMagpieConfirm(ctx, cfg, key, errIgnitionWithdrawn)
+		}
+	}
+	for _, ch := range e.agyWaiters[pin] {
+		ch <- errRefreshAccountGone
+	}
+	delete(e.agyWaiters, pin)
+	e.agyManualQ = slices.DeleteFunc(e.agyManualQ, func(p string) bool { return p == pin })
+	delete(e.agyStale, pin)
 }
 
 // queueAgyManual queues a manual refresh of the account pin and returns
@@ -187,17 +258,20 @@ func (e *Engine) nextAgyJob(now time.Time) (job agyJob, ok bool) {
 		}
 	}
 	job.before = e.keptAt[job.pin]
+	job.tried = e.renewedAt[job.pin]
 	e.renewedAt[job.pin] = now
 	e.agyBusy = &job
 	return job, true
 }
 
-// dispatchAgy hands the next job to the worker of this run, if any is due
-// and the worker is free.
-func (e *Engine) dispatchAgy() {
+// dispatchAgy drops the refreshes that may no longer run (pruneAgy) and
+// hands the next job to the worker of this run, if any is due and the
+// worker is free.
+func (e *Engine) dispatchAgy(ctx context.Context) {
 	if e.agyJobs == nil {
 		return
 	}
+	e.pruneAgy(ctx, e.config())
 	job, ok := e.nextAgyJob(e.now())
 	if !ok {
 		return
@@ -238,14 +312,63 @@ func (e *Engine) nextAgyWake(now time.Time) time.Time {
 	return next
 }
 
-// agyFinished applies the result of a job in the loop: the reading it
-// brought, the account's error in the status, the manual refreshes
-// waiting for the account, and the confirmation the job was for.
+// agyFinished applies the result of a job in the loop: the time the
+// refresh was sent, the reading it brought, the account's error in the
+// status, the manual refreshes waiting for the account, and the
+// confirmations the reading settles.
+//
+// A job the stop of the loop cut short counts as no refresh: its
+// confirmation is no try, nothing is recorded, and the waiting manual
+// refreshes are answered by the stop. A job the worker stopped because the
+// account may no longer be refreshed drops the account's refreshes
+// (dropAgy). A refresh the host refused for the account's gap counts as
+// none: a scheduled one is due again when the gap ends, and is not shown
+// as the account's error unless a manual refresh waits for it.
 func (e *Engine) agyFinished(ctx context.Context, cfg config.Config, d agyDone) {
 	if e.agyBusy != nil && e.agyBusy.pin == d.job.pin {
 		e.agyBusy = nil
 	}
-	pin := d.job.pin
+	pin, r := d.job.pin, d.result
+	untried := func() {
+		if d.job.tried.IsZero() {
+			delete(e.renewedAt, pin)
+		} else {
+			e.renewedAt[pin] = d.job.tried
+		}
+	}
+	if r.err != nil && (ctx.Err() != nil || e.stopping()) {
+		untried()
+		if c := e.magpieConfirms[d.job.key]; d.job.kind == agyConfirm && c != nil {
+			c.running = false
+		}
+		return
+	}
+	limited := r.sentAt.IsZero() && errors.Is(r.err, host.ErrRefreshLimited)
+	switch {
+	case !r.sentAt.IsZero():
+		e.renewedAt[pin] = r.sentAt
+	case limited:
+		untried()
+		// At least agyLimitedRetry before the next try, should the host
+		// count from a later time.
+		if floor := e.now().Add(agyLimitedRetry - magpieRefreshGap); e.renewedAt[pin].Before(floor) {
+			e.renewedAt[pin] = floor
+		}
+	case errors.Is(r.err, errRefreshAccountGone):
+		untried()
+		if c := e.magpieConfirms[d.job.key]; d.job.kind == agyConfirm && c != nil {
+			c.running = false
+		}
+		e.dropAgy(ctx, cfg, pin)
+		e.dirty = true
+		return
+	}
+	if limited && d.job.kind == agyScheduled {
+		e.agyStale[pin] = true
+		if len(e.agyWaiters[pin]) == 0 {
+			return
+		}
+	}
 	e.mu.Lock()
 	cred := e.creds[pin]
 	e.mu.Unlock()
@@ -253,7 +376,7 @@ func (e *Engine) agyFinished(ctx context.Context, cfg config.Config, d agyDone) 
 	if cred == nil {
 		err = errRefreshAccountGone
 	} else {
-		err = e.settleRefresh(ctx, cred, d.job.before, d.result)
+		err = e.settleRefresh(ctx, cred, d.job.before, r)
 		if err != nil {
 			e.agyErrs[pin] = err
 			if d.job.kind != agyConfirm {
@@ -275,10 +398,15 @@ func (e *Engine) agyFinished(ctx context.Context, cfg config.Config, d agyDone) 
 	}
 	delete(e.agyWaiters, pin)
 	e.dirty = true
+	e.confirmByRefresh(ctx, cfg, d)
 	if d.job.kind == agyConfirm {
 		e.confirmStep(ctx, cfg, d.job.key, err)
 	}
 }
+
+// agyLimitedRetry is the least time before a scheduled refresh the host
+// refused for the account's gap is tried again.
+const agyLimitedRetry = time.Minute
 
 // ErrRefreshQueued is the answer to a manual refresh whose refresh by
 // Magpie had not finished by the end of the manual refresh: it is queued

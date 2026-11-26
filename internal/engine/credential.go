@@ -130,26 +130,40 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 }
 
 // noteMagpieReading marks the credential problem of cred, an account whose
-// quota is read only from Magpie (providers.MagpieOnly), as changed when
-// Magpie read the account's quota at readAt, after the problem was last
-// found (store.CredentialState LastFailure): Lamplighter reads no
-// credential of such an account to compare fingerprints with. Only
-// Magpie's own new reading (host.KeptQuota Active), which agy makes with
-// the account's own sign-in, reaches here: agy reads nothing while its
-// token waits to be renewed or Google refuses the account. Ignition then
-// tries again; see noteFingerprint.
-func (e *Engine) noteMagpieReading(cred *Cred, readAt time.Time) {
+// quota is read only from Magpie (providers.MagpieOnly), as changed when a
+// reading of Magpie's, read at readAt, was certainly made after the
+// problem was last found (store.CredentialState LastFailure): Lamplighter
+// reads no credential of such an account to compare fingerprints with.
+// Only Magpie's own new reading (host.KeptQuota Active), which agy makes
+// with the account's own sign-in, reaches here: agy reads nothing while
+// its token waits to be renewed or Google refuses the account. Ignition
+// then tries again; see noteFingerprint.
+//
+// Magpie stamps readAt when agy has finished, which can be well after
+// agy asked Google: a reading taken before the problem can carry a later
+// readAt. So the reading counts when sent, the time Lamplighter sent the
+// refresh that answered it, is after the problem, or, for any reading,
+// when readAt is magpieReadSpan or more after it.
+func (e *Engine) noteMagpieReading(cred *Cred, readAt, sent time.Time) {
 	if e.state == nil {
 		return
 	}
 	st := e.state.Credentials[cred.AuthIndex]
-	if st == nil || st.Reason == "" || st.Changed || !readAt.After(st.LastFailure()) {
+	if st == nil || st.Reason == "" || st.Changed {
+		return
+	}
+	failed := st.LastFailure()
+	if !sent.After(failed) && readAt.Before(failed.Add(magpieReadSpan)) {
 		return
 	}
 	st.Changed = true
 	e.dirty = true
 	e.logf("info", "%s 在出现问题后读到了新的额度，恢复自动点火", accountLabel(cred))
 }
+
+// magpieReadSpan bounds how long one reading of Magpie's takes, from
+// asking agy to stamping readAt: agy runs for about 2 minutes at most.
+const magpieReadSpan = 3 * time.Minute
 
 // ignitionCredential reads the fingerprint of cred's credential before an
 // ignition, "" when it cannot be read. An account whose quota is read only

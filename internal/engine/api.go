@@ -237,7 +237,7 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 			// The refreshes by Magpie run in the background worker: a
 			// goroutine waits for them and replies, and the loop goes on.
 			e.manualWaits = nil
-			e.dispatchAgy()
+			e.dispatchAgy(ctx)
 			e.refreshTargets(cfg)
 			e.saveState()
 			one, end := cmd.arg != "", e.manualEnd

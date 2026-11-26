@@ -2,6 +2,7 @@ package magpie
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -66,14 +67,15 @@ type keptWindow struct {
 }
 
 // KeptQuotas returns Magpie's last readings of the Codex, Claude and
-// agy-cli accounts that are switched on. A card that does not convert is
+// agy-cli accounts that are switched on, an agy-cli reading with the plan
+// the account list gives the account. A card that does not decode or convert is
 // logged and left out; the other cards are returned. The call, with the
 // account list it reads, ends within keptTimeout.
 func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 	ctx, cancel := context.WithTimeout(ctx, keptTimeout)
 	defer cancel()
 	var resp struct {
-		Data *[]keptQuota `json:"data"`
+		Data *[]json.RawMessage `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &resp); err != nil {
 		return nil, err
@@ -85,28 +87,119 @@ func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 	if err != nil {
 		return nil, err
 	}
-	pins := map[string]string{}
+	on := map[string]listedAccount{}
 	for _, a := range listed {
 		if a.Kind == "account" && a.On != nil && *a.On {
-			pins[a.Provider+"\n"+accountKey(a.User)] = a.Pin
+			on[a.Provider+"\n"+accountKey(a.User)] = a
 		}
 	}
+	cards, bad := decodeCards[keptQuota](*resp.Data)
+	h.noteBadCards(listed, bad)
 	out := []host.KeptQuota{}
-	for _, q := range *resp.Data {
+	for _, q := range cards {
 		if q.Kind != "subscription" || q.From != "" {
 			continue
 		}
-		pin := pins[q.Provider+"\n"+accountKey(q.User)]
-		if pin == "" || strings.TrimSpace(q.User) == "" {
+		a, found := on[q.Provider+"\n"+accountKey(q.User)]
+		if !found || strings.TrimSpace(q.User) == "" {
 			continue
 		}
-		k, ok, err := keptOf(q, pin, now())
-		h.noteCardError(pin, err)
+		k, ok, err := keptOf(q, a.Pin, now())
+		h.noteCardError(a.Pin, err)
 		if ok && err == nil {
+			k.Plan = planOf(k, a)
 			out = append(out, k)
 		}
 	}
 	return out, nil
+}
+
+// planOf is the plan of the account list to give with k, the reading of
+// a: only an agy-cli reading carries it (host.KeptQuota Plan).
+func planOf(k host.KeptQuota, a listedAccount) string {
+	if !k.Active {
+		return ""
+	}
+	return strings.TrimSpace(a.Plan)
+}
+
+// cardID is what tells whose a card is, read from a card that may not
+// decode as a whole.
+type cardID struct {
+	Provider string `json:"provider"`
+	Kind     string `json:"kind"`
+	User     string `json:"user"`
+	From     string `json:"from"`
+}
+
+// badCard is a card that does not decode: its index in the list, whose it
+// is when that can be read, and the error.
+type badCard struct {
+	cardID
+	index int
+	err   error
+}
+
+// name names b in the log when it belongs to no account switched on: by
+// provider and masked account name, else by its place in the list.
+func (b badCard) name() string {
+	if b.Provider != "" && b.User != "" {
+		return b.Provider + " " + maskEmail(b.User)
+	}
+	return fmt.Sprintf("card %d", b.index+1)
+}
+
+// decodeCards decodes each card of raw on its own, so that a card of
+// another shape, such as one with a readAt that is no time or a used
+// given as text, costs only itself. The cards that decode are returned
+// in their order; each of the others is a badCard, its error wrapping
+// host.ErrFormat.
+func decodeCards[T any](raw []json.RawMessage) ([]T, []badCard) {
+	out := make([]T, 0, len(raw))
+	var bad []badCard
+	for i, r := range raw {
+		var card T
+		if err := json.Unmarshal(r, &card); err != nil {
+			b := badCard{index: i, err: fmt.Errorf("%w: %v", host.ErrFormat, err)}
+			_ = json.Unmarshal(r, &b.cardID)
+			bad = append(bad, b)
+			continue
+		}
+		out = append(out, card)
+	}
+	return out, bad
+}
+
+// noteBadCards logs each of bad, cards that do not decode, as
+// noteCardError does: by the pin of the listed account it belongs to, else
+// by its name.
+func (h *Host) noteBadCards(listed []listedAccount, bad []badCard) {
+	for _, b := range bad {
+		name := b.name()
+		for _, a := range listed {
+			if b.isCardOf(a) {
+				name = a.Pin
+				break
+			}
+		}
+		h.noteCardError(name, b.err)
+	}
+}
+
+// ownBadCard is the card of a among bad, nil for none.
+func ownBadCard(bad []badCard, a listedAccount) *badCard {
+	for i := range bad {
+		if bad[i].isCardOf(a) {
+			return &bad[i]
+		}
+	}
+	return nil
+}
+
+// isCardOf reports whether the card b would be the subscription card of a
+// (cardIndex).
+func (b badCard) isCardOf(a listedAccount) bool {
+	return cardIndex([]cardState{{Provider: b.Provider, Kind: b.Kind, User: b.User, From: b.From}}, a) == 0
 }
 
 // noteCardError logs err, the error of converting the kept card of the
@@ -517,7 +610,7 @@ func shortReason(s string) string {
 
 // ErrRefreshLimited is returned when an account's quota was refreshed too
 // recently; see agyRefreshGap.
-var ErrRefreshLimited = errors.New("额度刷新过于频繁")
+var ErrRefreshLimited = host.ErrRefreshLimited
 
 // RefreshQuota asks Magpie to read the quota of the account pin again;
 // see RefreshKept.
@@ -527,8 +620,12 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 }
 
 // RefreshKept asks Magpie to read the quota of the account pin again, and
-// returns the account's card of the answer as a KeptQuota (keptOf), found
-// when there is one to use; it implements host.KeptRefresher.
+// returns the account's card of the answer as a KeptQuota (keptOf), an
+// agy-cli card with the plan of the account list, found when there is one
+// to use; it
+// implements host.KeptRefresher. The cards of the answer are decoded one
+// by one (decodeCards): a card of another account that does not decode is
+// logged and left out.
 //
 // Right before, it reads the account list again: the account must still
 // be a subscription account that is switched on and has a name, since the
@@ -553,7 +650,9 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 // It refuses within agyRefreshGap (agy-cli), claudeRefreshGap (Claude) or
 // refreshGap (others) of the last refresh sent for the same account,
 // whatever its result. A call that fails or whose caller has ended before
-// the refresh is sent does not count. The refresh of an agy-cli account
+// the refresh is sent does not count. Right before it sends the refresh,
+// it calls host.RefreshSending with the time the gap counts from; an
+// error of it stops the refresh unsent, and does not count either. The refresh of an agy-cli account
 // that confirms an ignition (host.IsConfirmingIgnition) is not held by
 // the gap, and still starts it; the engine sends at most three of them
 // per ignition.
@@ -584,11 +683,11 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		return host.KeptQuota{}, false, &host.Error{Method: route, Code: codeAccountOff, Message: "这个账号已在 Magpie 中停用"}
 	}
 	confirming := host.IsConfirmingIgnition(caller)
-	if err := h.refreshAllowed(a, false, confirming); err != nil {
+	if _, _, err := h.refreshAllowed(a, false, confirming); err != nil {
 		return host.KeptQuota{}, false, err
 	}
 	var kept struct {
-		Data *[]cardState `json:"data"`
+		Data *[]json.RawMessage `json:"data"`
 	}
 	if err := h.gatewayJSON(look, http.MethodGet, keptPath, &kept); err != nil {
 		return host.KeptQuota{}, false, refreshError(caller, route, err)
@@ -596,9 +695,13 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	if kept.Data == nil {
 		return host.KeptQuota{}, false, fmt.Errorf("GET %s: %w: no data list", routeOf(keptPath), host.ErrFormat)
 	}
+	// A card of the account that does not decode leaves the time of its
+	// reading unknown, as no card does.
+	keptCards, bad := decodeCards[cardState](*kept.Data)
+	h.noteBadCards(listed, bad)
 	var before *time.Time
-	if i := cardIndex(*kept.Data, a); i >= 0 {
-		before = (*kept.Data)[i].at()
+	if i := cardIndex(keptCards, a); i >= 0 {
+		before = keptCards[i].at()
 	}
 	cancelLook()
 	// A caller that has ended sends no refresh, which would start the
@@ -607,14 +710,20 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		return host.KeptQuota{}, false, fmt.Errorf("%s: %w", route, ended(caller))
 	}
 	// Checked again: another call may have sent a refresh meanwhile.
-	if err := h.refreshAllowed(a, true, confirming); err != nil {
+	at, last, err := h.refreshAllowed(a, true, confirming)
+	if err != nil {
+		return host.KeptQuota{}, false, err
+	}
+	if err := host.RefreshSending(caller, at); err != nil {
+		// The caller stopped the refresh: it was not sent.
+		h.unsend(a.Pin, at, last)
 		return host.KeptQuota{}, false, err
 	}
 	ctx, cancel := context.WithTimeout(caller, refreshTimeout)
 	defer cancel()
 	query := url.Values{"provider": {a.Provider}, "user": {a.User}}
 	var resp struct {
-		Data *[]refreshedCard `json:"data"`
+		Data *[]json.RawMessage `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodPost, refreshPath+"?"+query.Encode(), &resp); err != nil {
 		return host.KeptQuota{}, false, refreshError(caller, route, err)
@@ -623,8 +732,10 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 		return host.KeptQuota{}, false, fmt.Errorf("%s: %w: no data list", route, host.ErrFormat)
 	}
 	answered := now()
-	states := make([]cardState, len(*resp.Data))
-	for i, c := range *resp.Data {
+	cards, bad := decodeCards[refreshedCard](*resp.Data)
+	h.noteBadCards(listed, bad)
+	states := make([]cardState, len(cards))
+	for i, c := range cards {
 		states[i] = c.cardState
 	}
 	var card cardState
@@ -632,9 +743,14 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	usable := false
 	var convErr error
 	i := cardIndex(states, a)
+	if own := ownBadCard(bad, a); i < 0 && own != nil {
+		// The account's card is there, but does not decode.
+		return h.keptAfter(ctx, a, before, fmt.Errorf("%s: %s: %w", route, a.Pin, own.err))
+	}
 	if i >= 0 {
 		card = states[i]
-		k, usable, convErr = (*resp.Data)[i].kept(a.Pin, answered)
+		k, usable, convErr = cards[i].kept(a.Pin, answered)
+		k.Plan = planOf(k, a)
 	}
 	stale := refreshStale(card, i >= 0, before)
 	switch {
@@ -690,23 +806,25 @@ func ended(ctx context.Context) error {
 // can be told.
 func (h *Host) keptAfter(ctx context.Context, a listedAccount, before *time.Time, failed error) (host.KeptQuota, bool, error) {
 	var kept struct {
-		Data *[]refreshedCard `json:"data"`
+		Data *[]json.RawMessage `json:"data"`
 	}
 	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &kept); err != nil || kept.Data == nil {
 		return host.KeptQuota{}, false, failed
 	}
-	states := make([]cardState, len(*kept.Data))
-	for i, c := range *kept.Data {
+	cards, _ := decodeCards[refreshedCard](*kept.Data)
+	states := make([]cardState, len(cards))
+	for i, c := range cards {
 		states[i] = c.cardState
 	}
 	i := cardIndex(states, a)
 	if i < 0 || refreshStale(states[i], true, before) != "" {
 		return host.KeptQuota{}, false, failed
 	}
-	k, usable, err := (*kept.Data)[i].kept(a.Pin, now())
+	k, usable, err := cards[i].kept(a.Pin, now())
 	if err != nil || !usable {
 		return host.KeptQuota{}, false, failed
 	}
+	k.Plan = planOf(k, a)
 	return k, true, nil
 }
 
@@ -727,8 +845,9 @@ func (c refreshedCard) kept(pin string, at time.Time) (host.KeptQuota, bool, err
 // refreshAllowed returns ErrRefreshLimited when a refresh of a was sent
 // within its gap (agyRefreshGap, claudeRefreshGap or refreshGap), unless
 // confirming lets an agy-cli refresh through. With send, an allowed
-// refresh is recorded as sent now.
-func (h *Host) refreshAllowed(a listedAccount, send, confirming bool) error {
+// refresh is recorded as sent at at, now, and last is the time recorded
+// before, zero for none.
+func (h *Host) refreshAllowed(a listedAccount, send, confirming bool) (at, last time.Time, err error) {
 	gap := refreshGap
 	switch a.Provider {
 	case "claude":
@@ -741,18 +860,35 @@ func (h *Host) refreshAllowed(a listedAccount, send, confirming bool) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	last := h.refreshed[a.Pin]
-	if t := now(); !last.IsZero() && t.Sub(last) < gap {
-		return fmt.Errorf("%w：%s 在 %s 后才能再次刷新", ErrRefreshLimited, a.Pin, (gap - t.Sub(last)).Round(time.Second))
+	last = h.refreshed[a.Pin]
+	at = now()
+	if !last.IsZero() && at.Sub(last) < gap {
+		return time.Time{}, last, fmt.Errorf("%w：%s 在 %s 后才能再次刷新", ErrRefreshLimited, a.Pin, (gap - at.Sub(last)).Round(time.Second))
 	}
 	if !send {
-		return nil
+		return at, last, nil
 	}
 	if h.refreshed == nil {
 		h.refreshed = map[string]time.Time{}
 	}
-	h.refreshed[a.Pin] = now()
-	return nil
+	h.refreshed[a.Pin] = at
+	return at, last, nil
+}
+
+// unsend forgets the refresh of the account pin recorded as sent at at,
+// which was not sent after all: the time recorded before, last, stands
+// again.
+func (h *Host) unsend(pin string, at, last time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.refreshed[pin].Equal(at) {
+		return
+	}
+	if last.IsZero() {
+		delete(h.refreshed, pin)
+	} else {
+		h.refreshed[pin] = last
+	}
 }
 
 // refreshError is err of a RefreshQuota request, as codeGatewayUnavailable

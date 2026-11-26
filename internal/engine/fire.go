@@ -241,7 +241,7 @@ func (e *Engine) performDue(ctx context.Context, cfg config.Config) bool {
 		if e.credentialBlocked(t.cred.AuthIndex) {
 			continue
 		}
-		// The last ignition is still being confirmed (runMagpieConfirms).
+		// The last ignition is still being confirmed (confirmByRefresh).
 		if e.confirmPending(t.group.Key) {
 			continue
 		}
@@ -806,16 +806,13 @@ func (e *Engine) ignitionBase(key string, start time.Time) ignitionBase {
 // base.oldReset. The time of the reading counts, not when it was applied:
 // Magpie's kept quota can hold a reading taken before the request and
 // handed over after it. An account read only from Magpie is confirmed by
-// its reset alone (confirmedByMagpie).
+// the card of a refresh instead (confirmByRefresh).
 func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 	group, ok := e.group(key)
 	if !ok {
 		return false
 	}
 	w, ok := group.fiveHour()
-	if ok && providers.MagpieOnly(providers.Lookup(group.Provider)) {
-		return confirmedByMagpie(w, base, now)
-	}
 	if !ok || w.ReadAt.Before(base.start) || w.Reset.IsZero() || !w.Reset.After(now) {
 		return false
 	}

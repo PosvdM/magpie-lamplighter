@@ -129,6 +129,10 @@ type KeptQuota struct {
 	// an Antigravity pool agy shows as "Limits not available". The engine
 	// leaves them as they are.
 	Unread []string
+	// Plan is the plan Magpie's account list gave the account of an
+	// active reading when the reading was read, "" when it gave none. The
+	// engine records it before it applies the reading.
+	Plan string
 }
 
 // ModelRequest is one ignition request through the Magpie gateway.
@@ -220,4 +224,29 @@ func ConfirmingIgnition(ctx context.Context) context.Context {
 func IsConfirmingIgnition(ctx context.Context) bool {
 	v, _ := ctx.Value(confirmingKey{}).(bool)
 	return v
+}
+
+// ErrRefreshLimited is the error of a RefreshQuota or RefreshKept that a
+// host refused without sending the refresh, because the account's quota
+// was refreshed too recently.
+var ErrRefreshLimited = errors.New("额度刷新过于频繁")
+
+type sendingKey struct{}
+
+// WithRefreshSending returns ctx for a RefreshQuota or RefreshKept that
+// calls sending right before the host sends the refresh, with the time
+// the host counts its refresh gap from. An error of sending stops the
+// refresh unsent, and RefreshQuota or RefreshKept returns that error.
+func WithRefreshSending(ctx context.Context, sending func(at time.Time) error) context.Context {
+	return context.WithValue(ctx, sendingKey{}, sending)
+}
+
+// RefreshSending is called by a host right before it sends the refresh
+// of a RefreshQuota or RefreshKept with ctx, at at; see
+// WithRefreshSending. It returns nil for a ctx without one.
+func RefreshSending(ctx context.Context, at time.Time) error {
+	if sending, _ := ctx.Value(sendingKey{}).(func(time.Time) error); sending != nil {
+		return sending(at)
+	}
+	return nil
 }
