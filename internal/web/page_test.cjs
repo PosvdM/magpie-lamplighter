@@ -334,7 +334,7 @@ test("account cards keep only identity in the heading and place actions after th
     children.filter(Boolean).forEach(child => node.appendChild(child));
     return node;
   };
-  const ctx = context(["renderAccounts"], {
+  const ctx = context(["renderAccounts", "hiddenGroups", "groupHidden"], {
     accountDrag: null, accountsBehind: false, SENSITIVE: "account-sensitive",
     status: { accounts: [
       { name: "a", provider: "codex", title: "GPT#first", email: "first@example.com", plan: "Pro", groups: [] },
@@ -1637,7 +1637,7 @@ test("a quota group of an account with several names its service apart from the 
     group_order: ["GPT", "Claude", "Gemini", "Claude / GPT"],
   };
   const providerTitle = (id) => titles[id] || id;
-  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "fitName", "graphemes", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "fitName", "graphemes", "chartRows", "hiddenGroups", "groupHidden", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
     status, providerTitle, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
     gapLimit: () => 900, pooled: () => [], graphemeSegmenter: undefined,
   });
@@ -1973,7 +1973,7 @@ test("a Claude account with several groups never shows Claude · Claude", () => 
     ],
     group_order: ["Claude", "Fable"],
   };
-  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "windowKind", "cycleFloor",
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "hiddenGroups", "groupHidden", "windowKind", "cycleFloor",
     "accountWeight", "pooledRow", "parseTime", "renderChartTable"], {
     status, providerTitle: (id) => titles[id] || id, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
     gapLimit: () => 900, pooled: () => [],
@@ -2078,7 +2078,7 @@ test("masking blurs the suffix of an account and leaves its service readable", (
   };
   const element = (tag, attrs = {}, children = []) => ({ tag, ...attrs, children });
   const ctx = context(["accountSecrets", "hasSecret", "maskedNodes", "sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName",
-    "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime", "renderChartTable"], {
+    "chartRows", "hiddenGroups", "groupHidden", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime", "renderChartTable"], {
     status, SENSITIVE: "account-sensitive", el: element, document: { createTextNode: (text) => ({ text }) },
     providerList: () => [{ id: "claude", title: "Claude" }, { id: "codex", title: "GPT" }], providerTitle: (id) => ({ claude: "Claude" })[id] || id,
     rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5, gapLimit: () => 900, pooled: () => [],
@@ -2390,7 +2390,7 @@ test("a saved window that only the history still has is restored once its histor
         return { from, series: answer === "samples" ? [{ kind: saved, points: [[now - 600, 50]] }] : [] };
       },
     });
-    for (const name of ["windowKinds", "recentSamples", "windowKind", "historyKey", "fetchHistory", "renderWindowButtons"]) {
+    for (const name of ["windowKinds", "recentSamples", "hiddenGroups", "groupHidden", "windowKind", "historyKey", "fetchHistory", "renderWindowButtons"]) {
       vm.runInContext(source.match(new RegExp("  function " + name + "\\([^]*?\\n  }"))[0], ctx);
     }
     const restored = ctx.restoreChartState({ remember_chart_filters: true, chart_view: { window: saved, sort: "low", ranges: { "7d": "15d", "5h": "12h" } } });
@@ -2421,7 +2421,7 @@ function pooledChartRows() {
     { auth_index: "5", provider: "antigravity", groups: [{ key: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", windows: win(20) }] },
     { auth_index: "3", provider: "claude", groups: [{ key: "claude:3:claude", label: "Claude", source_label: "Claude", windows: win(40) }] },
   ], group_order: [] };
-  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "hiddenGroups", "groupHidden", "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime"], {
     status, providerTitle: (id) => ({ antigravity: "Antigravity" })[id] || id, rawConfig: {}, chartSort: "default", historyWindow: "5h", RESET_JUMP: 5,
     gapLimit: () => 900, pooled: () => [],
   });
@@ -3111,7 +3111,7 @@ test("the chart switches are not refilled after the first restore", () => {
     effectiveConfig: () => ({ remember_chart_filters: false, mask_accounts_note: true }), status: {}, rawConfig: {},
     document: { activeElement: null, querySelectorAll: () => [] }, providersWithGroups: () => [],
     $: (id) => id === "settings" ? { elements: [filters, other] } : {}, saveControls: () => [],
-    renderTimezone: () => {}, timezoneText: () => "", renderIgnitionOff: () => {}, renderMcp: () => {},
+    renderTimezone: () => {}, timezoneText: () => "", renderIgnitionOff: () => {}, renderMcp: () => {}, renderAllShownGroups: () => {},
   });
   // Signed in again with a config whose switch is off: the switch keeps the
   // state this page restored and saves.
@@ -3131,4 +3131,222 @@ test("the client commands quote the address and the key for the shell, and the J
   assert.deepEqual(words(snippets.mcp_claude), ["mcp", "add", "--transport", "http", "lamplighter", url, "--header", "Authorization: Bearer k'ey"]);
   assert.deepEqual(words(snippets.mcp_stdio), ["mcp-remote", url, "--header", "Authorization: Bearer k'ey"]);
   assert.deepEqual(JSON.parse(snippets.mcp_json), { mcpServers: { lamplighter: { type: "http", url, headers: { Authorization: "Bearer k'ey" } } } });
+});
+
+// ---- Hidden quota groups ----
+
+const HIDDEN = { config: { hidden_groups: ["antigravity|Claude / GPT"] } };
+
+test("a hidden quota group leaves its card block, and an account with only hidden groups its card", () => {
+  const cards = saveNode("DIV");
+  const element = (tag, attrs = {}, children = []) => {
+    const node = saveNode(tag.toUpperCase(), attrs);
+    if (attrs.text) node.textContent = attrs.text;
+    children.filter(Boolean).forEach(child => node.appendChild(child));
+    return node;
+  };
+  const win = [{ id: "five-hour", kind: "5h" }];
+  const ctx = context(["renderAccounts", "hiddenGroups", "groupHidden"], {
+    accountDrag: null, accountsBehind: false, SENSITIVE: "account-sensitive",
+    status: { ...HIDDEN, accounts: [
+      { name: "ag", provider: "antigravity", title: "Antigravity", groups: [
+        { key: "antigravity:4:gemini", source_label: "Gemini", windows: win },
+        { key: "antigravity:4:cg", source_label: "Claude / GPT", windows: win },
+      ] },
+      { name: "ag-cg", provider: "antigravity", title: "Antigravity#b", groups: [{ key: "antigravity:5:cg", source_label: "Claude / GPT", windows: win }] },
+      { name: "broken", provider: "codex", title: "GPT", error: "invalid", groups: [] },
+    ] },
+    rawConfig: {}, masked: false, renderAccountSettings: () => {}, accountWeight: () => 1,
+    fmtWeight: String, parseTime: () => null, $: () => cards, providerTitle: (id) => ({ antigravity: "Antigravity", codex: "GPT" })[id],
+    clear: node => { node.textContent = ""; }, el: element, translate: (key) => key,
+    maskedNodes: text => [element("span", { text })], snapshotButton: () => element("button"),
+    quotaRow: (group, w) => element("div", { class: "quota-row", text: group.source_label }), freshness: () => null,
+  });
+  ctx.renderAccounts();
+  assert.deepEqual(cards.children.map(card => card.attrs["data-account"]), ["ag", "broken"]);
+  const blocks = cards.children[0].children.filter(node => node.attrs.class === "quota-group");
+  assert.equal(blocks.length, 1);
+  // The one group left keeps its title.
+  assert.equal(blocks[0].children[0].attrs.class, "group-title");
+  assert.equal(blocks[0].children[0].textContent, "Gemini");
+  ctx.status.config = {};
+  ctx.renderAccounts();
+  assert.deepEqual(cards.children.map(card => card.attrs["data-account"]), ["ag", "ag-cg", "broken"]);
+});
+
+test("a hidden quota group has no chart rows, total or table rows, also from history alone", () => {
+  const now = 1795280000;
+  const win = (remaining) => [{ id: "five-hour", kind: "5h", short: "5h", remaining, reset: "" }];
+  const status = { ...HIDDEN, accounts: [
+    { auth_index: "4", provider: "antigravity", groups: [
+      { key: "antigravity:4:gemini", label: "Gemini", source_label: "Gemini", windows: win(90) },
+      { key: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", windows: win(5) },
+    ] },
+    { auth_index: "5", provider: "antigravity", groups: [{ key: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", windows: win(1) }] },
+    { auth_index: "3", provider: "claude", groups: [{ key: "claude:3:claude", label: "Claude", source_label: "Claude", windows: win(40) }] },
+  ], group_order: [] };
+  const ctx = context(["sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName", "groupTitle", "chartRows", "hiddenGroups", "groupHidden",
+    "windowKind", "cycleFloor", "accountWeight", "pooledRow", "parseTime", "findRow", "windowKinds", "recentSamples", "historyKey"], {
+    status, providerTitle: (id) => ({ antigravity: "Antigravity" })[id] || id, rawConfig: {}, chartSort: "low", historyWindow: "5h", RESET_JUMP: 5,
+    gapLimit: () => 900, pooled: () => [], historyCache: {}, chartWindow: "5h", range: "6h", rangeFor: () => "6h",
+  });
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
+  const series = (s, value) => ({ ...s, window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  ctx.history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), series: [
+    series({ group: "antigravity:4:gemini", label: "Gemini", source_label: "Gemini", provider: "antigravity", auth_index: "4" }, 90),
+    series({ group: "antigravity:4:cg", label: "Claude / GPT", source_label: "Claude / GPT", provider: "antigravity", auth_index: "4" }, 5),
+    series({ group: "antigravity:5:cg", label: "Claude / GPT#b", source_label: "Claude / GPT", provider: "antigravity", auth_index: "5" }, 1),
+    // An account gone from the status whose group the history still names.
+    series({ group: "antigravity:9:cg", label: "Claude / GPT#old", source_label: "Claude / GPT", provider: "antigravity", auth_index: "9" }, 0),
+    series({ group: "claude:3:claude", label: "Claude", source_label: "Claude", provider: "claude", auth_index: "3" }, 40),
+  ] };
+  // "Lowest first" orders the rows left, unaffected by the hidden 0% to 5%.
+  const rows = ctx.chartRows();
+  assert.deepEqual(plain(rows.map((r) => r.id)), ["claude:3:claude|five-hour", "antigravity:4:gemini|five-hour"]);
+  assert.equal(rows.some((r) => r.children), false);
+  // The detail of a hidden row is not found, so drawChart selects the first row.
+  assert.equal(ctx.findRow(rows, "group:antigravity|Claude / GPT"), null);
+  assert.match(source, /if \(!findRow\(rows, chartSelected\)\) chartSelected = rows\[0\]\.id;/);
+  assert.match(source, /renderChartTable\(rows\);/);
+  // Shown again, the rows come back with their history.
+  ctx.status.config = {};
+  ctx.chartSort = "default";
+  assert.deepEqual(plain(ctx.chartRows().map((r) => r.id)),
+    ["antigravity:4:gemini|five-hour", "group:antigravity|Claude / GPT", "antigravity:9:cg|five-hour", "claude:3:claude|five-hour"]);
+
+  // A window kind only hidden groups report is not offered.
+  ctx.status = { config: { hidden_groups: ["antigravity|Claude / GPT"] }, accounts: [{ provider: "antigravity", groups: [
+    { source_label: "Gemini", windows: [{ kind: "5h" }] },
+    { source_label: "Claude / GPT", windows: [{ kind: "5h" }, { kind: "7d" }] },
+  ] }] };
+  assert.deepEqual(plain(ctx.windowKinds()), ["5h"]);
+  ctx.status.config = {};
+  assert.deepEqual(plain(ctx.windowKinds()), ["5h", "7d"]);
+});
+
+test("the chart is drawn again when hidden_groups changes", () => {
+  let drawn = 0;
+  const ctx = context(["renderHiddenChange", "hiddenGroups"], {
+    status: { config: {} }, history: { series: [] }, shownHidden: null,
+    chartPointer: false, chartBehind: false, chartCard: { contains: () => false }, document: { activeElement: null },
+    renderChart: () => drawn++,
+  });
+  ctx.renderHiddenChange();
+  ctx.renderHiddenChange();
+  assert.equal(drawn, 0);
+  ctx.status = HIDDEN;
+  ctx.renderHiddenChange();
+  assert.equal(drawn, 1);
+  ctx.renderHiddenChange();
+  assert.equal(drawn, 1);
+  ctx.chartPointer = true;
+  ctx.status = { config: {} };
+  ctx.renderHiddenChange();
+  assert.equal(drawn, 1);
+  assert.equal(ctx.chartBehind, true);
+  assert.match(source.match(/  function renderStatus\(\) \{[^]*?\n  \}/)[0], /renderHiddenChange\(\);/);
+});
+
+// A box of "Quota groups shown" with the inputs it holds.
+function shownGroupsDom(ids) {
+  const boxes = {};
+  const element = (tag, attrs = {}, children = []) => {
+    const node = { tag, attrs: { ...attrs }, children: [], settingsDirty: false,
+      getAttribute(name) { return this.attrs[name] ?? null; },
+      hasAttribute(name) { return name in this.attrs; } };
+    children.forEach((child) => node.children.push(child));
+    return node;
+  };
+  ids.forEach((id) => {
+    const list = { inputs: [], querySelectorAll: () => list.inputs };
+    boxes[id] = { hidden: true, list, querySelector: () => list, contains: () => false };
+  });
+  return {
+    boxes,
+    globals: {
+      document: { querySelector: (selector) => boxes[/data-shown-groups='([^']+)'/.exec(selector)[1]] || null, createTextNode: (text) => ({ text }) },
+      el: element,
+      clear: (list) => { list.inputs = []; },
+    },
+  };
+}
+
+function shownGroupsContext(accounts) {
+  const dom = shownGroupsDom(["antigravity", "claude", "codex"]);
+  const ctx = context(["shownGroupChoices", "renderShownGroups", "renderAllShownGroups"], {
+    ...dom.globals, status: { accounts },
+    providerList: () => [{ id: "antigravity", groups: ["Gemini", "Claude / GPT"] }, { id: "claude" }, { id: "codex" }],
+  });
+  // Labels keep their inputs in the list for the next render.
+  const append = (box) => (label) => box.list.inputs.push(label.children[0]);
+  Object.values(dom.boxes).forEach((box) => { box.list.appendChild = append(box); });
+  return { ctx, boxes: dom.boxes };
+}
+
+test("Services lists the quota groups of each service to show, checked unless hidden", () => {
+  const { ctx, boxes } = shownGroupsContext([
+    { provider: "claude", groups: [{ source_label: "Claude" }, { source_label: "Fable" }] },
+    { provider: "codex", groups: [{ source_label: "GPT" }] },
+  ]);
+  const shown = (id) => boxes[id].list.inputs.map((input) => [input.getAttribute("data-shown-group"), input.checked]);
+  ctx.renderAllShownGroups({ hidden_groups: ["antigravity|Claude / GPT"] }, null);
+  // The provider's groups, before any account reports them.
+  assert.deepEqual(shown("antigravity"), [["antigravity|Gemini", true], ["antigravity|Claude / GPT", false]]);
+  assert.deepEqual(shown("claude"), [["claude|Claude", true], ["claude|Fable", true]]);
+  assert.deepEqual([boxes.antigravity.hidden, boxes.claude.hidden, boxes.codex.hidden], [false, false, true]);
+  // The service with the focus is left alone.
+  boxes.antigravity.contains = (node) => node === "focused";
+  ctx.renderAllShownGroups({}, "focused");
+  assert.deepEqual(shown("antigravity"), [["antigravity|Gemini", true], ["antigravity|Claude / GPT", false]]);
+  assert.deepEqual(shown("claude"), [["claude|Claude", true], ["claude|Fable", true]]);
+  // A single group shows no checkboxes unless it is hidden.
+  ctx.renderAllShownGroups({ hidden_groups: ["codex|GPT", "codex|Gone"] }, null);
+  assert.deepEqual(shown("codex"), [["codex|GPT", false], ["codex|Gone", false]]);
+  assert.equal(boxes.codex.hidden, false);
+  // A checkbox being edited keeps its state.
+  const fable = boxes.claude.list.inputs[1];
+  fable.checked = false; fable.settingsDirty = true;
+  ctx.renderAllShownGroups({}, null);
+  assert.equal(boxes.claude.list.inputs[1], fable);
+  assert.equal(fable.checked, false);
+  assert.deepEqual(shown("antigravity"), [["antigravity|Gemini", true], ["antigravity|Claude / GPT", true]]);
+});
+
+test("the shown groups save as hidden_groups, keeping hidden groups the page does not list", async () => {
+  const box = (id, checked) => ({ type: "checkbox", name: "", checked, value: "on", attrs: { "data-shown-group": id },
+    getAttribute(name) { return this.attrs[name] ?? null; }, hasAttribute(name) { return name in this.attrs; },
+    closest: () => null, checkValidity: () => true });
+  const inputs = [box("antigravity|Gemini", true), box("antigravity|Claude / GPT", false), box("claude|Fable", true)];
+  const writes = [], refilled = [];
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig"], {
+    $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
+    rawConfig: { hidden_groups: ["codex|Gone", "claude|Fable"] }, status: { config: {} },
+    saveHost: () => ({}), claimState: () => () => true,
+    patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
+    loadConfig: async () => {}, showApplied: async () => true,
+    fillSettings: (keys) => refilled.push(plain(keys)), renderIgnitionOff: () => {},
+  });
+  assert.equal(ctx.inputTop(inputs[1]), "hidden_groups");
+  inputs[1].settingsDirty = true;
+  ctx.saveField({ target: inputs[1] });
+  await ctx.saveQueue;
+  await settle();
+  assert.deepEqual(writes.at(-1), { hidden_groups: ["codex|Gone", "antigravity|Claude / GPT"] });
+  assert.deepEqual(refilled.at(-1), { hidden_groups: true });
+  assert.equal(inputs[1].settingsDirty, false);
+  // Showing every group deletes the key.
+  ctx.rawConfig.hidden_groups = ["antigravity|Claude / GPT"];
+  inputs[1].checked = true;
+  ctx.saveField({ target: inputs[1] });
+  await ctx.saveQueue;
+  assert.deepEqual(writes.at(-1), { hidden_groups: null });
+});
+
+test("the shown groups have their text in both languages", () => {
+  const ctx = vm.createContext({});
+  vm.runInContext(pageVar("I18N"), ctx);
+  for (const lang of ["zh", "en"]) {
+    assert.ok(vm.runInContext("I18N." + lang + ".shown_groups", ctx), lang);
+    assert.match(vm.runInContext("I18N." + lang + ".monitor_hint", ctx), lang === "zh" ? /额度组/ : /quota groups/, lang);
+  }
 });

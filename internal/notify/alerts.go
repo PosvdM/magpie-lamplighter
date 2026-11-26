@@ -49,6 +49,11 @@ type Group struct {
 	Key     string
 	Label   string
 	Windows []quota.Window
+	// Hidden drops the notifications of the group, as when notifications
+	// are off: the baseline, the recoveries and the reminders sent advance
+	// as if they were delivered, so showing the group again sends nothing
+	// from the time it was hidden.
+	Hidden bool
 }
 
 // Alerts turns quota changes into notifications.
@@ -474,6 +479,15 @@ func (a *Alerts) send(ctx context.Context, msg Message) bool {
 	return true
 }
 
+// deliver sends msg for g; see send. The message of a hidden group is
+// done with unsent.
+func (a *Alerts) deliver(ctx context.Context, g Group, msg Message) bool {
+	if g.Hidden {
+		return true
+	}
+	return a.send(ctx, msg)
+}
+
 // ProcessGroup compares g with the stored baseline, sends threshold,
 // recovery and reset-reminder notifications, and updates the baseline. A
 // window seen for the first time, or marked Rebase, only records its
@@ -568,14 +582,14 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 	}
 
 	if len(changes) > 0 {
-		if a.send(ctx, a.buildChangeMessage(g, changes, now)) {
+		if a.deliver(ctx, g, a.buildChangeMessage(g, changes, now)) {
 			for _, c := range changes {
 				groupState.Windows[c.window.ID].NotifiedSeverity = c.to
 			}
 		}
 	}
 	if len(recoveries) > 0 {
-		if a.send(ctx, a.buildRecoveryMessage(g, recoveries, now)) {
+		if a.deliver(ctx, g, a.buildRecoveryMessage(g, recoveries, now)) {
 			for _, r := range recoveries {
 				groupState.Windows[r.window.ID].PendingRecovery = nil
 			}
@@ -583,7 +597,7 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 	}
 	if len(reminders) > 0 {
 		msg := a.buildReminderMessage(g, reminders, now)
-		if a.send(ctx, msg) {
+		if a.deliver(ctx, g, msg) {
 			for _, r := range reminders {
 				recordReminders(groupState.Windows[r.window.ID], r)
 			}
