@@ -88,6 +88,8 @@ func (s *Store) Raw() map[string]json.RawMessage {
 }
 
 // Patch replaces the given top-level keys, a null value deleting the key.
+// hidden_groups is saved as Parse reads it, and deleted when that leaves
+// it empty.
 // chart_view and chart_expanded are dropped while remember_chart_filters
 // and remember_chart_expanded are off. The result must parse and pass
 // Config.Check; it is then written to the file whole (a temporary file and
@@ -104,6 +106,9 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 		next[key] = value
 	}
 	for key, value := range patch {
+		if key == "hidden_groups" {
+			value = hiddenGroupsRaw(value)
+		}
 		if string(value) == "null" {
 			delete(next, key)
 			continue
@@ -135,6 +140,25 @@ func (s *Store) Patch(patch map[string]json.RawMessage) (Config, error) {
 	}
 	s.raw = next
 	return cfg, nil
+}
+
+// hiddenGroupsRaw returns raw hidden_groups trimmed, without empty entries
+// and duplicates, and null when none are left. A value that is not a list
+// of strings is returned as it is, for parsing to refuse.
+func hiddenGroupsRaw(raw json.RawMessage) json.RawMessage {
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil || ids == nil {
+		return raw
+	}
+	ids = hiddenGroups(ids)
+	if len(ids) == 0 {
+		return json.RawMessage("null")
+	}
+	out, err := json.Marshal(ids)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // rememberSwitches maps the page state kept by a remember switch to the

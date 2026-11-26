@@ -242,6 +242,11 @@ type Config struct {
 	// EventsShow5hResets lists the resets of 5-hour windows in the events.
 	EventsShow5hResets bool `yaml:"events_show_5h_resets,omitempty" json:"events_show_5h_resets,omitempty"`
 
+	// HiddenGroups lists the quota groups the page does not show and that
+	// send no quota notifications, as GroupID gives them, such as
+	// "antigravity|Claude / GPT". They are still queried and recorded.
+	HiddenGroups []string `yaml:"hidden_groups,omitempty" json:"hidden_groups,omitempty"`
+
 	// AccountNames maps an account pin to the name Lamplighter shows for
 	// it. Magpie has no way for a plugin to rename an account.
 	AccountNames map[string]string `yaml:"account_names,omitempty" json:"account_names,omitempty"`
@@ -448,6 +453,7 @@ func (c *Config) normalize() {
 		provider.Model = strings.TrimSpace(provider.Model)
 		c.Providers[name] = provider
 	}
+	c.HiddenGroups = hiddenGroups(c.HiddenGroups)
 	for pin, name := range c.AccountNames {
 		if name = strings.TrimSpace(name); name == "" {
 			delete(c.AccountNames, pin)
@@ -608,6 +614,31 @@ func (c Config) Location() *time.Location {
 		return time.FixedZone(fmt.Sprintf("UTC%+g", hours), int(hours*3600))
 	}
 	return time.Local
+}
+
+// GroupID identifies the quota group sourceLabel of provider across its
+// accounts, as in hidden_groups and the page's chart_expanded, such as
+// "antigravity|Claude / GPT".
+func GroupID(provider, sourceLabel string) string {
+	return provider + "|" + sourceLabel
+}
+
+// hiddenGroups trims the entries of hidden_groups and drops empty ones and
+// duplicates, keeping the first.
+func hiddenGroups(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// GroupHidden reports whether hidden_groups lists the quota group
+// sourceLabel of provider.
+func (c Config) GroupHidden(provider, sourceLabel string) bool {
+	return sourceLabel != "" && slices.Contains(c.HiddenGroups, GroupID(provider, sourceLabel))
 }
 
 // Provider returns the settings for provider, falling back to its defaults.

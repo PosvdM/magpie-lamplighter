@@ -274,6 +274,7 @@
       services: "服务", col_service: "服务", col_ignition_model: "点火模型",
       monitor_service: "监控 {0}", ignite_service: "点火 {0}", model_auto: "自动：{0}",
       ignite_groups: "{0} 点火额度组", no_ignition: "不支持点火", list_or: " 或 ",
+      shown_groups: "显示的额度组",
       codex_reset_enabled: "转发 Did Codex Reset 发布的 Codex 重置信号",
       codex_reset_pending: "首次开启时推送当前待生效的排期",
       chart_prefs: "额度图表", remember_chart_filters: "记住额度窗口、时间范围和排序",
@@ -361,7 +362,7 @@
       view_nav: "页面", advanced: "高级",
       notify_channels: "通知渠道", webhook_advanced: "高级：请求方法、请求头、请求体和成功条件", alert_rules: "提醒规则",
       ignition_off: "自动点火已关闭，这些设置暂不生效。",
-      monitor_hint: "勾选要监控额度的服务。",
+      monitor_hint: "勾选要监控额度的服务。取消勾选的额度组不在额度页显示，也不发送额度通知。",
       save_saved: "已保存", save_saving: "保存中…",
       save_field_failed: "✕ {0}保存失败", save_failure_reason: "：{0}", save_failed_compact: "✕ 保存失败", save_more_failed: "（另有 {0} 项失败）", save_order: "排序",
       save_waiting: "已保存，等待生效", save_applied: "已生效", save_unconfirmed: "未确认生效",
@@ -462,6 +463,7 @@
       services: "Services", col_service: "Service", col_ignition_model: "Ignition model",
       monitor_service: "Monitor {0}", ignite_service: "Ignite {0}", model_auto: "Auto: {0}",
       ignite_groups: "{0} ignition groups", no_ignition: "No ignition", list_or: " or ",
+      shown_groups: "Quota groups shown",
       codex_reset_enabled: "Forward Codex reset signals published by Did Codex Reset",
       codex_reset_pending: "When first turned on, send the pending schedule",
       chart_prefs: "Quota chart", remember_chart_filters: "Remember the window, range and order",
@@ -549,7 +551,7 @@
       view_nav: "Page", advanced: "Advanced",
       notify_channels: "Notification channels", webhook_advanced: "Advanced: method, headers, body and success condition", alert_rules: "Alert rules",
       ignition_off: "Ignition is off, so these settings do not apply for now.",
-      monitor_hint: "Check the services whose quota to monitor.",
+      monitor_hint: "Check the services whose quota to monitor. Unchecked quota groups do not show on the quota page and send no quota notifications.",
       save_saved: "Saved", save_saving: "Saving…",
       save_field_failed: "✕ {0} save failed", save_failure_reason: ": {0}", save_failed_compact: "✕ Save failed", save_more_failed: " ({0} more failed)", save_order: "Order",
       save_waiting: "Saved; waiting to take effect", save_applied: "In effect", save_unconfirmed: "Not confirmed in effect",
@@ -1549,7 +1551,11 @@
     // several accounts.
     var counts = {};
     status.accounts.forEach(function (a) { counts[a.provider] = (counts[a.provider] || 0) + 1; });
+    var hidden = hiddenGroups();
     status.accounts.forEach(function (account, index) {
+      var groups = (account.groups || []).filter(function (g) { return !groupHidden(hidden, account.provider, g.source_label); });
+      // An account whose quota groups are all hidden shows no card.
+      if (!groups.length && (account.groups || []).length) return;
       var card = el("div", { class: "card account", "data-account": account.name });
       var pooledAccount = counts[account.provider] > 1, weight = accountWeight(account);
       var refresh = el("button", { type: "button", class: "btn btn-ghost btn-sm no-snapshot", text: translate("refresh"), onclick: function () {
@@ -1561,7 +1567,7 @@
         )),
         el("span", { class: "account-email " + SENSITIVE, title: masked ? null : account.email || account.name, text: account.email || account.name })
       ]));
-      (account.groups || []).forEach(function (group) {
+      groups.forEach(function (group) {
         var block = el("div", { class: "quota-group" });
         if (group.source_label && group.source_label !== providerTitle(account.provider)) {
           block.appendChild(el("div", { class: "group-title", text: group.source_label }));
@@ -1684,6 +1690,33 @@
       if ((a.groups || []).length > 1) a.groups.forEach(function (g) { out[g.key] = a.provider; });
     });
     return out;
+  }
+
+  // The quota groups that hidden_groups of the applied config hides, as a
+  // set of "<provider>|<source label>". The cards and the chart leave them
+  // out; the plugin still queries and records them.
+  function hiddenGroups() {
+    var out = {}, list = status && status.config && status.config.hidden_groups;
+    (Array.isArray(list) ? list : []).forEach(function (id) { if (typeof id === "string") out[id] = true; });
+    return out;
+  }
+
+  // list, a saved hidden_groups, as config.Parse reads it: its strings
+  // trimmed of the white space strings.TrimSpace trims (PUBLIC_URL_TRIM),
+  // without empty ones and duplicates. A list written by hand may differ
+  // from the applied one the checkboxes show.
+  function hiddenList(list) {
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (id) {
+      if (typeof id !== "string") return;
+      id = id.replace(PUBLIC_URL_TRIM, "");
+      if (id && out.indexOf(id) < 0) out.push(id);
+    });
+    return out;
+  }
+
+  function groupHidden(hidden, provider, sourceLabel) {
+    return !!sourceLabel && hidden[provider + "|" + sourceLabel] === true;
   }
 
   // "Antigravity · " before the label of a group of sharedGroups.
@@ -2081,8 +2114,8 @@
   }
 
   // The provider settings, built when the provider list changes: a monitor
-  // switch per provider under Services, and a row per provider in the
-  // ignition table. Providers that cannot be ignited show no ignition switch
+  // switch per provider under Services, with the quota groups to show (see
+  // renderShownGroups), and a row per provider in the ignition table. Providers that cannot be ignited show no ignition switch
   // or model; those with quota groups to choose get a row of group
   // checkboxes.
   function renderServiceRows() {
@@ -2093,9 +2126,15 @@
     clear(body);
     clear(monitors);
     list.forEach(function (p) {
-      monitors.appendChild(el("label", { class: "inline" }, [
-        el("input", { name: "providers." + p.id + ".monitor", type: "checkbox", "data-service": p.id, "data-label": "monitor_service" }),
-        el("span", { text: p.title })
+      monitors.appendChild(el("div", { class: "service-monitor" }, [
+        el("label", { class: "inline" }, [
+          el("input", { name: "providers." + p.id + ".monitor", type: "checkbox", "data-service": p.id, "data-label": "monitor_service" }),
+          el("span", { text: p.title })
+        ]),
+        el("div", { class: "shown-groups", "data-shown-groups": p.id, hidden: true }, [
+          el("span", { class: "field-label", "data-i18n": "shown_groups", text: translate("shown_groups") }),
+          el("div", { class: "checks" })
+        ])
       ]));
       var cells = [el("td", { class: "strong", text: p.title })];
       if (p.ignite) {
@@ -2158,6 +2197,17 @@
     else renderChart();
   }
 
+  // A change of hidden_groups redraws the chart from the loaded history;
+  // the cards are drawn with every status anyway.
+  var shownHidden = null;
+  function renderHiddenChange() {
+    var key = Object.keys(hiddenGroups()).sort().join("\n"), changed = shownHidden !== null && key !== shownHidden;
+    shownHidden = key;
+    if (!changed || !history) return;
+    if (chartPointer || chartCard.contains(document.activeElement)) chartBehind = true;
+    else renderChart();
+  }
+
   function renderStatus() {
     // Account names wait for the masking of a valid config.
     if (!contentReady) return;
@@ -2166,7 +2216,9 @@
     renderHeader();
     renderNotices();
     // Rows built after the first fill need their values.
-    if (renderServiceRows() && settingsFilled) fillSettings({ providers: true });
+    if (renderServiceRows() && settingsFilled) fillSettings({ providers: true, hidden_groups: true });
+    // Accounts can report quota groups the checkboxes do not list yet.
+    if (settingsFilled) renderAllShownGroups(effectiveConfig(), document.activeElement);
     renderServiceText();
     // Before the first load starts, start() loads the chosen window.
     if (renderWindowButtons() && (history || historyLoading)) loadHistory();
@@ -2174,6 +2226,7 @@
     renderTargets();
     renderEvents();
     renderLanguageNote();
+    renderHiddenChange();
     renderMcp();
     renderZoneChange();
   }
@@ -2452,38 +2505,48 @@
   function windowKind(series) { return series.kind || ""; }
 
   // The chart offers the window kinds the accounts report, and those whose
-  // loaded history still has a sample in the range of an inactive window;
-  // both while none are known.
+  // loaded history still has a sample in the range of an inactive window,
+  // leaving out hidden quota groups; both while none are known, and none
+  // while all that are known belong to hidden groups.
   function windowKinds() {
-    var seen = {};
+    var seen = {}, known = false, hidden = hiddenGroups();
     (status.accounts || []).forEach(function (a) {
       (a.groups || []).forEach(function (g) {
-        (g.windows || []).forEach(function (w) { if (w.kind) seen[w.kind] = true; });
+        (g.windows || []).forEach(function (w) {
+          if (!w.kind) return;
+          known = true;
+          if (!groupHidden(hidden, a.provider, g.source_label)) seen[w.kind] = true;
+        });
       });
     });
     ["5h", "7d"].forEach(function (kind) {
       var cached = historyCache[historyKey(kind, kind === chartWindow ? range : rangeFor(kind))];
-      if (!seen[kind] && cached && recentSamples(cached.data, kind)) seen[kind] = true;
+      if (seen[kind] || !cached) return;
+      if (recentSamples(cached.data, kind, hidden)) seen[kind] = true;
+      else if (recentSamples(cached.data, kind, {})) known = true;
     });
     var kinds = ["5h", "7d"].filter(function (k) { return seen[k]; });
-    return kinds.length ? kinds : ["5h", "7d"];
+    return kinds.length || known ? kinds : ["5h", "7d"];
   }
 
-  function recentSamples(data, kind) {
+  // Whether data has a sample in its range of a window of kind, leaving out
+  // the quota groups of hidden.
+  function recentSamples(data, kind, hidden) {
     var from = new Date(data.from).getTime() / 1000;
     return (data.series || []).some(function (s) {
-      return windowKind(s) === kind && s.points && s.points.length && s.points[s.points.length - 1][0] >= from;
+      return windowKind(s) === kind && !groupHidden(hidden, s.provider, s.source_label) && s.points && s.points.length && s.points[s.points.length - 1][0] >= from;
     });
   }
 
   // Shows the window buttons of the reported kinds. When the chosen kind is
-  // not among them, it switches to the first one and returns true.
+  // not among them, it switches to the first one and returns true; without
+  // any, it keeps the chosen kind, whose chart has no rows.
   function renderWindowButtons() {
     var kinds = windowKinds();
     Array.prototype.forEach.call($("window-buttons").querySelectorAll("button"), function (b) {
       b.hidden = kinds.indexOf(b.getAttribute("data-value")) < 0;
     });
-    if (kinds.indexOf(chartWindow) >= 0) return false;
+    if (!kinds.length || kinds.indexOf(chartWindow) >= 0) return false;
     chartWindow = kinds[0];
     range = rangeFor(chartWindow);
     pressSegment("window-buttons", chartWindow);
@@ -2634,8 +2697,12 @@
   // Rows follow the order of the cards: a label takes the place of its
   // first account, and labels of the same account keep the group_order of
   // the status API, so Gemini stays before Claude / GPT within Antigravity.
+  //
+  // Quota groups of hiddenGroups get no rows, so they count in no total
+  // and not in "lowest first". A series without a current account is left
+  // out too when the history still knows its provider and source label.
   function chartRows() {
-    var info = {}, accountOf = {}, emailOf = {}, current = [], shared = sharedGroups(status.accounts);
+    var info = {}, accountOf = {}, emailOf = {}, current = [], shared = sharedGroups(status.accounts), hidden = hiddenGroups();
     status.accounts.forEach(function (a, index) {
       accountOf["auth|" + a.auth_index] = index;
       emailOf[a.auth_index] = a.email || a.name;
@@ -2665,7 +2732,7 @@
       return s;
     }));
     series.forEach(function (s, seq) {
-      if (windowKind(s) !== historyWindow) return;
+      if (windowKind(s) !== historyWindow || groupHidden(hidden, s.provider, s.source_label)) return;
       var meta = info[s.group + "|" + s.window];
       var lastPoint = s.points[s.points.length - 1];
       // Only the sample before the range can lie before it, so the last
@@ -4176,6 +4243,60 @@
     return providerList().filter(function (p) { return p.groups && p.groups.length; });
   }
 
+  // The edits of "Quota groups shown" not yet known to be applied, by
+  // "<provider>|<source label>": {shown}, a new object for each edit. They
+  // are what the page saves in hidden_groups; the checkboxes show them and
+  // record changes in them, so a refill, or a checkbox made again after its
+  // group left and came back, does not undo an edit still being saved.
+  // refillSaved drops an edit once a save of it is applied.
+  var shownEdits = {};
+
+  // Quota groups offered under "Quota groups shown": the provider's groups,
+  // the groups seen on its accounts, the hidden ones and those of
+  // shownEdits, in a stable order. hidden lists hidden_groups.
+  function shownGroupChoices(p, hidden) {
+    var names = (p.groups || []).slice(), prefix = p.id + "|";
+    (status.accounts || []).forEach(function (a) {
+      if (a.provider !== p.id) return;
+      (a.groups || []).forEach(function (g) { if (g.source_label && names.indexOf(g.source_label) < 0) names.push(g.source_label); });
+    });
+    (hidden || []).concat(Object.keys(shownEdits)).forEach(function (id) {
+      if (typeof id === "string" && id.indexOf(prefix) === 0 && names.indexOf(id.slice(prefix.length)) < 0) names.push(id.slice(prefix.length));
+    });
+    return names;
+  }
+
+  // One checkbox per quota group of p, checked while the group shows, or
+  // while its edit in shownEdits shows it, with the value
+  // "<provider>|<source label>" of hidden_groups. A service with a single
+  // group shows no checkboxes unless that group is hidden.
+  function renderShownGroups(p, hidden) {
+    var box = document.querySelector("[data-shown-groups='" + p.id + "']");
+    if (!box) return;
+    var list = box.querySelector(".checks"), existing = new Map(), anyHidden = false;
+    Array.prototype.forEach.call(list.querySelectorAll("[data-shown-group]"), function (input) { existing.set(input.getAttribute("data-shown-group"), input); });
+    clear(list);
+    var names = shownGroupChoices(p, hidden);
+    names.forEach(function (name) {
+      var id = p.id + "|" + name;
+      var input = existing.get(id) || el("input", { type: "checkbox", "data-shown-group": id });
+      var edit = Object.prototype.hasOwnProperty.call(shownEdits, id) ? shownEdits[id] : null;
+      input.checked = edit ? edit.shown : (hidden || []).indexOf(id) < 0;
+      if (!input.checked) anyHidden = true;
+      list.appendChild(el("label", { class: "inline" }, [input, document.createTextNode(name)]));
+    });
+    box.hidden = names.length < 2 && !anyHidden;
+  }
+
+  // Refills the checkboxes of renderShownGroups, except those of a service
+  // where active, the focused element, is.
+  function renderAllShownGroups(effective, active) {
+    providerList().forEach(function (p) {
+      var box = document.querySelector("[data-shown-groups='" + p.id + "']");
+      if (!(box && active && box.contains(active))) renderShownGroups(p, effective.hidden_groups);
+    });
+  }
+
   // "UTC+8", "UTC-3.5": the offset of the plugin's time zone.
   function utcText(st) {
     var offset = (Number(st && st.utc_offset_seconds) || 0) / 3600;
@@ -4342,6 +4463,8 @@
         renderGroupChecks(p, getPath(effective, "providers." + p.id + ".groups"));
       }
     });
+    if (!keys) renderAllShownGroups(effective, null);
+    else if (keys.hidden_groups) renderAllShownGroups(effective, active);
     settingsFilled = true;
     renderTimezone();
     $("timezone-note").textContent = timezoneText();
@@ -4420,6 +4543,7 @@
   // The top-level config key a settings input belongs to.
   function inputTop(input) {
     if (input.hasAttribute && input.hasAttribute("data-group")) return "providers";
+    if (input.hasAttribute && input.hasAttribute("data-shown-group")) return "hidden_groups";
     return input.name ? topKey(input.name) : "";
   }
 
@@ -4429,6 +4553,8 @@
   // change what it saves.
   function captureIntent(tops) {
     var intent = { inputs: [], states: [], submitted: [] };
+    // hidden_groups is saved from the edits, not from the checkboxes.
+    if (tops.indexOf("hidden_groups") >= 0) intent.shown = Object.assign({}, shownEdits);
     Array.prototype.forEach.call($("settings").elements, function (input) {
       if (tops.indexOf(inputTop(input)) < 0) return;
       intent.inputs.push(input);
@@ -4492,6 +4618,21 @@
         ).map(function (input) { return input.getAttribute("data-group"); });
       });
     }
+    // hidden_groups is the saved list with the edits of shownEdits, as the
+    // intent took them; other hidden groups stay, and an empty list deletes
+    // the key. The saved list is read as the plugin reads it, so an edit
+    // removes an entry written with spaces or twice. The checkboxes are not
+    // read: one may have left the form, or been made again, meanwhile.
+    if (top === "hidden_groups") {
+      var hidden = hiddenList(base), edits = intent && intent.shown || shownEdits;
+      Object.keys(edits).forEach(function (id) {
+        var at = hidden.indexOf(id);
+        if (edits[id].shown) { if (at >= 0) hidden.splice(at, 1); }
+        else if (at < 0) hidden.push(id);
+      });
+      if (intent) intent.inputs.forEach(function (input) { if (input.hasAttribute && input.hasAttribute("data-shown-group")) intent.submitted.push(input); });
+      patch[top] = hidden.length ? hidden : null;
+    }
     // Turning MCP on without a key also saves a new key, since the plugin
     // does not listen without one.
     if (top === "mcp_enabled" && patch.mcp_enabled && !mcpKey().trim()) patch.mcp_key = newMcpKey();
@@ -4527,6 +4668,7 @@
     if (kind) return input.closest(".account-setting").getAttribute("data-account") + ":" + kind;
     if (input.closest(".thresholds")) return "thresholds";
     if (input.hasAttribute("data-group")) return input.closest("[data-groups]").getAttribute("data-groups") + ":" + input.getAttribute("data-group");
+    if (input.hasAttribute("data-shown-group")) return "shown:" + input.getAttribute("data-shown-group");
     return input.name || input.id;
   }
 
@@ -4542,6 +4684,10 @@
     var service = input.getAttribute("data-service");
     if (service) return providerTitle(service) + " · " + translate(input.getAttribute("data-label") || "col_ignition_model", providerTitle(service));
     if (input.hasAttribute("data-group")) return providerTitle(input.closest("[data-groups]").getAttribute("data-groups")) + " · " + input.getAttribute("data-group");
+    if (input.hasAttribute("data-shown-group")) {
+      var shown = input.getAttribute("data-shown-group"), at = shown.indexOf("|");
+      return providerTitle(shown.slice(0, at)) + " · " + shown.slice(at + 1);
+    }
     var label = input.closest("label"), text = label && label.querySelector("span");
     return text ? text.textContent : input.getAttribute("aria-label") || input.name || input.id;
   }
@@ -4688,10 +4834,29 @@
     controls.forEach(function (control) { control.settingsEdit = (control.settingsEdit || 0) + 1; });
   }
 
+  // A save of hidden_groups carries every edit of shownEdits, so once it is
+  // applied, an earlier failed save of another group's edit is done with:
+  // the failure of that group leaves the heading, also when its checkbox
+  // has left the form. An edit changed since the intent took it keeps its
+  // own state.
+  function settleShown(host, intent, input) {
+    if (!host || !host.saveEntries) return;
+    Object.keys(intent.shown).forEach(function (id) {
+      var entry = host.saveEntries.get("shown:" + id);
+      if (!entry || !entry.failure || entry.input === input || shownEdits[id] !== intent.shown[id]) return;
+      entry.owner = null;
+      updateSaveEntry(entry, "saved", translate("save_applied"));
+    });
+  }
+
   // Clear only drafts actually submitted by this save and unchanged since
   // its intent was captured. Independent failures remain owned by their item.
   function refillSaved(intent) {
     var keys = {}, any = false;
+    if (intent.shown) {
+      Object.keys(intent.shown).forEach(function (id) { if (shownEdits[id] === intent.shown[id]) delete shownEdits[id]; });
+      keys.hidden_groups = any = true;
+    }
     intent.submitted.forEach(function (input) {
       var saved = intent.states[intent.inputs.indexOf(input)];
       if (!saved || (input.settingsEdit || 0) !== saved.edit || input.hasAttribute("aria-invalid")) return;
@@ -4705,7 +4870,7 @@
 
   function saveField(event) {
     var input = event.target;
-    var top = input.hasAttribute("data-group") ? "providers" : input.name && topKey(input.name);
+    var top = inputTop(input);
     // The chart switches save with their state; see saveChartSwitch.
     if (!top || top === "remember_chart_filters" || top === "remember_chart_expanded") return;
     var host = saveHost(input);
@@ -4750,6 +4915,7 @@
       return;
     }
     if (input.name === "ignition.enabled") renderIgnitionOff();
+    if (top === "hidden_groups") shownEdits[input.getAttribute("data-shown-group")] = { shown: input.checked };
     var say = claimState(host, input);
     noteEdit(input);
     var intent = captureIntent(tops);
@@ -4761,7 +4927,11 @@
       });
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
-        showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
+        showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) {
+          if (!applied) return;
+          if (intent.shown) settleShown(host, intent, input);
+          refillSaved(intent);
+        });
         return rereadConfig();
       }, function (err) {
         say("failed", err.message);

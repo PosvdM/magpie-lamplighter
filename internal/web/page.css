@@ -646,6 +646,10 @@ form input[type="checkbox"][aria-invalid="true"], form input[type="radio"][aria-
 form label.inline-input { flex-direction: row; align-items: center; gap: 6px; font-weight: 500; color: var(--text-primary); }
 .inline-input input { width: 72px; text-align: right; font-family: var(--font-mono); }
 .checks { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.service-monitors { display: flex; flex-direction: column; gap: 12px; }
+.shown-groups { margin: 8px 0 0 24px; }
+.shown-groups[hidden] { display: none; }
+.shown-groups .field-label { display: block; margin-bottom: 6px; }
 .notify-modes { display: grid; grid-template-columns: auto auto auto; gap: 10px 18px; align-items: center; justify-content: start; }
 /* As wide as the switches above, whatever the size of an empty input. */
 .notify-modes .hours-input { width: 0; min-width: 100%; }
