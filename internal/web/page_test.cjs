@@ -368,6 +368,58 @@ test("account cards keep only identity in the heading and place actions after th
   assert.match(source, /copy.querySelectorAll\("\.no-snapshot,/);
 });
 
+test("cards leave out hidden groups and groups without windows", () => {
+  const cards = saveNode("DIV");
+  const element = (tag, attrs = {}, children = []) => {
+    const node = saveNode(tag.toUpperCase(), attrs);
+    if (attrs.text) node.textContent = attrs.text;
+    children.filter(Boolean).forEach(child => node.appendChild(child));
+    return node;
+  };
+  const win = [{ id: "five-hour", kind: "5h" }];
+  const retired = { key: "antigravity:1:old", label: "", source_label: "", windows: null };
+  const ctx = context(["renderAccounts", "hiddenGroups", "hiddenList", "groupHidden"], {
+    accountDrag: null, accountsBehind: false, SENSITIVE: "account-sensitive",
+    status: { config: { hidden_groups: ["antigravity|Claude / GPT"] }, accounts: [
+      { name: "a", provider: "antigravity", title: "Antigravity", groups: [
+        { key: "antigravity:1:gemini", label: "Gemini", source_label: "Gemini", windows: win },
+        { key: "antigravity:1:cg", label: "Claude / GPT", source_label: "Claude / GPT", windows: win },
+        retired,
+      ] },
+      // Only a hidden group and a retired one: no card.
+      { name: "b", provider: "antigravity", title: "Antigravity", groups: [
+        { key: "antigravity:2:cg", label: "Claude / GPT", source_label: "Claude / GPT", windows: win },
+        retired,
+      ] },
+      // Only a retired group: the card stays, without groups.
+      { name: "c", provider: "antigravity", title: "Antigravity", error: "failed", groups: [retired] },
+    ] },
+    rawConfig: {}, masked: false, renderAccountSettings: () => {}, accountWeight: () => 1,
+    fmtWeight: String, parseTime: () => null, $: () => cards,
+    clear: node => { node.textContent = ""; }, el: element,
+    translate: (key, value) => value === undefined ? key : key + ": " + value,
+    maskedNodes: text => [element("span", { text })], providerTitle: () => "Antigravity",
+    quotaRow: () => element("div", { class: "quota-row" }), freshness: () => null,
+    snapshotButton: label => element("button", { "aria-label": label }),
+  });
+  ctx.renderAccounts();
+  assert.deepEqual(cards.children.map(card => card.attrs["data-account"]), ["a", "c"]);
+  const blocks = card => card.children.filter(node => node.attrs.class === "quota-group");
+  assert.deepEqual(blocks(cards.children[0]).map(block => block.children[0].textContent), ["Gemini"]);
+  assert.equal(blocks(cards.children[1]).length, 0);
+  assert.deepEqual(cards.children[1].children.filter(node => node.attrs.class === "error-text").map(node => node.textContent), ["failed"]);
+});
+
+test("ignition group choices skip empty names from accounts and the config", () => {
+  const ctx = context(["groupChoices"], {
+    status: { accounts: [{ provider: "antigravity", groups: [
+      { source_label: "Gemini" }, { source_label: "" }, { source_label: "Extra" },
+    ] }] },
+  });
+  assert.deepEqual(plain(ctx.groupChoices({ id: "antigravity", groups: ["Gemini", "Claude / GPT"] }, ["", "Old"])),
+    ["Gemini", "Claude / GPT", "Extra", "Old"]);
+});
+
 function settingsSaveContext(radio = false) {
   const a = saveNode("INPUT", { name: radio ? "recovery_notify.five_hour" : "ignition.start_hour" });
   const b = saveNode("INPUT", { name: radio ? "recovery_notify.five_hour" : "ignition.end_hour" });

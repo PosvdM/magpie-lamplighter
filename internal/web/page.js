@@ -1553,9 +1553,12 @@
     status.accounts.forEach(function (a) { counts[a.provider] = (counts[a.provider] || 0) + 1; });
     var hidden = hiddenGroups();
     status.accounts.forEach(function (account, index) {
-      var groups = (account.groups || []).filter(function (g) { return !groupHidden(hidden, account.provider, g.source_label); });
+      // A group without windows is a retired pool the plugin keeps so old
+      // readings cannot bring it back; it has nothing to show.
+      var live = (account.groups || []).filter(function (g) { return (g.windows || []).length; });
+      var groups = live.filter(function (g) { return !groupHidden(hidden, account.provider, g.source_label); });
       // An account whose quota groups are all hidden shows no card.
-      if (!groups.length && (account.groups || []).length) return;
+      if (!groups.length && live.length) return;
       var card = el("div", { class: "card account", "data-account": account.name });
       var pooledAccount = counts[account.provider] > 1, weight = accountWeight(account);
       var refresh = el("button", { type: "button", class: "btn btn-ghost btn-sm no-snapshot", text: translate("refresh"), onclick: function () {
@@ -4220,9 +4223,9 @@
     var names = p.groups.slice();
     (status.accounts || []).forEach(function (a) {
       if (a.provider !== p.id) return;
-      (a.groups || []).forEach(function (g) { if (names.indexOf(g.source_label) < 0) names.push(g.source_label); });
+      (a.groups || []).forEach(function (g) { if (g.source_label && names.indexOf(g.source_label) < 0) names.push(g.source_label); });
     });
-    (selected || []).forEach(function (name) { if (names.indexOf(name) < 0) names.push(name); });
+    (selected || []).forEach(function (name) { if (name && names.indexOf(name) < 0) names.push(name); });
     return names;
   }
 

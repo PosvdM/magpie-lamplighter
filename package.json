@@ -1,6 +1,6 @@
 {
   "name": "magpie-lamplighter",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Magpie plugin that monitors the quotas of Codex, Claude and Antigravity subscription accounts and starts their 5-hour windows on schedule",
   "type": "module",
   "main": "npm/index.js",
