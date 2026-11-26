@@ -100,10 +100,10 @@ func credentialFromFile(raw string) host.Credential {
 // fingerprintOf is the fingerprint of the credential in raw.
 func fingerprintOf(raw json.RawMessage) string { return credentialFromFile(string(raw)).Fingerprint }
 
-// agyReading is a complete Magpie reading of the agy-cli account pin, read
-// at readAt, as package magpie converts it.
+// agyReading is Magpie's reading of the agy-cli account pin, read at
+// readAt, as package magpie converts it.
 func agyReading(pin string, readAt time.Time, groups ...quota.RawGroup) host.KeptQuota {
-	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt, Complete: true}
+	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt, Active: true}
 }
 
 // agyPool is the group of an Antigravity pool, such as "Gemini" or

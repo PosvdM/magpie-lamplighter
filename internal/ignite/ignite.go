@@ -174,6 +174,36 @@ func Observe(ts *store.TargetState, reset, now time.Time, passive bool) bool {
 	return rolling
 }
 
+// ObserveReading records one 5-hour reset that Magpie read for an
+// account read only from Magpie (Antigravity), at readAt, and returns
+// whether the window is a rolling placeholder. Magpie stamps readAt when
+// agy has finished, some seconds after Google read the reset, and that
+// delay varies, so the time between two readings says too little of how
+// far a placeholder moved. Only the resets are compared: a reset about
+// 5 hours after readAt (within rollingOffsetTolerance) that differs from
+// the last one observed by more than rollingDriftTolerance is rolling;
+// Google gives a running window's reset to the second. A fixed future
+// reset clears the failure state, as in Observe.
+func ObserveReading(ts *store.TargetState, reset, readAt time.Time) bool {
+	rolling := false
+	var resetEpoch *float64
+	if !reset.IsZero() {
+		value := epoch(reset)
+		resetEpoch = &value
+		prev := ts.ResetObservation
+		if prev != nil && prev.ResetEpoch != nil && absDuration(reset.Sub(readAt)-rollingWindow) <= rollingOffsetTolerance {
+			shift := time.Duration((value - *prev.ResetEpoch) * float64(time.Second))
+			rolling = absDuration(shift) > rollingDriftTolerance
+		}
+	}
+	ts.RollingReset = rolling
+	if !rolling && !reset.IsZero() && reset.After(readAt) {
+		ClearFailures(ts)
+	}
+	ts.ResetObservation = &store.Observation{SeenEpoch: epoch(readAt), ResetEpoch: resetEpoch}
+	return rolling
+}
+
 func absDuration(d time.Duration) time.Duration {
 	if d < 0 {
 		return -d

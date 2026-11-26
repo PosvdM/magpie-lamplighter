@@ -55,6 +55,10 @@ type TargetView struct {
 	// BlockedUntil is its reset, zero when unknown.
 	BlockedWindow string    `json:"blocked_window,omitempty"`
 	BlockedUntil  time.Time `json:"blocked_until,omitempty"`
+	// Confirming is set while an ignition request has been sent and its
+	// window is still to be confirmed (magpieConfirms); the target has no
+	// next ignition meanwhile and cannot be ignited.
+	Confirming bool `json:"confirming,omitempty"`
 }
 
 type target struct {
@@ -193,6 +197,7 @@ func (e *Engine) refreshTargets(cfg config.Config) {
 			LastError:           ts.LastError,
 			ConsecutiveFailures: ts.ConsecutiveFailures,
 			CircuitReason:       ts.CircuitReason,
+			Confirming:          e.confirmPending(t.group.Key),
 		}
 		if until := epochTime(ts.CircuitOpenUntilEpoch); until.After(now) {
 			view.CircuitUntil = until
@@ -200,7 +205,7 @@ func (e *Engine) refreshTargets(cfg config.Config) {
 		if w, blocked := exhaustedWindow(t.group, now); blocked {
 			view.BlockedWindow = quota.ShortLabel(w.Label)
 			view.BlockedUntil = w.Reset
-		} else if cfg.Ignition.Enabled && !e.credentialBlocked(t.cred.AuthIndex) {
+		} else if cfg.Ignition.Enabled && !e.credentialBlocked(t.cred.AuthIndex) && !view.Confirming {
 			view.NextDue = schedule.DueAt(ts, t.reset, now)
 		}
 		views = append(views, view)
@@ -414,9 +419,9 @@ func overrideID(override string, cred *Cred) string {
 // outcome. It returns the error shown for a manual ignition.
 //
 // The ignition of an account whose quota is read only from Magpie
-// (Antigravity) may end before its confirmation: confirmMagpie leaves the
-// later checks to the loop (runMagpieConfirms), and igniteTarget returns
-// ErrIgnitionPending without recording an outcome.
+// (Antigravity) ends before its confirmation: confirmMagpie leaves it to
+// the background worker and the loop (confirmStep), and igniteTarget
+// returns ErrIgnitionPending without recording an outcome.
 func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, manual bool) error {
 	if e.confirmPending(t.group.Key) {
 		return errConfirmBusy
@@ -443,8 +448,9 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		if resp.sentAt.After(base.start) {
 			base.start = resp.sentAt
 		}
+		base.end = e.now()
 		if providers.MagpieOnly(providers.Lookup(t.group.Provider)) {
-			err = e.confirmMagpie(ctx, cfg, t, base, model, fingerprint, manual)
+			err = e.confirmMagpie(t, base, model, fingerprint, manual)
 		} else {
 			err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
 		}
@@ -772,8 +778,9 @@ func truncateText(text string, n int) string {
 // replace.
 type ignitionBase struct {
 	// start is the start of the ignition until execute returns, then when
-	// the request that worked entered OpenModelStream.
-	start time.Time
+	// the request that worked entered OpenModelStream; end is when its
+	// response ended (execute returned), zero until then.
+	start, end time.Time
 	// oldReset is the reset of a window that had ended or not started at
 	// start (a past reset or a rolling placeholder), zero otherwise. A
 	// reading with this reset still describes that window.
@@ -798,13 +805,17 @@ func (e *Engine) ignitionBase(key string, start time.Time) ignitionBase {
 // reset read after the ignition request was sent (base.start), other than
 // base.oldReset. The time of the reading counts, not when it was applied:
 // Magpie's kept quota can hold a reading taken before the request and
-// handed over after it.
+// handed over after it. An account read only from Magpie is confirmed by
+// its reset alone (confirmedByMagpie).
 func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 	group, ok := e.group(key)
 	if !ok {
 		return false
 	}
 	w, ok := group.fiveHour()
+	if ok && providers.MagpieOnly(providers.Lookup(group.Provider)) {
+		return confirmedByMagpie(w, base, now)
+	}
 	if !ok || w.ReadAt.Before(base.start) || w.Reset.IsZero() || !w.Reset.After(now) {
 		return false
 	}

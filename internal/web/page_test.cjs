@@ -3660,3 +3660,30 @@ test("the shown groups have their text in both languages", () => {
     assert.match(vm.runInContext("I18N." + lang + ".monitor_hint", ctx), lang === "zh" ? /额度组/ : /quota groups/, lang);
   }
 });
+
+test("a target waiting for its confirmation shows it and cannot be ignited", () => {
+  const rows = saveNode("TBODY"), card = saveNode("DIV"), note = saveNode("P");
+  const element = (tag, attrs = {}, children = []) => {
+    const node = saveNode(tag.toUpperCase(), attrs);
+    if (attrs.text) node.textContent = attrs.text;
+    children.filter(Boolean).forEach(child => node.appendChild(child));
+    return node;
+  };
+  const ctx = context(["targetStatus", "renderTargets"], {
+    status: { config: { ignition: { enabled: true, start_hour: 7, end_hour: 23 } }, targets: [
+      { key: "antigravity:4:gemini", label: "Gemini", confirming: true, next_due: "", consecutive_failures: 0 },
+      { key: "antigravity:5:gemini", label: "Gemini", next_due: "2026-11-21T10:00:00Z", consecutive_failures: 0 },
+    ] },
+    $: id => ({ targets: rows, "ignition-card": card, "ignition-note": note })[id],
+    clear: node => { node.textContent = ""; }, el: element, pad: String,
+    translate: (key, value) => value === undefined ? key : key + ": " + value,
+    groupTitle: (key, label) => label, parseTime: () => null, badge: (kind, text) => element("span", { class: kind, text }),
+    maskedNodes: text => [element("span", { text })], fmtDateTime: String, fmtDateTimeDay: String,
+  });
+  ctx.renderTargets();
+  const buttons = rows.children.map(row => row.children[6].children[0]);
+  assert.equal(buttons[0].attrs.disabled, true);
+  assert.equal(buttons[1].attrs.disabled, false);
+  assert.equal(rows.children[0].children[5].textContent, "confirmingconfirming_note");
+  assert.equal(rows.children[1].children[5].textContent, "normal");
+});

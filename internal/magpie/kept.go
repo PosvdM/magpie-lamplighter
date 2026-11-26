@@ -66,8 +66,9 @@ type keptWindow struct {
 }
 
 // KeptQuotas returns Magpie's last readings of the Codex, Claude and
-// agy-cli accounts. The call, with the account list it reads, ends within
-// keptTimeout.
+// agy-cli accounts that are switched on. A card that does not convert is
+// logged and left out; the other cards are returned. The call, with the
+// account list it reads, ends within keptTimeout.
 func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 	ctx, cancel := context.WithTimeout(ctx, keptTimeout)
 	defer cancel()
@@ -86,7 +87,7 @@ func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 	}
 	pins := map[string]string{}
 	for _, a := range listed {
-		if a.Kind == "account" {
+		if a.Kind == "account" && a.On != nil && *a.On {
 			pins[a.Provider+"\n"+accountKey(a.User)] = a.Pin
 		}
 	}
@@ -100,22 +101,48 @@ func (h *Host) KeptQuotas(ctx context.Context) ([]host.KeptQuota, error) {
 			continue
 		}
 		k, ok, err := keptOf(q, pin, now())
-		if err != nil {
-			return nil, fmt.Errorf("GET %s: %s: %w", routeOf(keptPath), pin, err)
-		}
-		if ok {
+		h.noteCardError(pin, err)
+		if ok && err == nil {
 			out = append(out, k)
 		}
 	}
 	return out, nil
 }
 
+// noteCardError logs err, the error of converting the kept card of the
+// account pin, when it differs from the last one logged for the account:
+// KeptQuotas runs every minute, and a card keeps its format until Magpie
+// reads the account again. A nil err forgets the last one.
+func (h *Host) noteCardError(pin string, err error) {
+	text := ""
+	if err != nil {
+		text = fmt.Sprintf("GET %s: %s: %v", routeOf(keptPath), pin, err)
+	}
+	h.mu.Lock()
+	last := h.cardErrors[pin]
+	if text == "" {
+		delete(h.cardErrors, pin)
+	} else {
+		if h.cardErrors == nil {
+			h.cardErrors = map[string]string{}
+		}
+		h.cardErrors[pin] = text
+	}
+	h.mu.Unlock()
+	if text != "" && text != last {
+		h.Log("warn", "跳过 Magpie 额度记录中格式不对的卡："+text, nil)
+	}
+}
+
 // keptOf converts the card q of the account pin into a KeptQuota; ok is
 // false for a card without a reading time or windows Lamplighter reads,
-// and for an agy-cli card that failed (Error). A window that tells its
-// reset only in seconds (ResetSecs) is placed from at, the time of the
-// answer.
+// and for an agy-cli card that is no new reading of Magpie's own
+// (agyFresh). A window that tells its reset only in seconds (ResetSecs)
+// is placed from at, the time of the answer.
 func keptOf(q keptQuota, pin string, at time.Time) (k host.KeptQuota, ok bool, err error) {
+	if q.Provider == agyCLI && !agyFresh(q) {
+		return host.KeptQuota{}, false, nil
+	}
 	readAt := q.ReadAt
 	if readAt == nil {
 		readAt = q.AsOf
@@ -132,29 +159,37 @@ func keptOf(q keptQuota, pin string, at time.Time) (k host.KeptQuota, ok bool, e
 		ws[i] = w
 	}
 	var groups []quota.RawGroup
-	complete := false
+	var unread []string
 	switch q.Provider {
 	case "codex":
 		groups, err = keptCodex(ws)
 	case "claude":
 		groups, err = keptClaude(ws)
 	case agyCLI:
-		if q.Error != "" {
-			// agy did not read the quota, such as while its sign-in waits
-			// to be renewed: no reading, neither 0% nor 100%.
-			return host.KeptQuota{}, false, nil
-		}
-		groups, complete, err = keptAgy(ws)
-		// An earlier reading kept in place of one that failed is no
-		// reading of the account as it is now.
-		complete = complete && q.AsOf == nil && q.ReadError == "" && !q.ReadDeferred
+		groups, unread, err = keptAgy(ws)
 	default:
 		return host.KeptQuota{}, false, nil
 	}
 	if err != nil || len(groups) == 0 {
 		return host.KeptQuota{}, false, err
 	}
-	return host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC(), Complete: complete}, true, nil
+	k = host.KeptQuota{Pin: pin, Groups: groups, ReadAt: readAt.UTC()}
+	if q.Provider == agyCLI {
+		k.Active, k.Unread = true, unread
+	}
+	return k, true, nil
+}
+
+// agyFresh reports whether the agy-cli card q is a reading Magpie made
+// this time: it has readAt, and no error, readError, readDeferred or
+// asOf. When agy reads nothing, such as while its sign-in waits to be
+// renewed, the card has only error; when a reading fails or is put off,
+// Magpie shows the last good one with asOf and readError or readDeferred
+// (lastQuotas in internal/provider/quota_last.go), and may give a window
+// whose reset has passed since as unused and without a reset. Such a card
+// tells nothing of the account as it is now: neither 0% nor 100%.
+func agyFresh(q keptQuota) bool {
+	return q.Error == "" && q.ReadError == "" && !q.ReadDeferred && q.AsOf == nil && q.ReadAt != nil && !q.ReadAt.IsZero()
 }
 
 // counted is whether w is a reading of a share used: not a text row, an
@@ -298,53 +333,64 @@ var agyKept = map[string]struct {
 // windows; the refresh answers the plugin's names as they are. Only the
 // pool's own 5-hour and 7-day windows are read.
 //
-// A pool window without a figure ("Limits not available", which Magpie
-// sends as a text row) is no reading: it is left out, and the card is not
-// complete, so that its group is not taken for one that is gone.
-func keptAgy(ws []keptWindow) (groups []quota.RawGroup, complete bool, err error) {
-	complete = true
-	index := map[string]int{}
+// A pool with a window that has no figure ("Limits not available", which
+// Magpie sends as a text row) is not read: its key is returned in unread
+// and none of its windows is, so that its group stays as it was and is not
+// taken for one that is gone. A pool none of whose own windows is read
+// (all text rows, or none listed) is left out.
+func keptAgy(ws []keptWindow) (groups []quota.RawGroup, unread []string, err error) {
+	type pool struct {
+		group  quota.RawGroup
+		unread bool
+	}
+	var pools []*pool
+	index := map[string]*pool{}
 	for _, w := range ws {
-		pool := strings.TrimSpace(w.Pool)
-		if pool == "" || w.Family != "" {
+		name := strings.TrimSpace(w.Pool)
+		if name == "" || w.Family != "" {
 			continue
 		}
-		name := strings.TrimSpace(w.Name)
-		if before, after, ok := strings.Cut(name, " · "); ok && strings.EqualFold(strings.TrimSpace(before), pool) {
-			name = strings.TrimSpace(after)
+		window := strings.TrimSpace(w.Name)
+		if before, after, ok := strings.Cut(window, " · "); ok && strings.EqualFold(strings.TrimSpace(before), name) {
+			window = strings.TrimSpace(after)
 		}
-		spec, known := agyKept[strings.ToLower(name)]
-		g, named := providers.AntigravityPool(pool)
+		spec, known := agyKept[strings.ToLower(window)]
+		g, named := providers.AntigravityPool(name)
 		if !known || !named {
 			continue
 		}
+		p := index[g.Key]
+		if p == nil {
+			p = &pool{group: quota.RawGroup{Key: g.Key, SourceLabel: g.SourceLabel}}
+			index[g.Key] = p
+			pools = append(pools, p)
+		}
 		if w.Text || w.Unlimited || w.Lane != "" || w.Balance != nil {
-			complete = false
+			p.unread = true
 			continue
 		}
 		if w.Used == nil {
-			return nil, false, fmt.Errorf("%w: a pool window has no used", host.ErrFormat)
+			return nil, nil, fmt.Errorf("%w: a pool window has no used", host.ErrFormat)
 		}
 		id := g.FiveHour
 		if spec.weekly {
 			id = g.Weekly
 		}
-		i, seen := index[g.Key]
-		if !seen {
-			i = len(groups)
-			index[g.Key] = i
-			groups = append(groups, quota.RawGroup{Key: g.Key, SourceLabel: g.SourceLabel})
+		if slices.ContainsFunc(p.group.Windows, func(x quota.Window) bool { return x.ID == id }) {
+			return nil, nil, fmt.Errorf("%w: pool window %q appears twice", host.ErrFormat, window)
 		}
-		windows := groups[i].Windows
-		if slices.ContainsFunc(windows, func(x quota.Window) bool { return x.ID == id }) {
-			return nil, false, fmt.Errorf("%w: pool window %q appears twice", host.ErrFormat, name)
+		p.group.Windows = append(p.group.Windows, keptWindowOf(w, id, spec.label, spec.period))
+	}
+	for _, p := range pools {
+		switch {
+		case p.unread:
+			unread = append(unread, p.group.Key)
+		case len(p.group.Windows) > 0:
+			slices.SortStableFunc(p.group.Windows, func(a, b quota.Window) int { return int(a.Period - b.Period) })
+			groups = append(groups, p.group)
 		}
-		groups[i].Windows = append(windows, keptWindowOf(w, id, spec.label, spec.period))
 	}
-	for _, g := range groups {
-		slices.SortStableFunc(g.Windows, func(a, b quota.Window) int { return int(a.Period - b.Period) })
-	}
-	return groups, complete, nil
+	return groups, unread, nil
 }
 
 // Minimum time between two quota refreshes of one account. A Claude

@@ -719,6 +719,11 @@ func (b *MCPBackend) refresh(ctx context.Context, args map[string]string) (any, 
 	}
 	select {
 	case result := <-cmd.reply:
+		if errors.Is(result.err, ErrRefreshQueued) {
+			// Magpie is still reading an Antigravity account; the reading
+			// shows in list_quotas when it comes.
+			return map[string]any{"ok": true, "queued": true, "message": ErrRefreshQueued.Error(), "as_of": describeTime(e.now(), e.now())}, nil
+		}
 		if result.err != nil {
 			return map[string]any{"ok": false, "error": redact.Text(refreshReason(result.err))}, nil
 		}

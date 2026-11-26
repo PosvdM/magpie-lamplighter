@@ -29,7 +29,7 @@ export const TOOLS = {
     },
   },
   refresh_quotas: {
-    description: "Request an active quota refresh for all accounts or one exact account label or email. Requires a running engine, but does not wait for its first full poll. A non-running engine returns ready=false, state=starting and retry_after_seconds=30; a disabled plugin returns state=disabled. These responses do not consume the refresh limit. Running-engine attempts are globally limited to once per 60 seconds, including refresh failures. Ambiguous account filters are rejected. Returns retry_after_seconds when throttled. Wait is bounded to 180 seconds; timeout does not imply upstream work was canceled. Read list_quotas afterward for per-account freshness and errors.",
+    description: "Request an active quota refresh for all accounts or one exact account label or email. Requires a running engine, but does not wait for its first full poll. A non-running engine returns ready=false, state=starting and retry_after_seconds=30; a disabled plugin returns state=disabled. These responses do not consume the refresh limit. Running-engine attempts are globally limited to once per 60 seconds, including refresh failures. Ambiguous account filters are rejected. Returns retry_after_seconds when throttled. Wait is bounded to 180 seconds; timeout does not imply upstream work was canceled. An Antigravity account is read again by Magpie in the background; when that has not finished in time, the result has ok=true and queued=true, and the reading shows in list_quotas later. Read list_quotas afterward for per-account freshness and errors.",
     properties: {
       account: text(ACCOUNT),
     },

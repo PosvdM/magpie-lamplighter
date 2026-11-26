@@ -394,32 +394,16 @@ var (
 // The quota of an account read only from Magpie (Antigravity) is Magpie's
 // reading. Magpie reads an agy-cli account when asked, and each reading
 // runs agy's /usage, which takes 5 to 10 seconds and sends Google a dozen
-// Code Assist requests. A scheduled round therefore has Magpie refresh such
-// an account only when its reading is magpieStaleAfter old, at most once
-// per magpieRefreshGap for each account, a manual refresh included, and
-// for one such account per round. Package magpie holds every refresh of
-// the account to the same gap, except the ones that confirm an ignition
-// (confirmMagpie).
+// Code Assist requests. A scheduled round therefore marks such an account
+// for a refresh only when its reading is magpieStaleAfter old or missing,
+// and the background worker (agy_refresh.go) refreshes it at most once per
+// magpieRefreshGap after the last refresh it tried for the account, of any
+// kind. Package magpie holds every refresh of the account to the same
+// gap, except the ones that confirm an ignition.
 var (
 	magpieStaleAfter = 15 * time.Minute
 	magpieRefreshGap = 15 * time.Minute
 )
-
-// magpieRefreshDue reports whether a scheduled round may have Magpie
-// refresh the quota of cred, read only from Magpie, now, and if so records
-// the refresh as tried.
-func (e *Engine) magpieRefreshDue(cred *Cred) bool {
-	now := e.now()
-	if e.roundMagpieRefreshed {
-		return false
-	}
-	if last, ok := e.renewedAt[cred.AuthIndex]; ok && now.Sub(last) < magpieRefreshGap {
-		return false
-	}
-	e.renewedAt[cred.AuthIndex] = now
-	e.roundMagpieRefreshed = true
-	return true
-}
 
 // renewDue reports whether a scheduled round may have Magpie refresh the
 // quota of cred now, and if so records the refresh as tried.
@@ -447,9 +431,24 @@ func manualRefreshEnd(start, deadline time.Time) time.Time {
 	return end
 }
 
+// queryKind is why an account is queried.
+type queryKind int
+
+const (
+	// queryOther: a query for an ignition's confirmation or a single
+	// active query, which has no account refreshed by Magpie.
+	queryOther queryKind = iota
+	// queryScheduled: the scheduled round.
+	queryScheduled
+	// queryProbe: the query around a reset (probes).
+	queryProbe
+	// queryManual: a manual refresh, with renew set.
+	queryManual
+)
+
 // poll runs one round of active queries. slot is the aligned time this round
-// belongs to. onlyAuth limits the round to one credential. force disables the
-// passive skip rule, for the reset probes.
+// belongs to. onlyAuth limits the round to one credential, for the reset
+// probes; force disables the passive skip rule.
 func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, onlyAuth string, force bool) {
 	e.pollWith(ctx, cfg, slot, onlyAuth, force, nil)
 }
@@ -471,8 +470,14 @@ func (e *Engine) poll(ctx context.Context, cfg config.Config, slot time.Time, on
 // error, or errRefreshAccountGone when the account is not loaded; for all,
 // only a failed account list. A refreshFailure in it gives the reason
 // Magpie could not refresh, or brought no new reading.
+//
+// An account read only from Magpie is not refreshed in the round: its
+// refresh is queued for the background worker (queueAgyManual), and
+// e.manualWaits gets its result, which runCommand waits for until
+// e.manualEnd, without holding the loop.
 func (e *Engine) manualPoll(ctx context.Context, cfg config.Config, onlyAuth string, deadline time.Time) error {
 	end := manualRefreshEnd(time.Now(), deadline)
+	e.manualWaits, e.manualEnd = nil, end
 	round, cancelRound := context.WithDeadlineCause(ctx, end, errManualTimeUp)
 	defer cancelRound()
 	renew, cancel := context.WithDeadlineCause(round, end.Add(-keptRereadWait), errManualTimeUp)
@@ -562,9 +567,17 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 		e.logf("warn", "%v", err)
 		return nil, err
 	}
+	e.noteMagpiePlans(ctx, creds)
 	errs := map[string]string{}
 	failed := map[string]error{}
-	e.roundRenewed, e.roundMagpieRefreshed = false, false
+	e.roundRenewed = false
+	kind := queryScheduled
+	switch {
+	case renew != nil:
+		kind = queryManual
+	case onlyAuth != "":
+		kind = queryProbe
+	}
 	for _, cred := range creds {
 		if onlyAuth != "" && cred.AuthIndex != onlyAuth {
 			continue
@@ -582,7 +595,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 		if !force && e.shouldSkipActive(cfg, cred, slot, now) {
 			continue
 		}
-		if err := e.queryCredWith(ctx, cfg, cred, true, renew, renew == nil); err != nil {
+		if err := e.queryCredWith(ctx, cfg, cred, true, renew, kind); err != nil {
 			errs[cred.AuthIndex] = err.Error()
 			failed[cred.AuthIndex] = err
 			e.logf("warn", "额度刷新失败：%s：%v", labelFor(providers.Title(cred.Provider), cred), err)
@@ -623,6 +636,12 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 // Magpie has none.
 func (e *Engine) applyKept(ctx context.Context, cred *Cred) (time.Time, error) {
 	kept, err := e.host.KeptQuotas(ctx)
+	return e.applyKeptFrom(ctx, cred, kept, err)
+}
+
+// applyKeptFrom is applyKept with kept and err, Magpie's kept quotas as
+// KeptQuotas returned them.
+func (e *Engine) applyKeptFrom(ctx context.Context, cred *Cred, kept []host.KeptQuota, err error) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("读取 Magpie 额度记录失败：%w", err)
 	}
@@ -656,55 +675,50 @@ func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota) {
 // quota is read only from Magpie (Antigravity); applyKeptQuota has checked
 // that it is newer than the last one applied.
 //
-// A complete reading (host.KeptQuota Complete) tells every window of the
-// account and is applied as an active query: it records the plan of
-// Magpie's account list (notePlan), adds new windows, and keeps the groups
-// it no longer has as empty tombstones. Any other reading, such as one
-// with a pool agy gave no figure for, only updates the windows it has, as
-// passive data does, so that no group is taken for gone. Either is
-// observed for ignition at the time Magpie read it: Magpie reads the quota
-// on its own, so a reading does not show that a request started the
-// 5-hour window.
+// Package magpie gives only Magpie's own new readings of such an account
+// (host.KeptQuota Active): a card that failed or that shows an earlier
+// reading gives none. Each group of the reading is applied as an active
+// query: it may add windows, and the groups the account no longer has
+// stay as empty tombstones. The groups of k.Unread, pools agy listed
+// without a figure, stay as they are. Each is observed for ignition at the
+// time Magpie read it: Magpie reads the quota on its own, so a reading
+// does not show that a request started the 5-hour window.
 func (e *Engine) applyMagpieReading(ctx context.Context, cred *Cred, k host.KeptQuota) {
 	cfg := e.config()
-	if !cfg.Provider(cred.Provider).Monitor {
+	if !cfg.Provider(cred.Provider).Monitor || !k.Active || len(k.Groups) == 0 {
 		return
 	}
 	now := e.now()
-	if !k.Complete {
-		e.passiveAt[cred.AuthIndex] = now
-		e.applyGroupsFrom(ctx, cfg, cred, k.Groups, quota.SourcePassive, fromMagpie, now, k.ReadAt, true)
-		return
-	}
 	e.activeAt[cred.AuthIndex] = now
+	// A new reading ends the error of the account's last refresh.
+	delete(e.agyErrs, cred.AuthIndex)
 	e.noteMagpieReading(cred, k.ReadAt)
-	groups := k.Groups
-	if cred.MagpiePlan != "" && len(groups) > 0 {
-		groups = slices.Clone(groups)
-		groups[0].Plan = cred.MagpiePlan
-	}
-	confirmed := e.notePlan(ctx, providers.Lookup(cred.Provider), cred, providers.Credential{}, groups, now)
-	e.applyGroupsFrom(ctx, cfg, cred, k.Groups, quota.SourceActive, fromMagpie, now, k.ReadAt, confirmed)
+	e.applyGroupsKeep(ctx, cfg, cred, k.Groups, quota.SourceActive, fromMagpie, now, k.ReadAt, true, k.Unread)
 }
 
 // queryMagpie is the active query of cred, an account whose quota is read
-// only from Magpie (Antigravity): it applies Magpie's kept reading. With
-// renew set (a manual refresh), Magpie refreshes the account first
-// (refreshKept) within its gap. A scheduled round has Magpie refresh it
-// when the reading is magpieStaleAfter old or missing (magpieRefreshDue).
-// Other queries, such as the probes around a reset, only read Magpie's
-// kept reading.
-func (e *Engine) queryMagpie(ctx context.Context, cfg config.Config, cred *Cred, renew context.Context, scheduled bool) error {
-	if renew != nil {
-		e.renewedAt[cred.AuthIndex] = e.now()
-		return e.refreshKept(ctx, renew, cfg, cred)
-	}
+// only from Magpie (Antigravity): it applies Magpie's kept reading. It
+// never waits for Magpie to read the account again: a scheduled round
+// marks the account for a refresh when its reading is magpieStaleAfter old
+// or missing, and a manual refresh queues one and its result
+// (queueAgyManual); the background worker runs them. Other queries, such
+// as the probes around a reset, only read Magpie's kept reading. The error
+// is that of the account's last refresh while the reading it left stands,
+// else that of reading the kept quota.
+func (e *Engine) queryMagpie(ctx context.Context, cfg config.Config, cred *Cred, kind queryKind) error {
 	_, err := e.applyKept(ctx, cred)
-	last := e.keptAt[cred.AuthIndex]
-	if scheduled && (last.IsZero() || e.now().Sub(last) >= magpieStaleAfter) && e.magpieRefreshDue(cred) {
-		refresh, cancel := context.WithTimeout(ctx, scheduledRenewTimeout)
-		defer cancel()
-		return e.refreshKept(ctx, refresh, cfg, cred)
+	pin := cred.AuthIndex
+	switch kind {
+	case queryManual:
+		e.manualWaits = append(e.manualWaits, e.queueAgyManual(pin))
+		return nil
+	case queryScheduled:
+		if last := e.keptAt[pin]; last.IsZero() || e.now().Sub(last) >= magpieStaleAfter {
+			e.agyStale[pin] = true
+		}
+	}
+	if refreshErr := e.agyErrs[pin]; refreshErr != nil {
+		return refreshErr
 	}
 	return err
 }
@@ -727,39 +741,73 @@ func (e *Engine) queryMagpie(ctx context.Context, cfg config.Config, cred *Cred,
 // applied before.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
 	before := e.keptAt[cred.AuthIndex]
-	var refreshErr error
-	var card host.KeptQuota
-	answered := false
-	r, cards := e.host.(host.KeptRefresher)
-	if cards {
-		card, answered, refreshErr = r.RefreshKept(renew, cred.AuthIndex)
-		answered = answered && card.Pin == cred.AuthIndex
-		if refreshErr == nil && !answered {
-			refreshErr = fmt.Errorf("%w: 刷新没有返回这个账号可用的额度卡", host.ErrFormat)
+	return e.settleRefresh(ctx, cred, before, e.fetchRefresh(ctx, renew, cred.AuthIndex))
+}
+
+// refreshResult is what a refresh of Magpie brought, before it is
+// applied (settleRefresh).
+type refreshResult struct {
+	// cards tells whether the host is a host.KeptRefresher, and card is
+	// the account's card it answered when answered is set.
+	cards    bool
+	card     host.KeptQuota
+	answered bool
+	// err is the refresh's error, as refreshKept gives it.
+	err error
+	// kept and keptErr are Magpie's kept quotas, read again when the
+	// refresh answered no card.
+	kept    []host.KeptQuota
+	keptErr error
+}
+
+// fetchRefresh has Magpie refresh the quota of the account pin within
+// renew, and reads the kept quota again within keptRereadWait of ctx when
+// the refresh answered no card. It touches no state of the engine, so the
+// background worker runs it (agyWorker).
+func (e *Engine) fetchRefresh(ctx, renew context.Context, pin string) refreshResult {
+	var r refreshResult
+	var refresher host.KeptRefresher
+	refresher, r.cards = e.host.(host.KeptRefresher)
+	if r.cards {
+		r.card, r.answered, r.err = refresher.RefreshKept(renew, pin)
+		r.answered = r.answered && r.card.Pin == pin
+		if r.err == nil && !r.answered {
+			r.err = fmt.Errorf("%w: 刷新没有返回这个账号可用的额度卡", host.ErrFormat)
 		}
 	} else {
-		refreshErr = e.host.RefreshQuota(renew, cred.AuthIndex)
+		r.err = e.host.RefreshQuota(renew, pin)
 	}
 	var hostErr *host.Error
 	switch {
-	case errors.As(refreshErr, &hostErr) && hostErr.Code == refreshStaleCode:
-		refreshErr = staleRefresh(hostErr.Message, refreshErr)
-	case errors.As(refreshErr, &hostErr) && refreshReasons[hostErr.Code] != "":
-		refreshErr = &refreshFailure{reason: refreshReasons[hostErr.Code], err: refreshErr}
-	case refreshErr != nil && timeUp(renew):
-		refreshErr = fmt.Errorf("超过手动刷新的时限，未完成：%w", refreshErr)
+	case errors.As(r.err, &hostErr) && hostErr.Code == refreshStaleCode:
+		r.err = staleRefresh(hostErr.Message, r.err)
+	case errors.As(r.err, &hostErr) && refreshReasons[hostErr.Code] != "":
+		r.err = &refreshFailure{reason: refreshReasons[hostErr.Code], err: r.err}
+	case r.err != nil && timeUp(renew):
+		r.err = fmt.Errorf("超过手动刷新的时限，未完成：%w", r.err)
 	}
-	var readAt time.Time
-	var err error
-	if answered {
-		e.applyKeptQuota(ctx, card)
-		readAt = card.ReadAt
-	} else {
+	if !r.answered {
 		reread, cancel := context.WithTimeout(ctx, keptRereadWait)
-		readAt, err = e.applyKept(reread, cred)
+		r.kept, r.keptErr = e.host.KeptQuotas(reread)
 		cancel()
 	}
-	if !cards && refreshErr == nil && err == nil && !readAt.After(before) {
+	return r
+}
+
+// settleRefresh applies r, a refresh of cred, and returns the refresh's
+// error as refreshKept gives it; before is the time of the account's
+// reading applied before the refresh.
+func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time, r refreshResult) error {
+	refreshErr := r.err
+	var readAt time.Time
+	var err error
+	if r.answered {
+		e.applyKeptQuota(ctx, r.card)
+		readAt = r.card.ReadAt
+	} else {
+		readAt, err = e.applyKeptFrom(ctx, cred, r.kept, r.keptErr)
+	}
+	if !r.cards && refreshErr == nil && err == nil && !readAt.After(before) {
 		// Magpie reported the refresh as done, but its reading is the one
 		// applied before.
 		refreshErr = staleRefresh("", nil)
@@ -782,27 +830,28 @@ func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred
 
 // refreshCred runs the active query of one credential.
 func (e *Engine) refreshCred(ctx context.Context, cfg config.Config, cred *Cred) error {
-	return e.queryCredWith(ctx, cfg, cred, true, nil, false)
+	return e.queryCredWith(ctx, cfg, cred, true, nil, queryOther)
 }
 
 // queryCred runs the active query of one credential. Without track, the
 // result does not change the credential state: no new or ended credential
 // problem, event or notification.
 func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, track bool) error {
-	return e.queryCredWith(ctx, cfg, cred, track, nil, false)
+	return e.queryCredWith(ctx, cfg, cred, track, nil, queryOther)
 }
 
-// queryCredWith is queryCred; with renew set, an expired credential has
-// Magpie refresh its quota first (refreshKept). A scheduled round does the
-// same at most once per scheduledRenewGap for each account (renewDue). An
-// account read only from Magpie is queried by queryMagpie.
-func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context, scheduled bool) error {
+// queryCredWith is queryCred for a query of kind; with renew set (a manual
+// refresh), an expired credential has Magpie refresh its quota first
+// (refreshKept). A scheduled round and a probe do the same at most once per
+// scheduledRenewGap for each account (renewDue). An account read only from
+// Magpie is queried by queryMagpie.
+func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context, kind queryKind) error {
 	p := providers.Lookup(cred.Provider)
 	if p == nil {
 		return fmt.Errorf("不支持的额度 provider: %s", cred.Provider)
 	}
 	if providers.MagpieOnly(p) {
-		return e.queryMagpie(ctx, cfg, cred, renew, scheduled)
+		return e.queryMagpie(ctx, cfg, cred, kind)
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
@@ -819,7 +868,7 @@ func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cre
 		if renew != nil {
 			return e.refreshKept(ctx, renew, cfg, cred)
 		}
-		if scheduled && credential.RenewedByRefresh && e.renewDue(cred) {
+		if (kind == queryScheduled || kind == queryProbe) && credential.RenewedByRefresh && e.renewDue(cred) {
 			scheduledRenew, cancel := context.WithTimeout(ctx, scheduledRenewTimeout)
 			defer cancel()
 			return e.refreshKept(ctx, scheduledRenew, cfg, cred)
@@ -926,6 +975,13 @@ func (e *Engine) notePlan(ctx context.Context, p *providers.Provider, cred *Cred
 		}
 		raw = plan
 	}
+	e.recordPlan(ctx, cred, state, raw, now)
+	return confirmed
+}
+
+// recordPlan records raw, the raw plan of cred just read ("" for none),
+// with its change (planChanged), and sends the pending plan notification.
+func (e *Engine) recordPlan(ctx context.Context, cred *Cred, state *store.PlanState, raw string, now time.Time) {
 	if raw != "" && raw != state.Plan {
 		old := state.Plan
 		state.Plan = raw
@@ -940,7 +996,24 @@ func (e *Engine) notePlan(ctx context.Context, p *providers.Provider, cred *Cred
 		}
 	}
 	e.sendPlanNotice(ctx, cred, state, now)
-	return confirmed
+}
+
+// noteMagpiePlans records the plans Magpie's account list gives the
+// accounts read only from Magpie (Cred.MagpiePlan), with every loading of
+// the list, whether or not their quota is read: the agy-cli plugin states
+// the plan of each account. A change resets the notification baselines
+// before the next reading is compared with them, as notePlan does.
+func (e *Engine) noteMagpiePlans(ctx context.Context, creds []*Cred) {
+	if e.state == nil {
+		return
+	}
+	now := e.now()
+	for _, cred := range creds {
+		if !providers.MagpieOnly(providers.Lookup(cred.Provider)) || cred.MagpiePlan == "" {
+			continue
+		}
+		e.recordPlan(ctx, cred, e.state.PlanFor(cred.AuthIndex), cred.MagpiePlan, now)
+	}
 }
 
 // planChanged records a changed plan for its notification and marks the
@@ -1044,6 +1117,13 @@ const (
 // applyGroupsFrom is applyGroups, with origin telling where the readings
 // come from.
 func (e *Engine) applyGroupsFrom(ctx context.Context, cfg config.Config, cred *Cred, raw []quota.RawGroup, source quota.Source, origin readingOrigin, now, readAt time.Time, alerts bool) {
+	e.applyGroupsKeep(ctx, cfg, cred, raw, source, origin, now, readAt, alerts, nil)
+}
+
+// applyGroupsKeep is applyGroupsFrom; an active result leaves the groups
+// whose keys keep lists (without the provider and account prefix) as they
+// are, instead of keeping them as empty tombstones.
+func (e *Engine) applyGroupsKeep(ctx context.Context, cfg config.Config, cred *Cred, raw []quota.RawGroup, source quota.Source, origin readingOrigin, now, readAt time.Time, alerts bool, keep []string) {
 	requested := origin == fromHeaders
 	var changed []*GroupView
 	previous := map[string][]WindowView{}
@@ -1055,6 +1135,9 @@ func (e *Engine) applyGroupsFrom(ctx context.Context, cfg config.Config, cred *C
 		seen := map[string]bool{}
 		for _, rg := range raw {
 			seen[prefix+rg.Key] = true
+		}
+		for _, key := range keep {
+			seen[prefix+key] = true
 		}
 		addMissing := func(key, label string) {
 			if strings.HasPrefix(key, prefix) && !seen[key] {
@@ -1170,7 +1253,13 @@ func (e *Engine) applyGroupsFrom(ctx context.Context, cfg config.Config, cred *C
 				seen = readAt
 			}
 			startKnown := requested || target.ResetObservation != nil || w.Reset.Sub(seen) < quota.FiveHours-2*time.Minute
-			ignite.Observe(target, w.Reset, seen, requested)
+			if origin == fromMagpie {
+				// Magpie's readAt is when agy finished, some seconds after
+				// Google read the reset: only the resets are compared.
+				ignite.ObserveReading(target, w.Reset, seen)
+			} else {
+				ignite.Observe(target, w.Reset, seen, requested)
+			}
 			e.mu.Lock()
 			if live := e.groups[group.Key]; live != nil {
 				live.rolling = target.RollingReset

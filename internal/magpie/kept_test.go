@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,9 +43,12 @@ const keptJSON = `{"object":"list","data":[
    {"name":"7 days","used":1,"remaining":99,"resetsAt":"2026-11-26T00:00:00Z"}]},
  {"provider":"deepseek","name":"DeepSeek","kind":"balance","balance":"¥10","windows":[]}]}`
 
+// accountsOnJSON is accountsJSON with every account switched on.
+var accountsOnJSON = strings.ReplaceAll(accountsJSON, `"on":false`, `"on":true`)
+
 func TestKeptQuotas(t *testing.T) {
 	_, h := newGateway(t, map[string]string{
-		"GET /v1/magpie/accounts": accountsJSON,
+		"GET /v1/magpie/accounts": accountsOnJSON,
 		"GET /v1/magpie/quotas":   keptJSON,
 	})
 	got, err := h.KeptQuotas(context.Background())
@@ -67,7 +73,7 @@ func TestKeptQuotas(t *testing.T) {
 				{ID: quota.WindowFable, Label: quota.LabelFable, Remaining: 50, Reset: at("2026-11-27T00:00:00Z"), Period: quota.SevenDays},
 			}},
 		}},
-		{Pin: "agy-cli/ffeeddccbbaa9988", ReadAt: at("2026-11-21T07:58:00Z"), Complete: true, Groups: []quota.RawGroup{
+		{Pin: "agy-cli/ffeeddccbbaa9988", ReadAt: at("2026-11-21T07:58:00Z"), Active: true, Groups: []quota.RawGroup{
 			{Key: "antigravity:gemini-models", SourceLabel: "Gemini", Windows: []quota.Window{
 				{ID: "gemini-5h", Label: quota.LabelFiveHour, Remaining: 90, Reset: at("2026-11-21T10:00:00Z"), Period: quota.FiveHours},
 			}},
@@ -139,7 +145,6 @@ func TestKeptQuotasFormat(t *testing.T) {
 	for _, body := range []string{
 		`{"object":"list"}`,
 		`{"data":{}}`,
-		`{"data":[{"provider":"codex","kind":"subscription","user":"a@example.com · Team","readAt":"2026-11-21T07:58:00Z","windows":[{"name":"5 hours","resetsAt":"2026-11-21T10:00:00Z"}]}]}`,
 	} {
 		_, h := newGateway(t, map[string]string{
 			"GET /v1/magpie/accounts": accountsJSON,
@@ -148,6 +153,33 @@ func TestKeptQuotasFormat(t *testing.T) {
 		if _, err := h.KeptQuotas(context.Background()); !errors.Is(err, host.ErrFormat) {
 			t.Errorf("%s: err = %v, want ErrFormat", body, err)
 		}
+	}
+}
+
+// A card that does not convert is logged once and left out; the other
+// cards still come, the Codex and Claude readings that stand in for
+// expired tokens included. The card of an account switched off is not
+// converted at all.
+func TestKeptQuotasSkipsABadCard(t *testing.T) {
+	const cards = `{"data":[
+ {"provider":"agy-cli","kind":"subscription","user":"c@example.com","readAt":"2026-11-21T07:58:00Z","windows":[{"name":"Gemini · 5 hours","pool":"Gemini"}]},
+ {"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"2026-11-21T07:58:00Z","windows":[{"name":"5 hours","resetsAt":"2026-11-21T10:00:00Z"}]},
+ {"provider":"codex","kind":"subscription","user":"a@example.com · Team","readAt":"2026-11-21T07:58:00Z","windows":[{"name":"5 hours","used":10,"resetsAt":"2026-11-21T10:00:00Z"}]}]}`
+	_, h := newGateway(t, map[string]string{
+		"GET /v1/magpie/accounts": accountsJSON,
+		"GET /v1/magpie/quotas":   cards,
+	})
+	var logged strings.Builder
+	h.Logger = log.New(&logged, "", 0)
+	for range 2 {
+		got, err := h.KeptQuotas(context.Background())
+		if err != nil || len(got) != 1 || got[0].Pin != "codex/1a2b3c4d5e6f7a8b" {
+			t.Fatalf("kept %+v, %v", got, err)
+		}
+	}
+	// The Claude account is off: only the agy-cli card is logged, once.
+	if lines := strings.Count(logged.String(), "\n"); lines != 1 || !strings.Contains(logged.String(), "agy-cli/ffeeddccbbaa9988") {
+		t.Fatalf("log:\n%s", logged.String())
 	}
 }
 
@@ -177,7 +209,8 @@ const agyRefreshJSON = `{"provider":"agy-cli","name":"Antigravity","user":"c@exa
 
 // Both shapes of an agy-cli card give the groups and window IDs that the
 // history and the settings (hidden_groups, ignition groups) are keyed by;
-// the per-model windows and a pool without a figure are left out.
+// the per-model windows are left out, and a pool without a figure is
+// unread.
 func TestKeptAgyPools(t *testing.T) {
 	at := func(s string) time.Time { v, _ := time.Parse(time.RFC3339, s); return v }
 	answered := at("2026-11-21T08:00:00Z")
@@ -210,43 +243,64 @@ func TestKeptAgyPools(t *testing.T) {
 			t.Errorf("%s: %v, %v\n got %v\nwant %v", name, got.ok, got.err, shape(got.k.Groups), shape(want))
 		}
 		// The Image pool has no figure: its group may still exist.
-		if got.k.Complete || !got.k.ReadAt.Equal(at("2026-11-21T07:58:00Z")) {
-			t.Errorf("%s: complete %v, read at %v", name, got.k.Complete, got.k.ReadAt)
+		if !got.k.Active || !reflect.DeepEqual(got.k.Unread, []string{"antigravity:image-models"}) || !got.k.ReadAt.Equal(at("2026-11-21T07:58:00Z")) {
+			t.Errorf("%s: active %v, unread %v, read at %v", name, got.k.Active, got.k.Unread, got.k.ReadAt)
 		}
 	}
 }
 
-// A card agy did not read (its error) is no reading, neither 0% nor 100%;
-// an earlier reading kept in place of a failed one converts but is not
-// complete; a reading of every pool is.
+// Only Magpie's own new reading of an agy-cli account converts. A card
+// agy did not read (error), and an earlier reading Magpie shows in place
+// of one that failed or was put off (asOf with readError or readDeferred),
+// give none, neither 0% nor 100%: Magpie may show a window of such a card
+// whose reset has passed as unused and without a reset. A pool without a
+// figure is unread, and a card with only such pools gives none.
 func TestKeptAgyStates(t *testing.T) {
 	answered := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
 	used := func(v float64) *float64 { return &v }
 	read := answered.Add(-time.Minute)
 	gemini := []keptWindow{{Name: "Gemini · 5 hours", Pool: "Gemini", Used: used(10)}, {Name: "Gemini · 7 days", Pool: "Gemini", Used: used(5)}}
+	// What Magpie's lastQuotas makes of a failed read: the last good
+	// reading, its passed 5-hour reset dropped and shown unused.
+	fallback := []keptWindow{{Name: "Gemini · 5 hours", Pool: "Gemini", Used: used(0)}, {Name: "Gemini · 7 days", Pool: "Gemini", Used: used(5)}}
+	text := keptWindow{Name: "Claude & GPT · 5 hours", Pool: "Claude & GPT", Text: true}
 	card := func(q keptQuota) keptQuota {
 		q.Provider, q.Kind, q.User = "agy-cli", "subscription", "c@example.com"
 		return q
 	}
 	for name, c := range map[string]struct {
-		q            keptQuota
-		ok, complete bool
+		q      keptQuota
+		ok     bool
+		unread []string
 	}{
-		"due for renewal": {card(keptQuota{Error: "agy's sign-in is due to be renewed, and agy renews it itself on this account's next chat", Windows: []keptWindow{}}), false, false},
-		"still reading":   {card(keptQuota{Error: "agy is still reading this account's quota", Windows: []keptWindow{}, ReadAt: &read}), false, false},
-		"kept reading":    {card(keptQuota{AsOf: &read, ReadError: "agy is still reading this account's quota", Windows: gemini}), true, false},
-		"deferred":        {card(keptQuota{ReadAt: &read, ReadDeferred: true, Windows: gemini}), true, false},
-		"no pool windows": {card(keptQuota{ReadAt: &read, Windows: []keptWindow{{Name: "Gemini 3.1 Pro", Pool: "Gemini", Family: "Gemini", Used: used(1)}}}), false, false},
-		"every pool read": {card(keptQuota{ReadAt: &read, Windows: gemini}), true, true},
+		"due for renewal":         {q: card(keptQuota{Error: "agy's sign-in is due to be renewed, and agy renews it itself on this account's next chat", Windows: []keptWindow{}})},
+		"still reading":           {q: card(keptQuota{Error: "agy is still reading this account's quota", Windows: []keptWindow{}, ReadAt: &read})},
+		"kept after a failure":    {q: card(keptQuota{AsOf: &read, ReadError: "agy is still reading this account's quota", Windows: fallback})},
+		"read error with readAt":  {q: card(keptQuota{ReadAt: &read, ReadError: "agy is still reading this account's quota", Windows: fallback})},
+		"kept after a deferral":   {q: card(keptQuota{AsOf: &read, ReadDeferred: true, Windows: fallback})},
+		"deferred":                {q: card(keptQuota{ReadAt: &read, ReadDeferred: true, Windows: gemini})},
+		"only asOf":               {q: card(keptQuota{AsOf: &read, Windows: gemini})},
+		"no pool windows":         {q: card(keptQuota{ReadAt: &read, Windows: []keptWindow{{Name: "Gemini 3.1 Pro", Pool: "Gemini", Family: "Gemini", Used: used(1)}}})},
+		"only a pool without one": {q: card(keptQuota{ReadAt: &read, Windows: []keptWindow{text}})},
+		"every pool read":         {q: card(keptQuota{ReadAt: &read, Windows: gemini}), ok: true},
+		"a pool without a figure": {q: card(keptQuota{ReadAt: &read, Windows: append(slices.Clone(gemini), text)}), ok: true, unread: []string{"antigravity:claude-and-gpt-models"}},
 	} {
 		k, ok, err := keptOf(c.q, "agy-cli/x", answered)
-		if err != nil || ok != c.ok || k.Complete != c.complete {
-			t.Errorf("%s: ok %v, complete %v, err %v", name, ok, k.Complete, err)
+		if err != nil || ok != c.ok || ok && (!k.Active || !reflect.DeepEqual(k.Unread, c.unread)) {
+			t.Errorf("%s: ok %v, active %v, unread %v, err %v", name, ok, k.Active, k.Unread, err)
 		}
 	}
 	// A pool window without used is a format Lamplighter does not know.
 	if _, _, err := keptOf(card(keptQuota{ReadAt: &read, Windows: []keptWindow{{Name: "5 hours", Pool: "Gemini"}}}), "agy-cli/x", answered); !errors.Is(err, host.ErrFormat) {
 		t.Errorf("pool window without used: err = %v", err)
+	}
+	// A pool without a figure in one window is not read at all.
+	k, ok, err := keptOf(card(keptQuota{ReadAt: &read, Windows: []keptWindow{
+		{Name: "Gemini · 5 hours", Pool: "Gemini", Text: true}, {Name: "Gemini · 7 days", Pool: "Gemini", Used: used(5)},
+		{Name: "Claude & GPT · 7 days", Pool: "Claude & GPT", Used: used(1)},
+	}}), "agy-cli/x", answered)
+	if err != nil || !ok || len(k.Groups) != 1 || k.Groups[0].Key != "antigravity:claude-and-gpt-models" || !reflect.DeepEqual(k.Unread, []string{"antigravity:gemini-models"}) {
+		t.Errorf("half-read pool: %+v, %v, %v", k, ok, err)
 	}
 }
 
@@ -281,7 +335,7 @@ func TestKeptAgyCards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].Pin != "agy-cli/a1a1a1a1a1a1a1a1" || !got[0].Complete || !got[0].ReadAt.Equal(at("2026-11-26T17:33:47.68376168Z")) {
+		if len(got) != 1 || got[0].Pin != "agy-cli/a1a1a1a1a1a1a1a1" || !got[0].Active || len(got[0].Unread) != 0 || !got[0].ReadAt.Equal(at("2026-11-26T17:33:47.68376168Z")) {
 			t.Fatalf("kept %+v", got)
 		}
 		if !reflect.DeepEqual(shape(got[0].Groups), want) {

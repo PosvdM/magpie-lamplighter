@@ -150,15 +150,32 @@ type Engine struct {
 	// keptAt is the time of the last kept quota applied per account.
 	keptAt map[string]time.Time
 	// renewedAt is when a scheduled round last had Magpie refresh the
-	// quota of an account whose token had expired (renewDue).
+	// quota of an account whose token had expired (renewDue), and when
+	// the worker last tried to refresh an account read only from Magpie.
 	renewedAt map[string]time.Time
 	// roundRenewed is set once a scheduled round has had Magpie refresh
-	// one account (renewDue), and roundMagpieRefreshed once it has had
-	// Magpie refresh one account read only from Magpie (magpieRefreshDue).
-	roundRenewed         bool
-	roundMagpieRefreshed bool
+	// one account (renewDue).
+	roundRenewed bool
+	// The refreshes of the accounts read only from Magpie
+	// (agy_refresh.go): agyJobs and agyDoneCh reach the worker of this
+	// run, agyBusy is the job it runs, nil when free; agyStale holds the
+	// accounts a scheduled round found stale, agyManualQ the accounts of
+	// the manual refreshes queued, in order, and agyWaiters the channels
+	// waiting for each account's next result. agyErrs is the error of
+	// each account's last refresh, until one works.
+	agyJobs    chan agyJob
+	agyDoneCh  chan agyDone
+	agyBusy    *agyJob
+	agyStale   map[string]bool
+	agyManualQ []string
+	agyWaiters map[string][]chan error
+	agyErrs    map[string]error
+	// manualWaits get the results of the refreshes a manual refresh
+	// queued, which runCommand waits for until manualEnd.
+	manualWaits []<-chan error
+	manualEnd   time.Time
 	// magpieConfirms are the ignitions whose window the loop still
-	// confirms, by target key (runMagpieConfirms).
+	// confirms, by target key (confirmStep).
 	magpieConfirms map[string]*magpieConfirm
 	// refused holds when the provider refused a model for a quota group,
 	// keyed by group key and model.
@@ -188,6 +205,10 @@ func New(opts Options) *Engine {
 		cfg:            cfg,
 		keptAt:         map[string]time.Time{},
 		renewedAt:      map[string]time.Time{},
+		agyStale:       map[string]bool{},
+		agyWaiters:     map[string][]chan error{},
+		agyErrs:        map[string]error{},
+		magpieConfirms: map[string]*magpieConfirm{},
 		creds:          map[string]*Cred{},
 		groups:         map[string]*GroupView{},
 		plans:          map[string]string{},
@@ -600,6 +621,7 @@ func (e *Engine) run() {
 		<-e.stopCh
 		cancel()
 	}()
+	e.startAgyWorker(ctx)
 
 	now := e.now()
 	nextPoll := now
@@ -636,6 +658,7 @@ func (e *Engine) run() {
 		if cfg.Ignition.Enabled {
 			e.performDue(ctx, cfg)
 		}
+		e.dispatchAgy()
 		if !now.Before(nextPrune) {
 			e.history.Prune(e.now(), time.Duration(cfg.HistoryRetentionDays)*24*time.Hour)
 			nextPrune = e.now().Add(pruneInterval)
@@ -654,7 +677,7 @@ func (e *Engine) run() {
 		e.mu.Unlock()
 
 		wakeAt := now.Add(maxSleep)
-		for _, candidate := range []time.Time{nextPoll, nextKept, nextPrune, e.nextMagpieConfirm()} {
+		for _, candidate := range []time.Time{nextPoll, nextKept, nextPrune, e.nextAgyWake(e.now())} {
 			if !candidate.IsZero() && candidate.Before(wakeAt) {
 				wakeAt = candidate
 			}
@@ -697,6 +720,9 @@ func (e *Engine) run() {
 		case cmd := <-e.cmdCh:
 			timer.Stop()
 			e.runCommand(ctx, cmd)
+		case d := <-e.agyDoneCh:
+			timer.Stop()
+			e.agyFinished(ctx, cfg, d)
 		case <-timer.C:
 		}
 	}

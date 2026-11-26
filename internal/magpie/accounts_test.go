@@ -184,7 +184,7 @@ func TestRefreshQuotaAgyGap(t *testing.T) {
 	const pin = "agy-cli/ffeeddccbbaa9988"
 	ctx := context.Background()
 	k, found, err := h.RefreshKept(ctx, pin)
-	if err != nil || !found || k.Groups[0].Key != "antigravity:gemini-models" || !k.Complete {
+	if err != nil || !found || k.Groups[0].Key != "antigravity:gemini-models" || !k.Active {
 		t.Fatalf("agy refresh: %+v, %v, %v", k, found, err)
 	}
 	last := g.requests[len(g.requests)-1]

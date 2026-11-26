@@ -119,11 +119,16 @@ type KeptQuota struct {
 	Groups []quota.RawGroup
 	// ReadAt is when Magpie took the reading.
 	ReadAt time.Time
-	// Complete is set on a reading of every window of the account: a
-	// group or window missing from it no longer exists. Only an
-	// Antigravity reading whose every pool window has a figure is
-	// complete; the engine applies it as an active query.
-	Complete bool
+	// Active is set on a reading Magpie made of the whole account: a
+	// group missing from it, other than one of Unread, no longer exists,
+	// and the engine applies each of Groups as an active query. Only an
+	// Antigravity reading is active; it has at least one group.
+	Active bool
+	// Unread lists the keys of the groups of an active reading that the
+	// account still has but that the reading gave no figure for, such as
+	// an Antigravity pool agy shows as "Limits not available". The engine
+	// leaves them as they are.
+	Unread []string
 }
 
 // ModelRequest is one ignition request through the Magpie gateway.

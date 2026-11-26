@@ -39,10 +39,13 @@ type Host struct {
 	// Logger receives the log entries; nil writes to standard error.
 	Logger *log.Logger
 
-	// mu guards refreshed, which lives as long as the Host.
+	// mu guards refreshed and cardErrors, which live as long as the Host.
 	mu sync.Mutex
 	// refreshed is the last RefreshQuota attempt of each account pin.
 	refreshed map[string]time.Time
+	// cardErrors is the last error logged for the kept card of each
+	// account pin (noteCardError).
+	cardErrors map[string]string
 	// streams holds the open model streams.
 	streams streams
 }

@@ -131,18 +131,19 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 
 // noteMagpieReading marks the credential problem of cred, an account whose
 // quota is read only from Magpie (providers.MagpieOnly), as changed when
-// Magpie read the account's quota at readAt, after the problem began:
-// Lamplighter reads no credential of such an account to compare
-// fingerprints with. Only a reading of every window (host.KeptQuota
-// Complete), which agy makes with the account's own sign-in, counts: agy
-// reads nothing while its token waits to be renewed or Google refuses the
-// account. Ignition then tries again; see noteFingerprint.
+// Magpie read the account's quota at readAt, after the problem was last
+// found (store.CredentialState LastFailure): Lamplighter reads no
+// credential of such an account to compare fingerprints with. Only
+// Magpie's own new reading (host.KeptQuota Active), which agy makes with
+// the account's own sign-in, reaches here: agy reads nothing while its
+// token waits to be renewed or Google refuses the account. Ignition then
+// tries again; see noteFingerprint.
 func (e *Engine) noteMagpieReading(cred *Cred, readAt time.Time) {
 	if e.state == nil {
 		return
 	}
 	st := e.state.Credentials[cred.AuthIndex]
-	if st == nil || st.Reason == "" || st.Changed || !readAt.After(time.Unix(st.Since, 0)) {
+	if st == nil || st.Reason == "" || st.Changed || !readAt.After(st.LastFailure()) {
 		return
 	}
 	st.Changed = true
@@ -183,6 +184,8 @@ func (e *Engine) noteQueryFailure(ctx context.Context, cred *Cred, fingerprint s
 		return
 	}
 	if st.Reason == d.Reason {
+		st.FailedAt = now
+		e.dirty = true
 		return
 	}
 	if st.QueryReason != d.Reason {
@@ -208,6 +211,7 @@ func (e *Engine) noteCredentialProblem(ctx context.Context, cred *Cred, group st
 	if st.Reason == d.Reason {
 		// An unknown fingerprint stays unknown; see noteFingerprint.
 		st.Fingerprint = fingerprint
+		st.FailedAt = e.now()
 		if source == sourceIgnite {
 			st.Ignited = true
 		}
@@ -218,7 +222,7 @@ func (e *Engine) noteCredentialProblem(ctx context.Context, cred *Cred, group st
 	now := e.now()
 	*st = store.CredentialState{
 		Reason: d.Reason, Status: d.StatusText(), Code: d.Code, Summary: credentialSummary(d), AppealURL: redact.Text(d.AppealURL),
-		Source: source, Group: group, Since: now.Unix(), Fingerprint: fingerprint, Ignited: ignited,
+		Source: source, Group: group, Since: now.Unix(), FailedAt: now, Fingerprint: fingerprint, Ignited: ignited,
 		Notice: noticeProblem, NoticeAt: now.Unix(),
 	}
 	e.publishCredential(cred.AuthIndex, d.Reason)

@@ -326,7 +326,7 @@ func (s *Server) action(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	if errors.Is(err, engine.ErrIgnitionPending) {
+	if errors.Is(err, engine.ErrIgnitionPending) || errors.Is(err, engine.ErrRefreshQueued) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pending": true, "status": s.status()})
 		return
 	}
