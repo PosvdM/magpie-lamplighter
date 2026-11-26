@@ -4834,6 +4834,21 @@
     controls.forEach(function (control) { control.settingsEdit = (control.settingsEdit || 0) + 1; });
   }
 
+  // A save of hidden_groups carries every edit of shownEdits, so once it is
+  // applied, an earlier failed save of another group's edit is done with:
+  // the failure of that group leaves the heading, also when its checkbox
+  // has left the form. An edit changed since the intent took it keeps its
+  // own state.
+  function settleShown(host, intent, input) {
+    if (!host || !host.saveEntries) return;
+    Object.keys(intent.shown).forEach(function (id) {
+      var entry = host.saveEntries.get("shown:" + id);
+      if (!entry || !entry.failure || entry.input === input || shownEdits[id] !== intent.shown[id]) return;
+      entry.owner = null;
+      updateSaveEntry(entry, "saved", translate("save_applied"));
+    });
+  }
+
   // Clear only drafts actually submitted by this save and unchanged since
   // its intent was captured. Independent failures remain owned by their item.
   function refillSaved(intent) {
@@ -4912,7 +4927,11 @@
       });
       return patchConfig(patch).then(function (token) {
         // Once applied, the fields show the values the plugin uses.
-        showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) { if (applied) refillSaved(intent); });
+        showApplied(say, token, /^(mcp_enabled|mcp_key|public_listen|web_enabled|admin_key)$/.test(top)).then(function (applied) {
+          if (!applied) return;
+          if (intent.shown) settleShown(host, intent, input);
+          refillSaved(intent);
+        });
         return rereadConfig();
       }, function (err) {
         say("failed", err.message);

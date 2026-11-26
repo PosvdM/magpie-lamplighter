@@ -94,9 +94,12 @@ type Engine struct {
 	nextPoll           time.Time
 	pollErrs           map[string]string
 	modelsErr          string
-	// hidden is when each quota group of hidden_groups, by config.GroupID,
-	// was last hidden and shown again; see noteHiddenLocked.
-	hidden map[string]hiddenSpan
+	// hidden lists when each quota group of hidden_groups, by
+	// config.GroupID, was hidden and shown again, oldest first; hiddenRead
+	// is the last reading of each quota group key the alerts processed.
+	// See noteHiddenLocked and hiddenStretch.
+	hidden     map[string][]hiddenSpan
+	hiddenRead map[string]time.Time
 	// notifyErr is the reason the webhook settings were not applied.
 	notifyErr string
 	lang      string // notification language, a copy of state.Language
@@ -226,12 +229,16 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	return revision
 }
 
-// hiddenSpan is when a quota group was last hidden, zero when it was
-// hidden in the first config of the process, and when it was then shown
-// again, zero while it is hidden.
+// hiddenSpan is when a quota group was hidden, zero when it was hidden in
+// the first config of the process, and when it was shown again, zero while
+// it is hidden.
 type hiddenSpan struct {
 	from, to time.Time
 }
+
+// hiddenKeep is how long a span shown again is kept: longer than a cycle
+// of the longest window that has reset reminders.
+const hiddenKeep = 8 * 24 * time.Hour
 
 // noteHiddenLocked records when the groups of hidden_groups were hidden
 // and shown again, so that the reminders due in between are not sent
@@ -241,33 +248,52 @@ type hiddenSpan struct {
 // a time unknown.
 func (e *Engine) noteHiddenLocked(was, now []string, first bool) {
 	if e.hidden == nil {
-		e.hidden = map[string]hiddenSpan{}
+		e.hidden = map[string][]hiddenSpan{}
 	}
 	at := e.now()
 	for _, id := range now {
-		if !slices.Contains(was, id) {
-			span := hiddenSpan{from: at}
-			if first {
-				span.from = time.Time{}
-			}
-			e.hidden[id] = span
+		if slices.Contains(was, id) {
+			continue
 		}
+		spans := slices.DeleteFunc(e.hidden[id], func(s hiddenSpan) bool { return !s.to.IsZero() && at.Sub(s.to) > hiddenKeep })
+		span := hiddenSpan{from: at}
+		if first {
+			span.from = time.Time{}
+		}
+		e.hidden[id] = append(spans, span)
 	}
 	for _, id := range was {
-		if span := e.hidden[id]; !slices.Contains(now, id) {
-			span.to = at
-			e.hidden[id] = span
+		if spans := e.hidden[id]; !slices.Contains(now, id) && len(spans) > 0 {
+			spans[len(spans)-1].to = at
 		}
 	}
 }
 
-// groupHiddenSpan returns the hiddenSpan of the quota group sourceLabel of
-// provider, and whether it was hidden in this process.
-func (e *Engine) groupHiddenSpan(provider, sourceLabel string) (hiddenSpan, bool) {
+// hiddenStretch returns, for a reading at now of the quota group key, the
+// quota group sourceLabel of provider, when it was first hidden since the
+// last reading of key the alerts processed, and when it was last shown
+// again, zero while it is hidden; ok reports whether it was hidden in that
+// time. Shown again in between, it counts as hidden all along: the
+// reminders due then are not sent either. The reading is noted as the
+// last one.
+func (e *Engine) hiddenStretch(provider, sourceLabel, key string, now time.Time) (since, shown time.Time, ok bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	span, ok := e.hidden[config.GroupID(provider, sourceLabel)]
-	return span, ok
+	read, seen := e.hiddenRead[key]
+	for _, span := range e.hidden[config.GroupID(provider, sourceLabel)] {
+		if seen && !span.to.IsZero() && !span.to.After(read) {
+			continue
+		}
+		if !ok {
+			since, ok = span.from, true
+		}
+		shown = span.to
+	}
+	if e.hiddenRead == nil {
+		e.hiddenRead = map[string]time.Time{}
+	}
+	e.hiddenRead[key] = now
+	return since, shown, ok
 }
 
 // ConfigurePageState 只更新内存配置中页面自己的状态（见 config.IsPageState），

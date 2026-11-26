@@ -3446,7 +3446,7 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
     closest: () => null, checkValidity: () => true });
   const inputs = [box("antigravity|Gemini", true), box("antigravity|Claude / GPT", false), box("claude|Fable", false)];
   const writes = [], refilled = [];
-  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "settleShown", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
     rawConfig: { hidden_groups: ["codex|Gone", "claude|Fable"] }, status: { config: {} }, shownEdits: {},
     saveHost: () => ({}), claimState: () => () => true,
@@ -3475,7 +3475,7 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
 
 function shownSaveContext(inputs, rawConfig) {
   const writes = [];
-  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "settleShown", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
     rawConfig, status: { config: {} }, shownEdits: {},
     saveHost: () => ({}), claimState: () => () => true,
@@ -3521,7 +3521,7 @@ test("an edit waiting to be saved survives its checkbox going and coming back, a
   list.appendChild = (label) => list.inputs.push(label.children[0]);
   const both = [{ provider: "claude", groups: [{ source_label: "Claude" }, { source_label: "Fable" }] }];
   const writes = [];
-  const ctx = context(["shownGroupChoices", "renderShownGroups", "renderAllShownGroups", "saveField", "captureIntent", "buildPatch", "refillSaved",
+  const ctx = context(["shownGroupChoices", "renderShownGroups", "renderAllShownGroups", "saveField", "captureIntent", "buildPatch", "refillSaved", "settleShown",
     "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     ...dom.globals, status: { accounts: both, config: {} }, shownEdits: {},
     providerList: () => [{ id: "claude" }],
@@ -3556,6 +3556,48 @@ test("an edit waiting to be saved survives its checkbox going and coming back, a
   await settle();
   assert.deepEqual(writes, [{ hidden_groups: ["claude|Fable"] }, { hidden_groups: ["claude|Fable", "claude|Claude"] }]);
   assert.deepEqual(plain(ctx.shownEdits), {});
+});
+
+test("a failed edit of a shown group that a later save applies leaves the heading", async () => {
+  const heading = saveNode("H2");
+  const section = { tagName: "SECTION", querySelector: () => heading };
+  const box = (id) => {
+    const input = saveNode("INPUT", { "data-shown-group": id });
+    Object.assign(input, { type: "checkbox", checked: true, closest: (selector) => selector === ".settings-section" ? section : null });
+    return input;
+  };
+  const inputs = [box("claude|Claude"), box("claude|Fable")];
+  const writes = [];
+  const ctx = stateContext(["saveField", "captureIntent", "buildPatch", "refillSaved", "settleShown", "noteEdit", "inputTop", "topKey", "setPath", "rereadConfig", "hiddenList"], {
+    $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(), rawConfig: {}, status: { config: {} }, shownEdits: {},
+    saveItemLabel: (input) => input.getAttribute("data-shown-group"),
+    patchConfig: async (patch) => {
+      writes.push(plain(patch));
+      if (writes.length === 1) throw new Error("offline");
+      Object.assign(ctx.rawConfig, patch);
+      return "token";
+    },
+    showApplied: async (say) => { say("saved", "applied"); return true; },
+    loadConfig: async () => {}, fillSettings: () => {}, renderIgnitionOff: () => {},
+  });
+  vm.runInContext(pageVar("PUBLIC_URL_TRIM"), ctx);
+  const state = () => heading.children[0].getAttribute("data-state");
+  const fable = inputs[1];
+  fable.checked = false;
+  ctx.saveField({ target: fable });
+  await ctx.saveQueue;
+  assert.equal(state(), "failed");
+  assert.match(heading.textContent, /claude\|Fable save failed: offline/);
+  // Fable's checkbox leaves the form; hiding Claude saves Fable's draft too.
+  inputs.splice(1, 1);
+  inputs[0].checked = false;
+  ctx.saveField({ target: inputs[0] });
+  await ctx.saveQueue;
+  await settle();
+  assert.deepEqual(writes.at(-1), { hidden_groups: ["claude|Fable", "claude|Claude"] });
+  assert.equal(state(), "saved");
+  assert.doesNotMatch(heading.textContent, /failed/);
+  assert.equal(fable.hasAttribute("aria-invalid"), false);
 });
 
 test("the shown groups have their text in both languages", () => {

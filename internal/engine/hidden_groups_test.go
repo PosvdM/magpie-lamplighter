@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PosvdM/magpie-lamplighter/internal/config"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
 )
 
@@ -81,11 +82,11 @@ func TestShownGroupSkipsReminderDueWhileHidden(t *testing.T) {
 	// an hour after that, and read an hour later still.
 	c.t = reset.Add(-23 * time.Hour)
 	e.Configure(shown, nil)
-	if span, ok := e.groupHiddenSpan("antigravity", "Gemini"); !ok || !span.to.Equal(c.t) || !span.from.Before(span.to) {
-		t.Fatalf("want when the group was hidden and shown, got %+v", span)
+	if spans := e.hidden["antigravity|Gemini"]; len(spans) != 1 || !spans[0].to.Equal(c.t) || !spans[0].from.Before(spans[0].to) {
+		t.Fatalf("want when the group was hidden and shown, got %+v", spans)
 	}
-	if _, ok := e.groupHiddenSpan("antigravity", "Claude / GPT"); ok {
-		t.Fatal("a group that was not hidden has no span")
+	if spans := e.hidden["antigravity|Claude / GPT"]; spans != nil {
+		t.Fatalf("a group that was not hidden has no span, got %+v", spans)
 	}
 	c.t = reset.Add(-22 * time.Hour)
 	read()
@@ -127,28 +128,82 @@ func TestReminderDueBeforeHidingIsSent(t *testing.T) {
 }
 
 func TestHiddenSpans(t *testing.T) {
-	at := time.Date(2026, 11, 26, 4, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 11, 26, 3, 55, 0, 0, time.UTC)
 	e := &Engine{now: func() time.Time { return at }}
+	step := func(d time.Duration, was, now []string) {
+		at = at.Add(d)
+		e.noteHiddenLocked(was, now, false)
+	}
+	want := func(key string, since, shown time.Time) {
+		t.Helper()
+		got, gotShown, ok := e.hiddenStretch("a", "A", key, at)
+		if !ok || !got.Equal(since) || !gotShown.Equal(shown) {
+			t.Fatalf("%s at %v: got %v to %v (%v), want %v to %v", key, at.Format("15:04"), got, gotShown, ok, since, shown)
+		}
+	}
+	start := at
+	// Hidden 03:55 to 04:05 and 04:10 to 04:15 without a reading between:
+	// the first time it was hidden holds.
+	e.noteHiddenLocked(nil, []string{"a|A"}, false)
+	step(10*time.Minute, []string{"a|A"}, nil)
+	step(5*time.Minute, nil, []string{"a|A"})
+	step(5*time.Minute, []string{"a|A"}, nil)
+	if spans := e.hidden["a|A"]; len(spans) != 2 {
+		t.Fatalf("want both spans, got %+v", spans)
+	}
+	at = at.Add(5 * time.Minute)
+	want("a:1", start, start.Add(20*time.Minute))
+	// Read since, the key only counts the spans after its reading; another
+	// key of the group, not read yet, still counts both.
+	step(5*time.Minute, nil, []string{"a|A"})
+	want("a:1", at, time.Time{})
+	want("a:2", start, time.Time{})
+	if _, _, ok := e.hiddenStretch("b", "B", "b:1", at); ok {
+		t.Fatal("a group never hidden has no stretch")
+	}
 	// The groups of the first config are hidden since a time unknown.
-	e.noteHiddenLocked(nil, []string{"a|A"}, true)
-	if span := e.hidden["a|A"]; !span.from.IsZero() || !span.to.IsZero() {
-		t.Fatalf("first config: %+v", span)
+	e.noteHiddenLocked(nil, []string{"c|C"}, true)
+	if spans := e.hidden["c|C"]; len(spans) != 1 || !spans[0].from.IsZero() {
+		t.Fatalf("first config: %+v", spans)
 	}
-	at = at.Add(time.Minute)
-	e.noteHiddenLocked([]string{"a|A"}, []string{"b|B"}, false)
-	if span := e.hidden["a|A"]; !span.from.IsZero() || !span.to.Equal(at) {
-		t.Fatalf("shown again: %+v", span)
+	// Spans shown again long ago are dropped when the group is hidden anew.
+	step(time.Minute, []string{"a|A"}, nil)
+	step(hiddenKeep+time.Minute, nil, []string{"a|A"})
+	if spans := e.hidden["a|A"]; len(spans) != 1 || !spans[0].from.Equal(at) {
+		t.Fatalf("want only the new span, got %+v", spans)
 	}
-	if span := e.hidden["b|B"]; !span.from.Equal(at) || !span.to.IsZero() {
-		t.Fatalf("hidden: %+v", span)
+}
+
+// Hidden twice without a reading between, the reminder due in the first
+// time it was hidden is not sent after the second.
+func TestReminderDueWhileHiddenTwiceIsNotSent(t *testing.T) {
+	c := &clock{t: time.Unix(geminiReadings[0].at, 0).In(shanghai)}
+	e, sender := newTestEngine(t, standardHost(c), c)
+	if _, err := e.loadCreds(context.Background(), e.config()); err != nil {
+		t.Fatal(err)
 	}
-	// Hidden again, the group starts a new span.
-	at = at.Add(time.Minute)
-	e.noteHiddenLocked([]string{"b|B"}, []string{"a|A", "b|B"}, false)
-	if span := e.hidden["a|A"]; !span.from.Equal(at) || !span.to.IsZero() {
-		t.Fatalf("hidden again: %+v", span)
+	cred := e.creds["4"]
+	reset := c.t.Add(25 * time.Hour)
+	read := func() {
+		windows := []quota.Window{{ID: "gemini-weekly", Label: quota.LabelSevenDay, Remaining: 80, Reset: reset}}
+		e.applyGroups(context.Background(), e.config(), cred, []quota.RawGroup{{Key: "antigravity:gemini-models", SourceLabel: "Gemini", Windows: windows}}, quota.SourceActive, c.t, c.t, true)
 	}
-	if span := e.hidden["b|B"]; !span.to.IsZero() {
-		t.Fatalf("still hidden: %+v", span)
+	shown := e.config()
+	hidden := shown
+	hidden.HiddenGroups = []string{"antigravity|Gemini"}
+	read()
+	// The 24-hour reminder comes due at 24h before the reset, inside the
+	// first span.
+	for _, at := range []struct {
+		d   time.Duration
+		cfg config.Config
+	}{{-24*time.Hour - 5*time.Minute, hidden}, {-24*time.Hour + 5*time.Minute, shown}, {-24*time.Hour + 10*time.Minute, hidden}, {-24*time.Hour + 15*time.Minute, shown}} {
+		c.t = reset.Add(at.d)
+		e.Configure(at.cfg, nil)
+	}
+	c.t = reset.Add(-24*time.Hour + 20*time.Minute)
+	read()
+	if len(sender.sent) != 0 {
+		t.Fatalf("the reminder due while hidden must not be sent: %+v", sender.sent)
 	}
 }

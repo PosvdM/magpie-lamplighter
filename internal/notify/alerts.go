@@ -55,9 +55,9 @@ type Group struct {
 	// delivered, and so do the reminders due since HiddenSince, so showing
 	// the group again sends nothing from the time it was hidden.
 	Hidden bool
-	// HiddenSince is when the group was last hidden, zero when that is not
-	// known, and Shown when it was then shown again, zero while it is
-	// hidden or was never. Reset reminders due in between came due while
+	// HiddenSince is when the group was first hidden since its previous
+	// reading, zero when that is not known, and Shown when it was last
+	// shown again, zero while it is hidden or was never. Reset reminders due in between came due while
 	// it was hidden, also when no reading came in that time; they are
 	// marked sent without being sent. A reminder due before HiddenSince
 	// and not sent yet waits until the group shows again.
