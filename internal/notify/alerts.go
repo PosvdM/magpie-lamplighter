@@ -54,6 +54,11 @@ type Group struct {
 	// as if they were delivered, so showing the group again sends nothing
 	// from the time it was hidden.
 	Hidden bool
+	// Shown is when the group was last shown again after it was hidden.
+	// Reset reminders due by then came due while it was hidden, also when
+	// no reading came in that time; they are marked sent without being
+	// sent.
+	Shown time.Time
 }
 
 // Alerts turns quota changes into notifications.
@@ -567,7 +572,13 @@ func (a *Alerts) ProcessGroup(ctx context.Context, st *store.State, g Group, now
 		mode := a.Cfg.ResetReminder.For(sevenDay)
 		if resetValue != "" && mode != config.ReminderOff &&
 			(mode == config.ReminderAll || w.Remaining > math.Max(a.Cfg.CriticalThreshold, ExhaustedRemaining)) {
-			if keys := dueReminders(old, a.Cfg.ResetReminderHours.For(sevenDay), resetValue, w.Reset.Sub(now)); len(keys) > 0 {
+			hours := a.Cfg.ResetReminderHours.For(sevenDay)
+			if !g.Shown.IsZero() && g.Shown.Before(now) {
+				if keys := dueReminders(old, hours, resetValue, w.Reset.Sub(g.Shown)); len(keys) > 0 {
+					recordReminders(old, reminder{window: w, reset: resetValue, keys: keys})
+				}
+			}
+			if keys := dueReminders(old, hours, resetValue, w.Reset.Sub(now)); len(keys) > 0 {
 				reminders = append(reminders, reminder{window: w, reset: resetValue, keys: keys})
 			}
 		}

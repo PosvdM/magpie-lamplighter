@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -93,6 +94,9 @@ type Engine struct {
 	nextPoll           time.Time
 	pollErrs           map[string]string
 	modelsErr          string
+	// shownAt is when each quota group of hidden_groups was last shown
+	// again, by config.GroupID. Reminders due before then are not sent.
+	shownAt map[string]time.Time
 	// notifyErr is the reason the webhook settings were not applied.
 	notifyErr string
 	lang      string // notification language, a copy of state.Language
@@ -213,12 +217,37 @@ func (e *Engine) Configure(cfg config.Config, parseErr error) uint64 {
 	}
 	e.cfgRevision++
 	revision := e.cfgRevision
+	e.noteShownLocked(e.cfg.HiddenGroups, cfg.HiddenGroups)
 	e.cfg = cfg
 	e.cfgErr = ""
 	e.withdrawLocked()
 	e.mu.Unlock()
 	e.wake()
 	return revision
+}
+
+// noteShownLocked records the groups that were hidden and are not any
+// more. The time is taken when the config is received, not when a round
+// applies it: readings in between, also passive ones read with the new
+// config, must not send what came due while the group was hidden.
+func (e *Engine) noteShownLocked(was, now []string) {
+	for _, id := range was {
+		if slices.Contains(now, id) {
+			continue
+		}
+		if e.shownAt == nil {
+			e.shownAt = map[string]time.Time{}
+		}
+		e.shownAt[id] = e.now()
+	}
+}
+
+// groupShown returns when the quota group sourceLabel of provider was last
+// shown again after it was hidden, zero when it was not in this process.
+func (e *Engine) groupShown(provider, sourceLabel string) time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.shownAt[config.GroupID(provider, sourceLabel)]
 }
 
 // ConfigurePageState 只更新内存配置中页面自己的状态（见 config.IsPageState），

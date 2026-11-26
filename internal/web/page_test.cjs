@@ -3204,10 +3204,8 @@ test("a hidden quota group has no chart rows, total or table rows, also from his
   const rows = ctx.chartRows();
   assert.deepEqual(plain(rows.map((r) => r.id)), ["claude:3:claude|five-hour", "antigravity:4:gemini|five-hour"]);
   assert.equal(rows.some((r) => r.children), false);
-  // The detail of a hidden row is not found, so drawChart selects the first row.
+  // The detail of a hidden row is not found; hiddenChartContext draws it.
   assert.equal(ctx.findRow(rows, "group:antigravity|Claude / GPT"), null);
-  assert.match(source, /if \(!findRow\(rows, chartSelected\)\) chartSelected = rows\[0\]\.id;/);
-  assert.match(source, /renderChartTable\(rows\);/);
   // Shown again, the rows come back with their history.
   ctx.status.config = {};
   ctx.chartSort = "default";
@@ -3222,6 +3220,28 @@ test("a hidden quota group has no chart rows, total or table rows, also from his
   assert.deepEqual(plain(ctx.windowKinds()), ["5h"]);
   ctx.status.config = {};
   assert.deepEqual(plain(ctx.windowKinds()), ["5h", "7d"]);
+  // Every window known is of a hidden group: no window is offered, also
+  // with history of hidden groups alone.
+  ctx.status = { config: { hidden_groups: ["antigravity|Claude / GPT"] }, accounts: [{ provider: "antigravity", groups: [
+    { source_label: "Claude / GPT", windows: [{ kind: "5h" }, { kind: "7d" }] },
+  ] }] };
+  assert.deepEqual(plain(ctx.windowKinds()), []);
+  ctx.status.accounts = [];
+  const cg = { ...ctx.history, series: ctx.history.series.filter((x) => x.source_label === "Claude / GPT") };
+  ctx.historyCache[ctx.historyKey("5h", "6h")] = { data: cg };
+  assert.deepEqual(plain(ctx.windowKinds()), []);
+  // History of a group shown offers its kind.
+  ctx.status.config = {};
+  assert.deepEqual(plain(ctx.windowKinds()), ["5h"]);
+  // None known: both.
+  ctx.historyCache = {};
+  assert.deepEqual(plain(ctx.windowKinds()), ["5h", "7d"]);
+  // Without a window to offer, the buttons hide and the chosen one stays.
+  const buttons = ["5h", "7d"].map((value) => ({ hidden: false, getAttribute: () => value }));
+  const bar = context(["renderWindowButtons"], { windowKinds: () => [], chartWindow: "7d", $: () => ({ querySelectorAll: () => buttons }) });
+  assert.equal(bar.renderWindowButtons(), false);
+  assert.equal(bar.chartWindow, "7d");
+  assert.deepEqual(buttons.map((b) => b.hidden), [true, true]);
 });
 
 test("the chart is drawn again when hidden_groups changes", () => {
@@ -3245,6 +3265,114 @@ test("the chart is drawn again when hidden_groups changes", () => {
   assert.equal(drawn, 1);
   assert.equal(ctx.chartBehind, true);
   assert.match(source.match(/  function renderStatus\(\) \{[^]*?\n  \}/)[0], /renderHiddenChange\(\);/);
+});
+
+// The chart drawn by drawChart into recording nodes, masked and with both
+// remember switches on, over the rows of two Antigravity accounts.
+function hiddenChartContext() {
+  const now = 1795280000;
+  const node = (tag, attrs = {}) => ({
+    tag, attrs: { ...attrs }, children: [], text: attrs.text || "", style: {}, hidden: false, clientWidth: 900,
+    classList: { toggle() {}, add() {}, remove() {} },
+    setAttribute(name, value) { this.attrs[name] = value; }, getAttribute(name) { return this.attrs[name] ?? null; },
+    appendChild(child) { this.children.push(child); return child; },
+    get textContent() { return this.text + this.children.map((c) => c.textContent).join(""); },
+    set textContent(value) { this.text = String(value); this.children = []; },
+    addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; },
+  });
+  const nodes = {};
+  ["chart", "chart-detail-head", "chart-detail", "legend-estimated", "chart-table", "chart-detail-wrap", "legend-projection"].forEach((id) => { nodes[id] = node("div", { id }); });
+  const win = (remaining) => [{ id: "five-hour", kind: "5h", short: "5h", remaining, reset: "" }];
+  const status = { accounts: [
+    { auth_index: "4", provider: "antigravity", title: "Antigravity#am", email: "am@example.com", groups: [
+      { key: "antigravity:4:gemini", label: "Gemini#am", source_label: "Gemini", windows: win(90) },
+      { key: "antigravity:4:cg", label: "Claude / GPT#am", source_label: "Claude / GPT", windows: win(65) },
+    ] },
+    { auth_index: "5", provider: "antigravity", title: "Antigravity#b2", email: "b2@example.com", groups: [{ key: "antigravity:5:cg", label: "Claude / GPT#b2", source_label: "Claude / GPT", windows: win(20) }] },
+  ], group_order: [], config: {} };
+  const series = (s, value) => ({ ...s, provider: "antigravity", window: "five-hour", window_label: "5h", kind: "5h", points: [[now - 600, value], [now, value]], resets: [] });
+  const history = { from: new Date((now - 6 * 3600) * 1000).toISOString(), to: new Date(now * 1000).toISOString(), events: [], series: [
+    series({ group: "antigravity:4:gemini", label: "Gemini#am", source_label: "Gemini", auth_index: "4" }, 90),
+    series({ group: "antigravity:4:cg", label: "Claude / GPT#am", source_label: "Claude / GPT", auth_index: "4" }, 65),
+    series({ group: "antigravity:5:cg", label: "Claude / GPT#b2", source_label: "Claude / GPT", auth_index: "5" }, 20),
+  ] };
+  const state = pageStateContext({ filters: true, expanded: true }, {
+    status, history, chartSelected: "", hoverListeners: [], snapPoints: [], historyLoading: "", historyFailed: "",
+    historyWindow: "5h", historyRange: "6h", RESET_JUMP: 5, SENSITIVE: "account-sensitive", historyCache: {},
+    gapLimit: () => 900, pooled: () => [], fitName: (name) => name,
+    providerTitle: (id) => ({ antigravity: "Antigravity" })[id] || id, providerList: () => [{ id: "antigravity", title: "Antigravity" }],
+    translate: (key, ...args) => [key, ...args].join(" "),
+    el: (tag, attrs = {}, children = []) => {
+      const n = node(tag, attrs);
+      children.filter((c) => c != null).forEach((c) => n.appendChild(typeof c === "string" ? { textContent: c } : c));
+      return n;
+    },
+    svg: (tag, attrs) => node(tag, attrs),
+    document: { createTextNode: (text) => ({ textContent: text }), activeElement: null },
+    clear: (n) => { n.textContent = ""; },
+  });
+  const { ctx } = state;
+  ctx.$ = (id) => id === "settings" ? { elements: state.form } : (nodes[id] = nodes[id] || node("div", { id }));
+  for (const name of ["drawChart", "renderOverview", "renderDetail", "renderChartTable", "svgText", "svgSensitive", "maskedNodes", "hasSecret", "accountSecrets",
+    "accountAlias", "findRow", "chartRows", "hiddenGroups", "groupHidden", "sharedGroups", "servicePrefix", "serviceShort", "shortPrefix", "groupName",
+    "groupTitle", "windowKind", "historyKey", "recentSamples", "cycleFloor", "accountWeight", "pooledRow", "parseTime"]) {
+    vm.runInContext(source.match(new RegExp("  function " + name + "\\([^]*?\\n  }"))[0], ctx);
+  }
+  vm.runInContext(pageVar("SERVICE_SHORT"), ctx);
+  const texts = (n, out = []) => { if (n.tag === "text") out.push(n); (n.children || []).forEach((c) => texts(c, out)); return out; };
+  const find = (n, pred, out = []) => { if (pred(n)) out.push(n); (n.children || []).forEach((c) => find(c, pred, out)); return out; };
+  return { ...state, nodes, texts, find, draw: () => runStubbed(ctx, () => ctx.drawChart()) };
+}
+
+test("hiding the detail row while masked and remembering selects the first row shown, still masked", async () => {
+  const { ctx, nodes, texts, find, draw, writes } = hiddenChartContext();
+  ctx.restorePageState({ mask_accounts: true });
+  ctx.restoreChartState({ remember_chart_filters: true, remember_chart_expanded: true,
+    chart_view: { window: "5h", sort: "default", ranges: { "5h": "6h" } }, chart_expanded: ["antigravity|Claude / GPT"] });
+  ctx.chartSelected = "group:antigravity|Claude / GPT";
+  draw();
+  assert.equal(ctx.chartSelected, "group:antigravity|Claude / GPT");
+  assert.match(nodes["chart-detail-head"].textContent, /Claude \/ GPT · quota_5h/);
+
+  ctx.status.config = { hidden_groups: ["antigravity|Claude / GPT"] };
+  draw();
+  assert.equal(ctx.chartSelected, "antigravity:4:gemini|five-hour");
+  assert.equal(ctx.masked, true);
+  // The detail of the first row shown names it with the account suffix in
+  // a masked span, and the chart's label speaks of the account by number.
+  const head = nodes["chart-detail-head"];
+  assert.match(head.textContent, /^Antigravity · Gemini#am · quota_5h/);
+  assert.deepEqual(find(head, (n) => n.attrs && n.attrs.class === "account-sensitive").map((n) => n.textContent), ["#am"]);
+  const detail = find(nodes["chart-detail"], (n) => n.tag === "svg")[0];
+  assert.doesNotMatch(detail.attrs["aria-label"], /#am/);
+  // The overview has no Claude / GPT row; its name is blurred.
+  const names = texts(nodes.chart).filter((t) => t.attrs.class === "row-name" && t.textContent !== "ignition_lane");
+  assert.deepEqual(names.map((t) => [t.textContent, t.attrs.filter]), [["Antigravity · Gemini#am", "url(#mask-blur)"]]);
+  assert.doesNotMatch(nodes["chart-table"].textContent, /Claude \/ GPT/);
+  // The hidden group stays expanded in the remembered state, unsaved.
+  await settle();
+  assert.equal(ctx.chartExpanded["group:antigravity|Claude / GPT"], true);
+  assert.deepEqual(writes, []);
+});
+
+test("a remembered expanded total shown again is drawn expanded", async () => {
+  const { ctx, nodes, texts, draw, writes } = hiddenChartContext();
+  ctx.status.config = { hidden_groups: ["antigravity|Claude / GPT"] };
+  ctx.restorePageState({ mask_accounts: true });
+  ctx.restoreChartState({ remember_chart_filters: true, remember_chart_expanded: true, chart_expanded: ["antigravity|Claude / GPT"] });
+  draw();
+  const rowNames = () => texts(nodes.chart).filter((t) => t.attrs.class === "row-name" && t.textContent !== "ignition_lane").map((t) => t.textContent);
+  assert.deepEqual(rowNames(), ["Antigravity · Gemini#am"]);
+  ctx.status.config = {};
+  draw();
+  // The total comes back with the rows of its accounts below it.
+  assert.deepEqual(rowNames(), ["Antigravity · Gemini#am", "Antigravity · Claude / GPT", "am@example.com", "b2@example.com"]);
+  assert.ok(texts(nodes.chart).some((t) => t.textContent === "▾"));
+  // Still masked: the account rows are blurred.
+  assert.deepEqual(texts(nodes.chart).filter((t) => /@example\.com$/.test(t.textContent)).map((t) => t.attrs.filter), ["url(#mask-blur)", "url(#mask-blur)"]);
+  assert.equal(ctx.chartSelected, "antigravity:4:gemini|five-hour");
+  await settle();
+  assert.deepEqual(writes, []);
 });
 
 // A box of "Quota groups shown" with the inputs it holds.
@@ -3318,7 +3446,7 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
     closest: () => null, checkValidity: () => true });
   const inputs = [box("antigravity|Gemini", true), box("antigravity|Claude / GPT", false), box("claude|Fable", true)];
   const writes = [], refilled = [];
-  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig"], {
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
     $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
     rawConfig: { hidden_groups: ["codex|Gone", "claude|Fable"] }, status: { config: {} },
     saveHost: () => ({}), claimState: () => () => true,
@@ -3326,6 +3454,7 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
     loadConfig: async () => {}, showApplied: async () => true,
     fillSettings: (keys) => refilled.push(plain(keys)), renderIgnitionOff: () => {},
   });
+  vm.runInContext(pageVar("PUBLIC_URL_TRIM"), ctx);
   assert.equal(ctx.inputTop(inputs[1]), "hidden_groups");
   inputs[1].settingsDirty = true;
   ctx.saveField({ target: inputs[1] });
@@ -3340,6 +3469,48 @@ test("the shown groups save as hidden_groups, keeping hidden groups the page doe
   ctx.saveField({ target: inputs[1] });
   await ctx.saveQueue;
   assert.deepEqual(writes.at(-1), { hidden_groups: null });
+});
+
+function shownSaveContext(inputs, rawConfig) {
+  const writes = [];
+  const ctx = context(["saveField", "captureIntent", "buildPatch", "refillSaved", "noteEdit", "inputTop", "topKey", "setPath", "saveControls", "rereadConfig", "hiddenList"], {
+    $: () => ({ elements: inputs }), THRESHOLDS: [], saveQueue: Promise.resolve(),
+    rawConfig, status: { config: {} },
+    saveHost: () => ({}), claimState: () => () => true,
+    patchConfig: async (patch) => { writes.push(plain(patch)); Object.assign(ctx.rawConfig, patch); return "token"; },
+    loadConfig: async () => {}, showApplied: async () => true,
+    fillSettings: () => {}, renderIgnitionOff: () => {},
+  });
+  vm.runInContext(pageVar("PUBLIC_URL_TRIM"), ctx);
+  return { ctx, writes };
+}
+const shownBox = (id, checked) => ({ type: "checkbox", name: "", checked, value: "on", attrs: { "data-shown-group": id },
+  getAttribute(name) { return this.attrs[name] ?? null; }, hasAttribute(name) { return name in this.attrs; },
+  closest: () => null, checkValidity: () => true });
+
+test("a hidden group written by hand with spaces or twice is shown again by its checkbox", async () => {
+  // The checkbox shows the applied list, where " claude|Fable" is "claude|Fable".
+  const inputs = [shownBox("claude|Claude", true), shownBox("claude|Fable", true)];
+  const { ctx, writes } = shownSaveContext(inputs, { hidden_groups: [" claude|Fable", "claude|Fable\u3000", "", 7, "antigravity|Gemini", "antigravity|Gemini"] });
+  ctx.saveField({ target: inputs[1] });
+  await ctx.saveQueue;
+  assert.deepEqual(writes.at(-1), { hidden_groups: ["antigravity|Gemini"] });
+  assert.deepEqual(plain(ctx.hiddenList([" a|b ", "a|b", "", "  ", null, "c|d"])), ["a|b", "c|d"]);
+});
+
+test("a queued save of hidden_groups keeps a checkbox that left the form meanwhile", async () => {
+  const inputs = [shownBox("claude|Claude", true), shownBox("claude|Fable", false)];
+  const { ctx, writes } = shownSaveContext(inputs, {});
+  let release;
+  ctx.saveQueue = new Promise((resolve) => { release = resolve; });
+  inputs[1].settingsDirty = true;
+  ctx.saveField({ target: inputs[1] });
+  // While the save waits, the only account reporting Fable goes and the
+  // refill drops its checkbox.
+  inputs.splice(1, 1);
+  release();
+  await ctx.saveQueue;
+  assert.deepEqual(writes, [{ hidden_groups: ["claude|Fable"] }]);
 });
 
 test("the shown groups have their text in both languages", () => {

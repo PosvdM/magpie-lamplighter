@@ -60,3 +60,41 @@ func TestHiddenGroupNeedsNoSender(t *testing.T) {
 		t.Fatalf("the hidden alert counts as done, got %q", got)
 	}
 }
+
+func TestShownGroupSkipsRemindersDueWhileHidden(t *testing.T) {
+	cfg := config.Default()
+	cfg.ResetReminder.FiveHour = config.ReminderAll
+	cfg.ResetReminderHours.FiveHour = []float64{1, 0.5}
+	sender := &fakeSender{}
+	st := store.NewState()
+	a := alerts(cfg, sender)
+	reset := time.Date(2026, 11, 26, 5, 0, 0, 0, time.UTC)
+	g := fiveHour(80, reset)
+	g.Hidden = true
+	a.ProcessGroup(context.Background(), st, g, reset.Add(-3*time.Hour))
+	a.ProcessGroup(context.Background(), st, g, reset.Add(-2*time.Hour))
+	// The 1-hour reminder comes due at 04:00 with no reading; the group is
+	// shown again at 04:10, and the next reading comes at 04:15.
+	g.Hidden = false
+	g.Shown = reset.Add(-50 * time.Minute)
+	a.ProcessGroup(context.Background(), st, g, reset.Add(-45*time.Minute))
+	if len(sender.sent) != 0 {
+		t.Fatalf("the reminder due while hidden must not be sent: %+v", sender.sent)
+	}
+	if got := st.Groups["g"].Windows["five-hour"].ResetNotices["1"]; got != formatReset(reset) {
+		t.Fatalf("the reminder due while hidden counts as sent, got %q", got)
+	}
+	// The half-hour reminder comes due after the group was shown.
+	a.ProcessGroup(context.Background(), st, g, reset.Add(-25*time.Minute))
+	if len(sender.sent) != 1 || !strings.HasPrefix(sender.sent[0].Title, "⏰") {
+		t.Fatalf("want the reminder due after the group was shown, got %+v", sender.sent)
+	}
+	// In the next cycle the time it was shown holds nothing back.
+	next := reset.Add(5 * time.Hour)
+	g.Windows = fiveHour(80, next).Windows
+	a.ProcessGroup(context.Background(), st, g, reset.Add(time.Minute))
+	a.ProcessGroup(context.Background(), st, g, next.Add(-55*time.Minute))
+	if len(sender.sent) != 2 {
+		t.Fatalf("want the reminder of the next cycle, got %+v", sender.sent)
+	}
+}

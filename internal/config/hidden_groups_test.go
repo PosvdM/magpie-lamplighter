@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -68,5 +69,30 @@ func TestHiddenGroupsAreWrittenOnlyWhenSet(t *testing.T) {
 	}
 	if _, ok := store.Raw()["hidden_groups"]; ok {
 		t.Fatalf("hidden_groups still saved: %s", store.Raw())
+	}
+	// A list that parses empty deletes the key too; others are saved as
+	// they are read.
+	for _, tc := range []struct{ patch, want string }{
+		{`[" claude|Fable ", "", "claude|Fable", "antigravity|Gemini"]`, `["claude|Fable","antigravity|Gemini"]`},
+		{`[]`, ""},
+		{`["claude|Fable"]`, `["claude|Fable"]`},
+		{`["  ", ""]`, ""},
+	} {
+		if _, err := store.Patch(map[string]json.RawMessage{"hidden_groups": json.RawMessage(tc.patch)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(store.Raw()["hidden_groups"]); got != tc.want {
+			t.Fatalf("patch %s saved %q, want %q", tc.patch, got, tc.want)
+		}
+		file, err := os.ReadFile(store.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.want == "" && bytes.Contains(file, []byte(`"hidden_groups"`)) {
+			t.Fatalf("patch %s left hidden_groups in the file: %s", tc.patch, file)
+		}
+	}
+	if _, err := store.Patch(map[string]json.RawMessage{"hidden_groups": json.RawMessage(`"claude|Fable"`)}); err == nil {
+		t.Fatal("hidden_groups must be a list")
 	}
 }

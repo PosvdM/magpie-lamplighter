@@ -1701,6 +1701,20 @@
     return out;
   }
 
+  // list, a saved hidden_groups, as config.Parse reads it: its strings
+  // trimmed of the white space strings.TrimSpace trims (PUBLIC_URL_TRIM),
+  // without empty ones and duplicates. A list written by hand may differ
+  // from the applied one the checkboxes show.
+  function hiddenList(list) {
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (id) {
+      if (typeof id !== "string") return;
+      id = id.replace(PUBLIC_URL_TRIM, "");
+      if (id && out.indexOf(id) < 0) out.push(id);
+    });
+    return out;
+  }
+
   function groupHidden(hidden, provider, sourceLabel) {
     return !!sourceLabel && hidden[provider + "|" + sourceLabel] === true;
   }
@@ -2491,39 +2505,48 @@
   function windowKind(series) { return series.kind || ""; }
 
   // The chart offers the window kinds the accounts report, and those whose
-  // loaded history still has a sample in the range of an inactive window;
-  // both while none are known.
+  // loaded history still has a sample in the range of an inactive window,
+  // leaving out hidden quota groups; both while none are known, and none
+  // while all that are known belong to hidden groups.
   function windowKinds() {
-    var seen = {}, hidden = hiddenGroups();
+    var seen = {}, known = false, hidden = hiddenGroups();
     (status.accounts || []).forEach(function (a) {
       (a.groups || []).forEach(function (g) {
-        if (groupHidden(hidden, a.provider, g.source_label)) return;
-        (g.windows || []).forEach(function (w) { if (w.kind) seen[w.kind] = true; });
+        (g.windows || []).forEach(function (w) {
+          if (!w.kind) return;
+          known = true;
+          if (!groupHidden(hidden, a.provider, g.source_label)) seen[w.kind] = true;
+        });
       });
     });
     ["5h", "7d"].forEach(function (kind) {
       var cached = historyCache[historyKey(kind, kind === chartWindow ? range : rangeFor(kind))];
-      if (!seen[kind] && cached && recentSamples(cached.data, kind)) seen[kind] = true;
+      if (seen[kind] || !cached) return;
+      if (recentSamples(cached.data, kind, hidden)) seen[kind] = true;
+      else if (recentSamples(cached.data, kind, {})) known = true;
     });
     var kinds = ["5h", "7d"].filter(function (k) { return seen[k]; });
-    return kinds.length ? kinds : ["5h", "7d"];
+    return kinds.length || known ? kinds : ["5h", "7d"];
   }
 
-  function recentSamples(data, kind) {
-    var from = new Date(data.from).getTime() / 1000, hidden = hiddenGroups();
+  // Whether data has a sample in its range of a window of kind, leaving out
+  // the quota groups of hidden.
+  function recentSamples(data, kind, hidden) {
+    var from = new Date(data.from).getTime() / 1000;
     return (data.series || []).some(function (s) {
       return windowKind(s) === kind && !groupHidden(hidden, s.provider, s.source_label) && s.points && s.points.length && s.points[s.points.length - 1][0] >= from;
     });
   }
 
   // Shows the window buttons of the reported kinds. When the chosen kind is
-  // not among them, it switches to the first one and returns true.
+  // not among them, it switches to the first one and returns true; without
+  // any, it keeps the chosen kind, whose chart has no rows.
   function renderWindowButtons() {
     var kinds = windowKinds();
     Array.prototype.forEach.call($("window-buttons").querySelectorAll("button"), function (b) {
       b.hidden = kinds.indexOf(b.getAttribute("data-value")) < 0;
     });
-    if (kinds.indexOf(chartWindow) >= 0) return false;
+    if (!kinds.length || kinds.indexOf(chartWindow) >= 0) return false;
     chartWindow = kinds[0];
     range = rangeFor(chartWindow);
     pressSegment("window-buttons", chartWindow);
@@ -4584,10 +4607,14 @@
       });
     }
     // hidden_groups lists the unchecked groups and keeps the hidden groups
-    // the page does not offer; an empty list deletes the key.
+    // the page does not offer; an empty list deletes the key. The saved list
+    // is read as the plugin reads it, so a checkbox removes an entry written
+    // with spaces or twice. A save that waits in the queue takes the
+    // checkboxes of its intent: one may have left the form meanwhile, when
+    // the only account that reports its group went.
     if (top === "hidden_groups") {
-      var hidden = (Array.isArray(base) ? base : []).filter(function (id) { return typeof id === "string"; });
-      Array.prototype.forEach.call($("settings").elements, function (input) {
+      var hidden = hiddenList(base);
+      Array.prototype.forEach.call(intent ? intent.inputs : $("settings").elements, function (input) {
         if (!input.hasAttribute || !input.hasAttribute("data-shown-group")) return;
         var id = input.getAttribute("data-shown-group"), at = hidden.indexOf(id);
         if (intent) intent.submitted.push(input);
