@@ -192,7 +192,8 @@ func (e *Engine) Refresh(ctx context.Context, authIndex string) error {
 	return e.send(ctx, "refresh", authIndex)
 }
 
-// Ignite ignites one target now.
+// Ignite ignites one target now. ErrIgnitionPending reports a request sent
+// whose window is still to be confirmed.
 func (e *Engine) Ignite(ctx context.Context, key string) error { return e.send(ctx, "ignite", key) }
 
 // ChannelResult is the outcome of a test notification on one channel.
@@ -232,6 +233,17 @@ func (e *Engine) runCommand(ctx context.Context, cmd command) {
 	switch cmd.kind {
 	case "refresh":
 		err = e.manualPoll(ctx, cfg, cmd.arg, cmd.deadline)
+		if waits := e.manualWaits; len(waits) > 0 {
+			// The refreshes by Magpie run in the background worker: a
+			// goroutine waits for them and replies, and the loop goes on.
+			e.manualWaits = nil
+			e.dispatchAgy(ctx)
+			e.refreshTargets(cfg)
+			e.saveState()
+			one, end := cmd.arg != "", e.manualEnd
+			go func() { cmd.reply <- commandReply{err: e.awaitManual(err, one, waits, end)} }()
+			return
+		}
 	case "ignite":
 		err = errNoTarget
 		for _, t := range e.collectTargets(cfg) {

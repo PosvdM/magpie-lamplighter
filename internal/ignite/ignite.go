@@ -174,6 +174,55 @@ func Observe(ts *store.TargetState, reset, now time.Time, passive bool) bool {
 	return rolling
 }
 
+// ObserveReading records one 5-hour reset that Magpie read for an
+// account read only from Magpie (Antigravity) at readAt, and returns
+// whether the window is a rolling placeholder. unused tells whether the
+// window had nothing used (100% left).
+//
+// Magpie stamps readAt when agy has finished, some seconds to about 30
+// seconds after Google read the reset, so two readings are compared by
+// their resets. A placeholder is a window that has not started: nothing
+// used, and a reset Google gives as its reading time plus 5 hours, which
+// moves with every reading. The window is rolling when the newer reading
+// has nothing used, its reset differs from the last one observed by more
+// than rollingDriftTolerance (Google gives a running window's reset to
+// the second), and the reset moved as far as readAt did, within
+// rollingOffsetTolerance. A reset that jumps by hours, as to the next
+// cycle, is not rolling.
+//
+// A reading at the readAt of the last one observed, or before it, is no
+// new observation, such as the same card applied again after a restart:
+// it changes nothing. A fixed future reset of a window with some quota
+// used clears the failure state, as in Observe; a window with nothing used
+// does not show that it runs.
+func ObserveReading(ts *store.TargetState, reset, readAt time.Time, unused bool) bool {
+	prev := ts.ResetObservation
+	if prev != nil && prev.SeenEpoch > 0 && !readAt.After(epochTime(prev.SeenEpoch).Add(sameReadingTolerance)) {
+		return ts.RollingReset
+	}
+	rolling := false
+	var resetEpoch *float64
+	if !reset.IsZero() {
+		value := epoch(reset)
+		resetEpoch = &value
+		if unused && prev != nil && prev.ResetEpoch != nil {
+			shift := time.Duration((value - *prev.ResetEpoch) * float64(time.Second))
+			elapsed := readAt.Sub(epochTime(prev.SeenEpoch))
+			rolling = absDuration(shift) > rollingDriftTolerance && absDuration(shift-elapsed) <= rollingOffsetTolerance
+		}
+	}
+	ts.RollingReset = rolling
+	if !rolling && !unused && !reset.IsZero() && reset.After(readAt) {
+		ClearFailures(ts)
+	}
+	ts.ResetObservation = &store.Observation{SeenEpoch: epoch(readAt), ResetEpoch: resetEpoch}
+	return rolling
+}
+
+// sameReadingTolerance is how close two reading times are to be one:
+// state.json keeps them as float seconds, which keep about a microsecond.
+const sameReadingTolerance = time.Millisecond
+
 func absDuration(d time.Duration) time.Duration {
 	if d < 0 {
 		return -d

@@ -30,6 +30,21 @@ type fakeHost struct {
 	http    func(req httpRequest) httpResponse
 	execute func(req host.ModelRequest) (host.ModelResponse, error)
 	kept    []host.KeptQuota
+	// agy returns Magpie's readings of the agy-cli accounts, added to
+	// kept; refreshed lists the pins RefreshQuota was asked for, and
+	// confirming whether each refresh confirmed an ignition. onRefresh
+	// runs with each refresh, such as to give Magpie a new reading.
+	agy        func() []host.KeptQuota
+	refreshed  []string
+	confirming []bool
+	onRefresh  func(pin string)
+	// accountsHook may change the accounts Magpie lists, such as their
+	// plans, before each listing.
+	accountsHook func(auths []authEntry)
+	// now is Magpie's clock, which tells when a refresh is sent
+	// (host.RefreshSending); a refresh is sent at the zero time without
+	// it.
+	now func() time.Time
 	// listModels replaces the default model list when set.
 	listModels func() ([]string, error)
 	// credErrs makes Credential fail for the pins it holds.
@@ -39,6 +54,9 @@ type fakeHost struct {
 }
 
 func (f *fakeHost) Accounts(context.Context) ([]host.Account, error) {
+	if f.accountsHook != nil {
+		f.accountsHook(f.auths)
+	}
 	out := make([]host.Account, 0, len(f.auths))
 	for _, entry := range f.auths {
 		out = append(out, entry.account())
@@ -61,15 +79,39 @@ func (f *fakeHost) Credential(_ context.Context, account host.Account) (host.Cre
 }
 
 // ConfirmIdentity implements host.IdentityChecker with Credential, as
-// magpie.Host confirms an agy-cli account from the files Credential reads.
+// magpie.Host confirms an agy-cli account from the files of its sign-in.
 func (f *fakeHost) ConfirmIdentity(ctx context.Context, account host.Account) (string, error) {
 	cred, err := f.Credential(ctx, account)
 	return cred.Fingerprint, err
 }
 
-func (f *fakeHost) KeptQuotas(context.Context) ([]host.KeptQuota, error) { return f.kept, nil }
+func (f *fakeHost) KeptQuotas(context.Context) ([]host.KeptQuota, error) {
+	out := append([]host.KeptQuota(nil), f.kept...)
+	if f.agy != nil {
+		out = append(out, f.agy()...)
+	}
+	return out, nil
+}
 
-func (f *fakeHost) RefreshQuota(context.Context, string) error { return nil }
+// RefreshQuota sends the refresh right away (host.RefreshSending), and
+// records it once it is sent.
+func (f *fakeHost) RefreshQuota(ctx context.Context, pin string) error {
+	var at time.Time
+	if f.now != nil {
+		at = f.now()
+	}
+	if err := host.RefreshSending(ctx, at); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.refreshed = append(f.refreshed, pin)
+	f.confirming = append(f.confirming, host.IsConfirmingIgnition(ctx))
+	f.mu.Unlock()
+	if f.onRefresh != nil {
+		f.onRefresh(pin)
+	}
+	return nil
+}
 
 func (f *fakeHost) Models(context.Context) ([]string, error) {
 	if f.listModels != nil {
@@ -156,6 +198,7 @@ func newTestEngineIn(t *testing.T, h *fakeHost, c *clock, dir string) (*Engine, 
 
 func standardHost(c *clock) *fakeHost {
 	return &fakeHost{
+		now: c.now,
 		auths: []authEntry{
 			{ID: "codex-a.json", AuthIndex: "1", Name: "codex-a.json", Provider: "codex", Email: "alice.work@example.com", User: "alice.work@example.com · Team"},
 			{ID: "codex-b.json", AuthIndex: "2", Name: "codex-b.json", Provider: "codex", Email: "bob.team@example.net"},
@@ -167,7 +210,13 @@ func standardHost(c *clock) *fakeHost {
 			"1": `{"access_token":"t1","account_id":"acc1"}`,
 			"2": `{"access_token":"t2"}`,
 			"3": `{"access_token":"t3"}`,
-			"4": `{"access_token":"t4","project_id":"p4"}`,
+			// agy's sign-in of the agy-cli account, which only
+			// ConfirmIdentity reads.
+			"4": `{"access_token":"t4","refresh_token":"r4"}`,
+		},
+		// Magpie reads the agy-cli account "4" whenever it is asked.
+		agy: func() []host.KeptQuota {
+			return []host.KeptQuota{agyReading("4", c.t, agyPool("Gemini", 50, c.t.Add(3*time.Hour)))}
 		},
 		http: func(req httpRequest) httpResponse {
 			reset := c.t.Add(3 * time.Hour)
@@ -180,9 +229,6 @@ func standardHost(c *clock) *fakeHost {
 				body := `{"five_hour":{"utilization":30,"resets_at":"` + reset.UTC().Format(time.RFC3339) + `"},"seven_day":{"utilization":20,"resets_at":"` +
 					reset.Add(48*time.Hour).UTC().Format(time.RFC3339) + `"}}`
 				return httpResponse{StatusCode: 200, Body: []byte(body)}
-			case strings.Contains(req.URL, "retrieveUserQuotaSummary"):
-				return httpResponse{StatusCode: 200, Body: []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"window":"5h","remainingFraction":0.5,"resetTime":"` +
-					reset.UTC().Format(time.RFC3339) + `"}]}]}`)}
 			}
 			return httpResponse{StatusCode: 404}
 		},
@@ -257,13 +303,9 @@ func TestNotesNameAccounts(t *testing.T) {
 func TestStatusOrdersGroupsLikeThePage(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 4, 10, 0, 0, 0, shanghai)}
 	h := standardHost(c)
-	base := h.http
-	h.http = func(req httpRequest) httpResponse {
-		if !strings.Contains(req.URL, "retrieveUserQuotaSummary") {
-			return base(req)
-		}
-		reset := c.t.Add(3 * time.Hour).UTC().Format(time.RFC3339)
-		return httpResponse{StatusCode: 200, Body: []byte(`{"groups":[{"displayName":"Claude and GPT Models","buckets":[{"window":"5h","remainingFraction":1,"resetTime":"` + reset + `"}]},{"displayName":"Gemini Models","buckets":[{"window":"5h","remainingFraction":0.5,"resetTime":"` + reset + `"}]}]}`)}
+	h.agy = func() []host.KeptQuota {
+		reset := c.t.Add(3 * time.Hour)
+		return []host.KeptQuota{agyReading("4", c.t, agyPool("Claude & GPT", 100, reset), agyPool("Gemini", 50, reset))}
 	}
 	e, _ := newTestEngine(t, h, c)
 	e.poll(context.Background(), e.config(), c.t, "", false)
@@ -1159,35 +1201,61 @@ func TestPlansComeFromTheUsageResponseAndADailyProfile(t *testing.T) {
 	}
 }
 
-// planWorld is an Antigravity account whose Google AI Pro plan can expire.
-// The expired plan reports a fresh weekly quota and no 5-hour window.
+// planWorld is an account whose paid plan can expire: an Antigravity
+// account with Google AI Pro, whose plan Magpie's account list gives, or a
+// Claude account with Max 5x, whose plan the OAuth profile gives. The
+// expired plan reports a fresh weekly quota and no 5-hour window.
 type planWorld struct {
 	paid          bool
 	profileStatus int
 }
 
+// planHost serves the Codex account and the Antigravity account "4" of
+// world. Magpie lists the account's plan; its reading follows the plan.
 func planHost(c *clock, world *planWorld) *fakeHost {
 	h := standardHost(c)
 	h.auths = []authEntry{h.auths[0], h.auths[4]}
 	weeklyReset := c.t.Add(40 * time.Hour)
+	h.accountsHook = func(auths []authEntry) {
+		auths[1].Plan = "Antigravity Starter Quota"
+		if world.paid {
+			auths[1].Plan = "Google AI Pro"
+		}
+	}
+	h.agy = func() []host.KeptQuota {
+		g := withWeekly(agyPool("Gemini", 100, c.t.Add(2*time.Hour)), "Gemini", 40, weeklyReset)
+		if !world.paid {
+			g = withWeekly(quota.RawGroup{Key: g.Key, SourceLabel: g.SourceLabel}, "Gemini", 100, c.t.Add(7*24*time.Hour))
+		}
+		return []host.KeptQuota{agyReading("4", c.t, g)}
+	}
+	return h
+}
+
+// claudePlanHost serves the Codex account and the Claude account "3" of
+// world, whose plan the OAuth profile gives.
+func claudePlanHost(c *clock, world *planWorld) *fakeHost {
+	h := standardHost(c)
+	h.auths = []authEntry{h.auths[0], h.auths[3]}
+	weeklyReset := c.t.Add(40 * time.Hour)
 	usage := h.http
 	h.http = func(req httpRequest) httpResponse {
-		switch {
-		case req.URL == providers.AntigravityLoadCodeAssistURL:
+		switch req.URL {
+		case providers.ClaudeProfileURL:
 			if world.profileStatus != 0 {
 				return httpResponse{StatusCode: world.profileStatus}
 			}
 			if world.paid {
-				return httpResponse{StatusCode: 200, Body: []byte(`{"currentTier":{"id":"free-tier"},"paidTier":{"id":"g1-pro-tier"}}`)}
+				return httpResponse{StatusCode: 200, Body: []byte(`{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x"}}`)}
 			}
-			return httpResponse{StatusCode: 200, Body: []byte(`{"currentTier":{"id":"free-tier"}}`)}
-		case strings.Contains(req.URL, "retrieveUserQuotaSummary"):
-			buckets := `{"bucketId":"gemini-5h","window":"5h","remainingFraction":1,"resetTime":"` + c.t.Add(2*time.Hour).UTC().Format(time.RFC3339) + `"},` +
-				`{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.4,"resetTime":"` + weeklyReset.UTC().Format(time.RFC3339) + `"}`
+			return httpResponse{StatusCode: 200, Body: []byte(`{"organization":{"organization_type":"claude_pro"}}`)}
+		case providers.ClaudeUsageURL:
+			body := `{"five_hour":{"utilization":0,"resets_at":"` + c.t.Add(2*time.Hour).UTC().Format(time.RFC3339) + `"},` +
+				`"seven_day":{"utilization":60,"resets_at":"` + weeklyReset.UTC().Format(time.RFC3339) + `"}}`
 			if !world.paid {
-				buckets = `{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":1,"resetTime":"` + c.t.Add(7*24*time.Hour).UTC().Format(time.RFC3339) + `"}`
+				body = `{"seven_day":{"utilization":0,"resets_at":"` + c.t.Add(7*24*time.Hour).UTC().Format(time.RFC3339) + `"}}`
 			}
-			return httpResponse{StatusCode: 200, Body: []byte(`{"groups":[{"displayName":"Gemini Models","buckets":[` + buckets + `]}]}`)}
+			return httpResponse{StatusCode: 200, Body: []byte(body)}
 		}
 		return usage(req)
 	}
@@ -1207,11 +1275,12 @@ func (s *switchSender) Send(ctx context.Context, msg notify.Message) error {
 	return s.fakeSender.Send(ctx, msg)
 }
 
-// titles returns the Antigravity titles sent since the last call.
+// titles returns the Antigravity and Claude titles sent since the last
+// call.
 func (s *switchSender) titles() []string {
 	var out []string
 	for _, msg := range s.sent {
-		if strings.Contains(msg.Title, "Antigravity") || strings.Contains(msg.Title, "Gemini") {
+		if strings.Contains(msg.Title, "Antigravity") || strings.Contains(msg.Title, "Gemini") || strings.Contains(msg.Title, "Claude") {
 			out = append(out, msg.Title)
 		}
 	}
@@ -1219,14 +1288,16 @@ func (s *switchSender) titles() []string {
 	return out
 }
 
-func agPlan(e *Engine) string {
+func planOf(e *Engine, pin string) string {
 	for _, a := range e.Status().Accounts {
-		if a.AuthIndex == "4" {
+		if a.AuthIndex == pin {
 			return a.Plan
 		}
 	}
 	return ""
 }
+
+func agPlan(e *Engine) string { return planOf(e, "4") }
 
 func TestPlanChangeIsNotifiedInsteadOfQuotaAlerts(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 22, 15, 0, 0, 0, shanghai)}
@@ -1242,12 +1313,13 @@ func TestPlanChangeIsNotifiedInsteadOfQuotaAlerts(t *testing.T) {
 
 	// The first plan read only records the plan.
 	poll()
-	if got := sender.titles(); agPlan(e) != "Pro" || len(got) != 0 || h.requestsTo(providers.AntigravityLoadCodeAssistURL) != 1 {
+	if got := sender.titles(); agPlan(e) != "Pro" || len(got) != 0 {
 		t.Fatalf("plan %q, sent %v", agPlan(e), got)
 	}
 
-	// The 5-hour window disappears: the plan is read again at once, and the
-	// fresh weekly quota of the new plan is no recovery.
+	// The plan expires: Magpie lists the new plan with the reading that
+	// has no 5-hour window, and the fresh weekly quota of the new plan is
+	// no recovery.
 	world.paid = false
 	poll()
 	if got := sender.titles(); agPlan(e) != "Free" || len(got) != 1 || got[0] != "🎫 Antigravity · 套餐 Pro → Free" {
@@ -1271,10 +1343,9 @@ func TestPlanChangeIsNotifiedInsteadOfQuotaAlerts(t *testing.T) {
 		}
 	}
 
-	// Unchanged windows wait a day for the next read.
 	poll()
-	if got := sender.titles(); h.requestsTo(providers.AntigravityLoadCodeAssistURL) != 2 || len(got) != 0 {
-		t.Fatalf("%d plan reads, sent %v", h.requestsTo(providers.AntigravityLoadCodeAssistURL), got)
+	if got := sender.titles(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
 	}
 
 	// The renewal brings back the old weekly quota, below the notice
@@ -1302,7 +1373,8 @@ func TestPlanChangeIsNotifiedInsteadOfQuotaAlerts(t *testing.T) {
 func TestPlanIsRecheckedAfterARestartAndAFailedRead(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 22, 15, 0, 0, 0, shanghai)}
 	world := &planWorld{paid: true}
-	h := planHost(c, world)
+	h := claudePlanHost(c, world)
+	claudePlan := func(e *Engine) string { return planOf(e, "3") }
 	e, _ := newTestEngine(t, h, c)
 	e.poll(context.Background(), e.config(), c.t, "", false)
 	e.dirty = true
@@ -1317,20 +1389,20 @@ func TestPlanIsRecheckedAfterARestartAndAFailedRead(t *testing.T) {
 	sender := &switchSender{}
 	e.alerts.Sender = sender
 	e.poll(context.Background(), e.config(), c.t, "", false)
-	if got := sender.titles(); agPlan(e) != "Pro" || len(got) != 0 || h.requestsTo(providers.AntigravityLoadCodeAssistURL) != 2 {
-		t.Fatalf("after the restart: plan %q, sent %v", agPlan(e), got)
+	if got := sender.titles(); claudePlan(e) != "Max 5x" || len(got) != 0 || h.requestsTo(providers.ClaudeProfileURL) != 2 {
+		t.Fatalf("after the restart: plan %q, sent %v", claudePlan(e), got)
 	}
 
 	// The plan is read with every query until it changes.
 	world.profileStatus = 0
 	c.add(5 * time.Minute)
 	e.poll(context.Background(), e.config(), c.t, "", false)
-	if got := sender.titles(); agPlan(e) != "Free" || len(got) != 1 || got[0] != "🎫 Antigravity · 套餐 Pro → Free" {
-		t.Fatalf("plan %q, sent %v", agPlan(e), got)
+	if got := sender.titles(); claudePlan(e) != "Pro" || len(got) != 1 || got[0] != "🎫 Claude · 套餐 Max 5x → Pro" {
+		t.Fatalf("plan %q, sent %v", claudePlan(e), got)
 	}
 	c.add(5 * time.Minute)
 	e.poll(context.Background(), e.config(), c.t, "", false)
-	if n := h.requestsTo(providers.AntigravityLoadCodeAssistURL); n != 3 {
+	if n := h.requestsTo(providers.ClaudeProfileURL); n != 3 {
 		t.Fatalf("%d plan reads after the change was seen", n)
 	}
 }
@@ -1374,7 +1446,8 @@ func TestPlanNoticeIsCancelledByAChangeBackAndDroppedAfterAnHour(t *testing.T) {
 func TestQuotaAlertsResumeWhenThePlanCannotBeRead(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 22, 15, 0, 0, 0, shanghai)}
 	world := &planWorld{paid: true}
-	h := planHost(c, world)
+	h := claudePlanHost(c, world)
+	claudePlan := func(e *Engine) string { return planOf(e, "3") }
 	e, _ := newTestEngine(t, h, c)
 	sender := &switchSender{}
 	e.alerts.Sender = sender
@@ -1388,15 +1461,16 @@ func TestQuotaAlertsResumeWhenThePlanCannotBeRead(t *testing.T) {
 	poll()
 	world.paid = false
 	poll()
-	if got := sender.titles(); agPlan(e) != "" || len(got) != 1 || !strings.Contains(got[0], "已恢复") {
-		t.Fatalf("without a plan: plan %q, sent %v", agPlan(e), got)
+	if got := sender.titles(); claudePlan(e) != "" || len(got) != 1 || !strings.Contains(got[0], "已恢复") {
+		t.Fatalf("without a plan: plan %q, sent %v", claudePlan(e), got)
 	}
 }
 
 func TestPlanIsReadSoonAfterARecheckThatKeptFailing(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 22, 15, 0, 0, 0, shanghai)}
 	world := &planWorld{paid: true}
-	h := planHost(c, world)
+	h := claudePlanHost(c, world)
+	claudePlan := func(e *Engine) string { return planOf(e, "3") }
 	e, _ := newTestEngine(t, h, c)
 	sender := &switchSender{}
 	e.alerts.Sender = sender
@@ -1418,17 +1492,17 @@ func TestPlanIsReadSoonAfterARecheckThatKeptFailing(t *testing.T) {
 		}
 	}
 	poll()
-	if got := sender.titles(); agPlan(e) != "Pro" || len(got) != 1 || !strings.Contains(got[0], "已恢复") {
-		t.Fatalf("after the recheck: plan %q, sent %v", agPlan(e), got)
+	if got := sender.titles(); claudePlan(e) != "Max 5x" || len(got) != 1 || !strings.Contains(got[0], "已恢复") {
+		t.Fatalf("after the recheck: plan %q, sent %v", claudePlan(e), got)
 	}
 
 	// The plan is read again within planRetryPeriod of the last failure.
 	world.profileStatus = 0
-	reads := h.requestsTo(providers.AntigravityLoadCodeAssistURL)
-	for i := 0; i < 3 && agPlan(e) == "Pro"; i++ {
+	reads := h.requestsTo(providers.ClaudeProfileURL)
+	for i := 0; i < 3 && claudePlan(e) == "Max 5x"; i++ {
 		poll()
 	}
-	if got := sender.titles(); agPlan(e) != "Free" || h.requestsTo(providers.AntigravityLoadCodeAssistURL) != reads+1 || len(got) != 1 || got[0] != "🎫 Antigravity · 套餐 Pro → Free" {
-		t.Fatalf("after the retry: plan %q, sent %v", agPlan(e), got)
+	if got := sender.titles(); claudePlan(e) != "Pro" || h.requestsTo(providers.ClaudeProfileURL) != reads+1 || len(got) != 1 || got[0] != "🎫 Claude · 套餐 Max 5x → Pro" {
+		t.Fatalf("after the retry: plan %q, sent %v", claudePlan(e), got)
 	}
 }

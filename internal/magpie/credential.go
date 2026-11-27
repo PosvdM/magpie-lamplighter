@@ -20,8 +20,8 @@ import (
 // savedLogin is one entry of logins.json (savedLogin in Magpie's
 // internal/provider/logins.go). Auth is the agent's own credential blob:
 // Codex's auth.json, Claude Code's .credentials.json. A plugin's account
-// has agent "plugin:<id>" and no Auth; Home is its key in
-// plugin-auth.json.
+// has agent "plugin:<id>" and no Auth; Home is its key among the plugin's
+// sign-ins (agy.go).
 type savedLogin struct {
 	ID    string          `json:"id"`
 	Agent string          `json:"agent"`
@@ -107,10 +107,6 @@ func (h *Host) login(provider, id string) (savedLogin, error) {
 	return savedLogin{}, fmt.Errorf("logins.json 中没有账号 %s/%s", provider, id)
 }
 
-// agyCLI is the provider id of the agy-cli plugin
-// (@magpie-community/opencode-agy-cli-auth), which serves Antigravity.
-const agyCLI = "agy-cli"
-
 // accountLogin is the Magpie provider id of account and its logins.json
 // entry.
 func (h *Host) accountLogin(account host.Account) (string, savedLogin, error) {
@@ -126,34 +122,11 @@ func (h *Host) accountLogin(account host.Account) (string, savedLogin, error) {
 	return provider, l, err
 }
 
-// ConfirmIdentity implements host.IdentityChecker. The gateway sends an
-// agy-cli account's requests with whichever Google account its agy is
-// signed in to; the sign-in is read from local files alone and must be
-// the account's (agyFile.belongs). Codex and Claude requests use the
-// account's own credential, which needs no check: they return "" and nil.
-// Any error means the account is not confirmed.
-func (h *Host) ConfirmIdentity(_ context.Context, account host.Account) (string, error) {
-	provider, l, err := h.accountLogin(account)
-	if err != nil {
-		return "", err
-	}
-	if provider != agyCLI {
-		return "", nil
-	}
-	s, err := h.agySignIn(l)
-	if err != nil {
-		return "", err
-	}
-	return agyFingerprint(s), nil
-}
-
-// Credential reads the credential of account from Magpie's files: Codex
-// and Claude from logins.json, Antigravity from the agy-cli plugin's
-// token file. Codex and Claude tokens are never refreshed here; one past
-// its expiry is returned with Expired set. An agy-cli account's sign-in is
-// confirmed first (agySignIn), before any proxy setting is read or token
-// renewed, so that an unconfirmed account always gives its
-// host.ErrIdentity error.
+// Credential reads the credential of a Codex or Claude account from
+// logins.json, with the proxy Magpie uses for it. Tokens are never
+// refreshed here; one past its expiry is returned with Expired set. An
+// agy-cli account has no credential: its quota comes from Magpie's quota
+// cards alone, and its sign-in is only confirmed (ConfirmIdentity).
 func (h *Host) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
 	provider, l, err := h.accountLogin(account)
 	if err != nil {
@@ -165,27 +138,14 @@ func (h *Host) Credential(ctx context.Context, account host.Account) (host.Crede
 		cred, err = codexCredential(l.Auth)
 	case "claude":
 		cred, err = h.claudeCredential(l)
-	case agyCLI:
-		var s agyStored
-		if s, err = h.agySignIn(l); err != nil {
-			return host.Credential{}, err
-		}
-		var proxy string
-		if proxy, err = h.proxyFor(provider, l.User); err != nil {
-			return host.Credential{}, err
-		}
-		cred, err = h.agyCredential(ctx, s, proxy)
-		cred.ProxyURL = proxy
 	default:
 		return host.Credential{}, fmt.Errorf("不支持读取 %s 账号的凭证", provider)
 	}
 	if err != nil {
 		return host.Credential{}, err
 	}
-	if provider != agyCLI {
-		if cred.ProxyURL, err = h.proxyFor(provider, l.User); err != nil {
-			return host.Credential{}, err
-		}
+	if cred.ProxyURL, err = h.proxyFor(provider, l.User); err != nil {
+		return host.Credential{}, err
 	}
 	cred.Provider, cred.ID, cred.Name = provider, account.Pin, account.Pin
 	return cred, nil

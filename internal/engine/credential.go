@@ -247,20 +247,44 @@ func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred, candidate int)
 // ignitionCredential reads the fingerprint of cred's credential before an
 // ignition, "" when it cannot be read. An agy-cli account
 // (identityChecked) must be confirmed (confirmIdentity), and any error
-// refuses the ignition. For other accounts it is an error only when the
-// host cannot confirm the account of the credential (host.ErrIdentity).
+// refuses the ignition.
 func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
 	if identityChecked(cred) {
 		return e.confirmIdentity(ctx, cred, 0)
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
-	if errors.Is(err, host.ErrIdentity) {
-		return "", e.unconfirmed(cred, 0, err)
-	}
 	if err != nil {
 		return "", nil
 	}
 	return credential.Fingerprint, nil
+}
+
+// noteSignIn reads the fingerprint of the sign-in of cred, an agy-cli
+// account (identityChecked), with each query, as Credential gives that of
+// a Codex or Claude account: the quota of such an account comes from
+// Magpie, so no query reads its sign-in otherwise. A new sign-in lets
+// ignition try again (noteFingerprint). Only a host.IdentityChecker
+// reads it, from local files alone; a sign-in that is not confirmed
+// changes nothing.
+func (e *Engine) noteSignIn(ctx context.Context, cred *Cred) {
+	checker, ok := e.host.(host.IdentityChecker)
+	if !ok || !identityChecked(cred) {
+		return
+	}
+	if fingerprint, err := checker.ConfirmIdentity(ctx, hostAccount(cred)); err == nil {
+		e.noteFingerprint(cred, fingerprint)
+	}
+}
+
+// sentAfterProblem reports whether a request of cred sent at sent went
+// out after the account's credential problem was last found
+// (store.CredentialState FailedAt), or the account has none.
+func (e *Engine) sentAfterProblem(cred *Cred, sent time.Time) bool {
+	if e.state == nil {
+		return true
+	}
+	st := e.state.Credentials[cred.AuthIndex]
+	return st == nil || st.Reason == "" || sent.After(st.FailedAt)
 }
 
 // noteQueryFailure handles a failed quota query of cred. A suspended account
@@ -282,6 +306,8 @@ func (e *Engine) noteQueryFailure(ctx context.Context, cred *Cred, fingerprint s
 		return
 	}
 	if st.Reason == d.Reason {
+		st.FailedAt = now
+		e.dirty = true
 		return
 	}
 	if st.QueryReason != d.Reason {
@@ -307,6 +333,7 @@ func (e *Engine) noteCredentialProblem(ctx context.Context, cred *Cred, group st
 	if st.Reason == d.Reason {
 		// An unknown fingerprint stays unknown; see noteFingerprint.
 		st.Fingerprint = fingerprint
+		st.FailedAt = e.now()
 		if source == sourceIgnite {
 			st.Ignited = true
 		}
@@ -317,7 +344,7 @@ func (e *Engine) noteCredentialProblem(ctx context.Context, cred *Cred, group st
 	now := e.now()
 	*st = store.CredentialState{
 		Reason: d.Reason, Status: d.StatusText(), Code: d.Code, Summary: credentialSummary(d), AppealURL: redact.Text(d.AppealURL),
-		Source: source, Group: group, Since: now.Unix(), Fingerprint: fingerprint, Ignited: ignited,
+		Source: source, Group: group, Since: now.Unix(), FailedAt: now, Fingerprint: fingerprint, Ignited: ignited,
 		Notice: noticeProblem, NoticeAt: now.Unix(),
 	}
 	e.publishCredential(cred.AuthIndex, d.Reason)

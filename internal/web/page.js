@@ -298,7 +298,7 @@
       source_passive: "被动", source_active: "主动", updated: "更新于 {0}",
       no_accounts: "没有可监控的 {0} 凭证。",
       first_query: "启动约 5 秒后开始第一次查询。",
-      refresh: "刷新", refreshed: "已刷新 {0}",
+      refresh: "刷新", refreshed: "已刷新 {0}", refresh_queued: "{0} 的刷新已排队，Magpie 读到后自动显示",
       account_settings: "账号", rename: "名称",
       rename_hint: "名称保存在 Lamplighter 的设置中，不修改 Magpie 的账号名称。留空则显示 Magpie 中的账号名称或按邮箱区分账号。",
       account_order_hint: "拖动手柄调整顺序，额度卡片和图表默认顺序随之调整。拖动时按 Esc 可取消。",
@@ -307,12 +307,14 @@
       plan: "套餐：{0}", weight_invalid: "权重必须是大于 0 的数字",
       blocked_5h: "5 小时额度已用完", blocked_7d: "7 天额度已用完", blocked_other: "{0}额度已用完",
       blocked_until: "{0} 重置后恢复点火", blocked_wait: "额度恢复后恢复点火",
-      paused_until: "暂停至 {0}", failures: "失败 {0} 次", rolling: "窗口未开始", normal: "正常",
+      paused_until: "暂停至 {0}", failures: "失败 {0} 次", rolling: "窗口未开始", normal: "正常", confirming: "等待确认",
+      confirming_note: "点火请求已发出，正在等 Magpie 读到新的 5 小时重置",
       ignition_note: "每天 {0}:00 开始，之后在每次重置后 {1} 秒点火，最晚到 {2}。",
       no_targets: "没有启用点火的额度组。",
       ignite_now: "立即点火",
       ignite_confirm: "立即向 {0} 发送一次点火请求？这会开始一个新的 5 小时窗口。",
       ignited: "{0} 点火成功",
+      ignite_pending: "{0} 点火请求已发出，确认结果稍后记入事件",
       ev_ignite: "点火成功", ev_ignite_manual: "手动点火", ev_ignite_failed: "点火失败", ev_ignite_paused: "点火暂停", ev_model_refused: "模型被拒",
       ev_plan_change: "套餐变化", ev_notify: "已推送", ev_notify_failed: "推送失败", ev_codex_reset: "重置信号", ev_error: "错误",
       ev_ignited: "{0} · 下次重置 {1}",
@@ -353,7 +355,7 @@
       load_failed: "加载失败：{0}", retry: "重试",
       bad_response: "服务返回的不是 Lamplighter 的数据", request_timed_out: "请求超时",
       mcp_public_url_invalid: "对外地址须为 http 或 https 地址，不能含空格、? 或 #",
-      refreshed_all: "已刷新全部额度", test_sent: "测试通知已发送",
+      refreshed_all: "已刷新全部额度", refreshed_all_queued: "已刷新全部额度，部分 Antigravity 账号的刷新仍在排队", test_sent: "测试通知已发送",
       level_full: "满", level_high: "高", level_medium: "中", level_low: "低", level_empty: "空",
       inactive: "已停用", inactive_suffix: "（已停用）", stat_last: "最后读数",
       legend_inactive: "已停用：账号不再报告这个窗口，保留到最后一个数据点移出所选范围",
@@ -487,7 +489,7 @@
       source_passive: "passive", source_active: "active", updated: "updated {0}",
       no_accounts: "No {0} credentials to monitor.",
       first_query: "The first query runs about 5 seconds after the start.",
-      refresh: "Refresh", refreshed: "Refreshed {0}",
+      refresh: "Refresh", refreshed: "Refreshed {0}", refresh_queued: "{0}: refresh queued; the quota shows once Magpie has read it",
       account_settings: "Accounts", rename: "Name",
       rename_hint: "Names are saved in the Lamplighter settings and do not change the account names in Magpie. Leave the name empty to show the Magpie account name or distinguish accounts by email.",
       account_order_hint: "Drag a handle to set the default order of quota cards and charts. Press Esc during a drag to cancel.",
@@ -496,12 +498,14 @@
       plan: "Plan: {0}", weight_invalid: "The weight must be a number above 0",
       blocked_5h: "5-hour quota used up", blocked_7d: "7-day quota used up", blocked_other: "{0} quota used up",
       blocked_until: "Ignition resumes after the reset at {0}", blocked_wait: "Ignition resumes when the quota recovers",
-      paused_until: "Paused until {0}", failures: "{0} failures", rolling: "Window not started", normal: "Normal",
+      paused_until: "Paused until {0}", failures: "{0} failures", rolling: "Window not started", normal: "Normal", confirming: "Confirming",
+      confirming_note: "Ignition request sent; waiting for Magpie to read the new 5-hour reset",
       ignition_note: "Starts at {0}:00 every day, then ignites {1} seconds after each reset, until {2}.",
       no_targets: "No quota group has ignition enabled.",
       ignite_now: "Ignite now",
       ignite_confirm: "Send an ignition request to {0} now? This starts a new 5-hour window.",
       ignited: "{0} ignited",
+      ignite_pending: "{0}: ignition request sent; the confirmation is recorded in the events later",
       ev_ignite: "Ignited", ev_ignite_manual: "Manual ignition", ev_ignite_failed: "Ignition failed", ev_ignite_paused: "Ignition paused", ev_model_refused: "Model refused",
       ev_plan_change: "Plan changed", ev_notify: "Notified", ev_notify_failed: "Notification failed", ev_codex_reset: "Reset signal", ev_error: "Error",
       ev_ignited: "{0} · next reset {1}",
@@ -542,7 +546,7 @@
       load_failed: "Could not load: {0}", retry: "Retry",
       bad_response: "The server did not answer with Lamplighter data", request_timed_out: "The request timed out",
       mcp_public_url_invalid: "The public address must be an http or https address without spaces, ? or #",
-      refreshed_all: "Refreshed all quota", test_sent: "Test notification sent",
+      refreshed_all: "Refreshed all quota", refreshed_all_queued: "Refreshed all quota; some Antigravity refreshes are still queued", test_sent: "Test notification sent",
       level_full: "Full", level_high: "High", level_medium: "Medium", level_low: "Low", level_empty: "Empty",
       inactive: "Inactive", inactive_suffix: " (inactive)", stat_last: "Last reading",
       legend_inactive: "Inactive: the account no longer reports this window; it shows until its last sample leaves the range",
@@ -1562,7 +1566,7 @@
       var card = el("div", { class: "card account", "data-account": account.name });
       var pooledAccount = counts[account.provider] > 1, weight = accountWeight(account);
       var refresh = el("button", { type: "button", class: "btn btn-ghost btn-sm no-snapshot", text: translate("refresh"), onclick: function () {
-        runAction(refresh, API + "/refresh", { auth_index: account.auth_index }, translate("refreshed", account.title));
+        runAction(refresh, API + "/refresh", { auth_index: account.auth_index }, translate("refreshed", account.title), translate("refresh_queued", account.title));
       } });
       card.appendChild(el("div", { class: "account-head" }, [
         el("span", { class: "type-badge type-" + account.provider }, maskedNodes(account.title).concat(
@@ -1597,6 +1601,7 @@
       var blocked = t.blocked_window === "5h" || t.blocked_window === "7d" ? tr("blocked_" + t.blocked_window) : tr("blocked_other", t.blocked_window);
       return { kind: "muted", text: blocked, title: until ? tr("blocked_until", fmtDateTime(until)) : tr("blocked_wait") };
     }
+    if (t.confirming) return { kind: "muted", text: tr("confirming"), title: tr("confirming_note") };
     var circuit = parseTime(t.circuit_until);
     if (circuit) return { kind: "failure", text: tr("paused_until", fmtDateTime(circuit)), title: t.circuit_reason };
     if (t.consecutive_failures > 0) return { kind: "warning", text: tr("failures", t.consecutive_failures), title: t.last_error };
@@ -1619,9 +1624,9 @@
     }
     status.targets.forEach(function (t) {
       var st = targetStatus(t), title = groupTitle(t.key, t.label);
-      var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), onclick: function () {
+      var button = el("button", { type: "button", class: "btn btn-secondary btn-sm", text: translate("ignite_now"), disabled: !!t.confirming, onclick: function () {
         if (!confirmed(button, translate("ignite_confirm", title))) return;
-        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", title));
+        runAction(button, API + "/ignite", { target: t.key }, translate("ignited", title), translate("ignite_pending", title));
       } });
       var next = parseTime(t.next_due), reset = parseTime(t.reset), last = parseTime(t.last_success);
       var statusCell = el("td", {}, [badge(st.kind, st.text)]);
@@ -2251,11 +2256,13 @@
     return fetchStatus(timeout).then(useStatus);
   }
 
-  function runAction(button, path, body, success) {
+  // pending is shown for an action the plugin finishes later (an ignition
+  // whose window Magpie is still to confirm).
+  function runAction(button, path, body, success, pending) {
     button.disabled = true;
     return api("POST", path, body).then(function (data) {
       if (data.status) { status = data.status; renderStatus(); }
-      toast(data.ok ? success : translate("failed", data.error));
+      toast(data.ok ? (data.pending && pending ? pending : success) : translate("failed", data.error));
       loadHistory(true);
     }).catch(function (err) {
       if (err.message !== "unauthorized") toast(translate("failed", err.message));
@@ -5536,7 +5543,7 @@
   $("key-submit").addEventListener("click", submitKey);
   $("key-input").addEventListener("keydown", function (e) { if (e.key === "Enter") submitKey(e); });
   $("refresh-all").addEventListener("click", function (e) {
-    runAction(e.currentTarget, API + "/refresh", {}, translate("refreshed_all"));
+    runAction(e.currentTarget, API + "/refresh", {}, translate("refreshed_all"), translate("refreshed_all_queued"));
   });
   $("test-notify").addEventListener("click", function (e) {
     // The test waits for the saves under way and for the plugin to apply

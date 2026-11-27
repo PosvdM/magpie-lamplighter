@@ -78,18 +78,26 @@ func claudePlan(raw string) Plan {
 	return Plan{Name: kind, Weight: 1}
 }
 
-// antigravityPlan names the tier id of an Antigravity account. A Google One
-// tier "g1-<name>-tier", such as "g1-pro-tier", is named after its middle
-// part. Google publishes no multiple between the tiers, so all weigh 1.
+// antigravityPlan names the plan of an Antigravity account as Magpie's
+// account list states it: the name of the account's Code Assist tier, such
+// as "Google AI Pro", which is named after its last part ("Pro"), or
+// "Antigravity Starter Quota", the tier of an account without a paid plan
+// ("Free"). The tier ids "g1-pro-tier" and "free-tier" are named the same
+// way. Google publishes no multiple between the tiers, so all weigh 1. An
+// unknown value keeps its own name.
 func antigravityPlan(raw string) Plan {
-	id := strings.ToLower(raw)
-	if id == "free-tier" {
+	text := strings.Join(strings.Fields(raw), " ")
+	id := strings.ToLower(text)
+	switch {
+	case id == "free-tier" || id == "antigravity starter quota":
 		return Plan{Name: "Free", Weight: 1}
+	case strings.HasPrefix(id, "google ai ") && len(text) > len("google ai "):
+		return Plan{Name: text[len("google ai "):], Weight: 1}
 	}
 	if name, ok := strings.CutPrefix(id, "g1-"); ok {
 		if name, ok = strings.CutSuffix(name, "-tier"); ok && name != "" {
 			return Plan{Name: strings.ToUpper(name[:1]) + name[1:], Weight: 1}
 		}
 	}
-	return Plan{Name: raw, Weight: 1}
+	return Plan{Name: text, Weight: 1}
 }

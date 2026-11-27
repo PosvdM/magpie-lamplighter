@@ -2,11 +2,24 @@
 // program for every platform, built for package.json's version by
 // scripts/build.sh. A package without them would install and then fail to
 // start in Magpie, which installs plugins without running their scripts.
+// No program may contain GOOGLE_WORDS: Lamplighter sends Google nothing.
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 export const PLATFORMS = ["linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64", "windows-arm64"]
+
+// GOOGLE_WORDS is testdata/google-words.txt as one pattern: what a
+// request to Google needs. no_google_test.go checks the sources with it.
+export const GOOGLE_WORDS = new RegExp(
+  fs
+    .readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "testdata", "google-words.txt"), "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .join("|"),
+  "i",
+)
 
 export function problems(root) {
   const out = []
@@ -28,8 +41,13 @@ export function problems(root) {
       out.push(`${path.relative(root, file)} is missing`)
       continue
     }
-    if (!st.isFile() || st.size === 0) out.push(`${path.relative(root, file)} is empty`)
-    else if (!p.startsWith("windows-") && (st.mode & 0o111) === 0) out.push(`${path.relative(root, file)} is not executable`)
+    if (!st.isFile() || st.size === 0) {
+      out.push(`${path.relative(root, file)} is empty`)
+      continue
+    }
+    if (!p.startsWith("windows-") && (st.mode & 0o111) === 0) out.push(`${path.relative(root, file)} is not executable`)
+    const word = fs.readFileSync(file).toString("latin1").match(GOOGLE_WORDS)
+    if (word) out.push(`${path.relative(root, file)} contains "${word[0]}"`)
   }
   return out
 }

@@ -36,7 +36,7 @@ sh scripts/build.sh [版本号]
 
 脚本用 `CGO_ENABLED=0` 静态编译 linux、darwin、windows 各 amd64 和 arm64 六个平台的程序，放在 `dist/bin/<GOOS>-<GOARCH>/lamplighter`（Windows 为 `lamplighter.exe`），并把版本号写入 `dist/bin/VERSION`。版本号默认取 `package.json` 的 `version`，经 `-ldflags "-X main.version=…"` 写入程序，`lamplighter -version` 可以查看。程序是纯 Go，在任何一个平台上都能交叉编译全部六个平台。`dist/` 已在 `.gitignore` 中，构建产物不提交。
 
-`npm pack` 和 `npm publish` 先运行 `prepack`（`scripts/check-dist.mjs`），确认六个平台的程序都在、非空、有执行权限，且 `dist/bin/VERSION` 与 `package.json` 的版本号相同，否则中止。包中的文件由 `package.json` 的 `files` 列出：`npm/` 下的入口和页面（不含 `npm/test/`）、`dist/bin/`，以及 npm 自动加入的 `README.md`、`LICENSE`、`package.json`。压缩后约 22 MB，解压后约 55 MB。用 `npm pack --dry-run` 可以查看包的内容和大小。
+`npm pack` 和 `npm publish` 先运行 `prepack`（`scripts/check-dist.mjs`），确认六个平台的程序都在、非空、有执行权限，`dist/bin/VERSION` 与 `package.json` 的版本号相同，且程序中没有 `testdata/google-words.txt` 列出的 Google 主机名、接口名和 OAuth 客户端（Lamplighter 不向 Google 发请求，`no_google_test.go` 用同一份列表检查源码），否则中止。包中的文件由 `package.json` 的 `files` 列出：`npm/` 下的入口和页面（不含 `npm/test/`）、`dist/bin/`，以及 npm 自动加入的 `README.md`、`LICENSE`、`package.json`。压缩后约 22 MB，解压后约 55 MB。用 `npm pack --dry-run` 可以查看包的内容和大小。
 
 外壳的运行方式见[架构](./architecture.md#插件外壳)。
 

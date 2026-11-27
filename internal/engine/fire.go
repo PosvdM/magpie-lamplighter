@@ -55,6 +55,10 @@ type TargetView struct {
 	// BlockedUntil is its reset, zero when unknown.
 	BlockedWindow string    `json:"blocked_window,omitempty"`
 	BlockedUntil  time.Time `json:"blocked_until,omitempty"`
+	// Confirming is set while an ignition request has been sent and its
+	// window is still to be confirmed (magpieConfirms); the target has no
+	// next ignition meanwhile and cannot be ignited.
+	Confirming bool `json:"confirming,omitempty"`
 }
 
 type target struct {
@@ -151,7 +155,7 @@ func (e *Engine) nextDue(cfg config.Config) time.Time {
 	now := e.now()
 	var next time.Time
 	for _, t := range e.collectTargets(cfg) {
-		if e.credentialBlocked(t.cred.AuthIndex) {
+		if e.credentialBlocked(t.cred.AuthIndex) || e.confirmPending(t.group.Key) {
 			continue
 		}
 		due := schedule.DueAt(e.state.Target(t.group.Key), t.reset, now)
@@ -193,6 +197,7 @@ func (e *Engine) refreshTargets(cfg config.Config) {
 			LastError:           ts.LastError,
 			ConsecutiveFailures: ts.ConsecutiveFailures,
 			CircuitReason:       ts.CircuitReason,
+			Confirming:          e.confirmPending(t.group.Key),
 		}
 		if until := epochTime(ts.CircuitOpenUntilEpoch); until.After(now) {
 			view.CircuitUntil = until
@@ -200,7 +205,7 @@ func (e *Engine) refreshTargets(cfg config.Config) {
 		if w, blocked := exhaustedWindow(t.group, now); blocked {
 			view.BlockedWindow = quota.ShortLabel(w.Label)
 			view.BlockedUntil = w.Reset
-		} else if cfg.Ignition.Enabled && !e.credentialBlocked(t.cred.AuthIndex) {
+		} else if cfg.Ignition.Enabled && !e.credentialBlocked(t.cred.AuthIndex) && !view.Confirming {
 			view.NextDue = schedule.DueAt(ts, t.reset, now)
 		}
 		views = append(views, view)
@@ -234,6 +239,10 @@ func (e *Engine) performDue(ctx context.Context, cfg config.Config) bool {
 		// A rejected credential or a disabled account waits for a new
 		// credential; see credentialBlocked.
 		if e.credentialBlocked(t.cred.AuthIndex) {
+			continue
+		}
+		// The last ignition is still being confirmed (confirmByRefresh).
+		if e.confirmPending(t.group.Key) {
 			continue
 		}
 		due := schedule.DueAt(e.state.Target(t.group.Key), t.reset, now)
@@ -408,9 +417,16 @@ func overrideID(override string, cred *Cred) string {
 
 // igniteTarget sends the ignition request, confirms it and records the
 // outcome. It returns the error shown for a manual ignition.
+//
+// The ignition of an account whose quota is read only from Magpie
+// (Antigravity) ends before its confirmation: confirmMagpie leaves it to
+// the background worker and the loop (confirmStep), and igniteTarget
+// returns ErrIgnitionPending without recording an outcome.
 func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, manual bool) error {
+	if e.confirmPending(t.group.Key) {
+		return errConfirmBusy
+	}
 	ts := e.state.Target(t.group.Key)
-	schedule := e.schedule(cfg)
 	start := e.now()
 	ts.LastAttemptEpoch = float64(start.UnixNano()) / 1e9
 	e.dirty = true
@@ -438,6 +454,11 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	if err == nil {
 		model, resp, err = e.execute(ctx, cfg, t, manual)
 	}
+	if resp.confirmed {
+		// The sign-in confirmed right before the last request that went
+		// out, which agy may have changed since the first confirmation.
+		fingerprint = resp.fingerprint
+	}
 	if err == nil {
 		// Confirmation needs a reading taken after the request that
 		// worked was sent; the model list and refused candidates before it
@@ -445,18 +466,37 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 		if resp.sentAt.After(base.start) {
 			base.start = resp.sentAt
 		}
-		err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+		base.end = e.now()
+		if providers.MagpieOnly(providers.Lookup(t.group.Provider)) {
+			err = e.confirmMagpie(t, base, model, fingerprint, manual)
+		} else {
+			err = e.confirm(ctx, cfg, t, base, resp.ModelResponse, manual)
+		}
 	}
-	if resp.confirmed {
-		// The sign-in confirmed right before the last request that went
-		// out, which agy may have changed since the first confirmation.
-		fingerprint = resp.fingerprint
+	if errors.Is(err, ErrIgnitionPending) {
+		return err
 	}
 	if errors.Is(err, host.ErrIdentity) {
 		// An unconfirmed sign-in has no fingerprint to wait on; the first
-		// readable credential counts as changed (noteFingerprint).
+		// confirmed sign-in counts as changed (noteFingerprint).
 		fingerprint = ""
 	}
+	return e.finishIgnition(ctx, cfg, t, manual, model, fingerprint, time.Time{}, err)
+}
+
+// finishIgnition records the outcome of the ignition of t: err is the
+// error of its request or confirmation, nil for a confirmed window. It
+// returns the error shown for a manual ignition.
+//
+// sent is when the request that worked was sent, for an ignition
+// confirmed after igniteTarget returned (confirmMagpie), zero for one
+// confirmed at once. A success ends the account's credential problem
+// only when the request was sent after the problem was last found
+// (store.CredentialState FailedAt): another ignition of the account can
+// find a problem while this one waits for its confirmation.
+func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target, manual bool, model, fingerprint string, sent time.Time, err error) error {
+	ts := e.state.Target(t.group.Key)
+	schedule := e.schedule(cfg)
 	now := e.now()
 	if errors.Is(err, errIgnitionWithdrawn) {
 		// Not a failure: the target no longer qualifies for automatic
@@ -546,7 +586,11 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	}
 	ignite.RecordSuccess(ts, model, now)
 	e.dirty = true
-	e.noteCredentialOK(ctx, t.cred, sourceIgnite)
+	if sent.IsZero() || e.sentAfterProblem(t.cred, sent) {
+		e.noteCredentialOK(ctx, t.cred, sourceIgnite)
+	} else {
+		e.logf("info", "%s：点火请求早于账号最近一次发现的凭证问题，凭证问题保持", t.group.Label)
+	}
 	resetText := "未知"
 	params := map[string]string{"model": model}
 	if group, ok := e.group(t.group.Key); ok {
@@ -790,8 +834,9 @@ func truncateText(text string, n int) string {
 // replace.
 type ignitionBase struct {
 	// start is the start of the ignition until execute returns, then when
-	// the request that worked entered OpenModelStream.
-	start time.Time
+	// the request that worked entered OpenModelStream; end is when its
+	// response ended (execute returned), zero until then.
+	start, end time.Time
 	// oldReset is the reset of a window that had ended or not started at
 	// start (a past reset or a rolling placeholder), zero otherwise. A
 	// reading with this reset still describes that window.
@@ -816,7 +861,8 @@ func (e *Engine) ignitionBase(key string, start time.Time) ignitionBase {
 // reset read after the ignition request was sent (base.start), other than
 // base.oldReset. The time of the reading counts, not when it was applied:
 // Magpie's kept quota can hold a reading taken before the request and
-// handed over after it.
+// handed over after it. An account read only from Magpie is confirmed by
+// the card of a refresh instead (confirmByRefresh).
 func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 	group, ok := e.group(key)
 	if !ok {
@@ -834,9 +880,9 @@ func (e *Engine) confirmed(key string, base ignitionBase, now time.Time) bool {
 
 // confirm checks that the ignition started a window. Claude responses carry
 // the new reset in their headers, which Magpie's gateway writes back. The
-// gateway does not pass on Codex's x-codex-* headers, and Antigravity has no
-// quota in its headers: for them, and when the headers carry no new window,
-// the credential is queried actively. The queries of a manual ignition
+// gateway does not pass on Codex's x-codex-* headers: for Codex, and when
+// the headers carry no new window, the credential is queried actively.
+// Antigravity is confirmed by confirmMagpie. The queries of a manual ignition
 // leave the credential state alone, like its failure. A stop or an ended
 // ctx before the window is confirmed returns context.Canceled, also when
 // it cuts a query short.

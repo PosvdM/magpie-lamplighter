@@ -128,11 +128,26 @@ func newRenewEngine(t *testing.T) (*Engine, *fakeHost, *renewHost, *clock) {
 }
 
 // manualRefresh runs a manual refresh command as POST /api/refresh and the
-// refresh_quotas tool do.
+// refresh_quotas tool do, and, in the loop's place, applies the results of
+// the background worker until the command is answered.
 func manualRefresh(e *Engine, pin string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if e.agyJobs == nil {
+		e.startAgyWorker(ctx)
+		defer func() { e.agyJobs, e.agyDoneCh, e.agyBusy = nil, nil, nil }()
+	}
 	cmd := command{kind: "refresh", arg: pin, reply: make(chan commandReply, 1)}
-	e.runCommand(context.Background(), cmd)
-	return (<-cmd.reply).err
+	e.runCommand(ctx, cmd)
+	for {
+		select {
+		case reply := <-cmd.reply:
+			return reply.err
+		case d := <-e.agyDoneCh:
+			e.agyFinished(ctx, e.config(), d)
+			e.dispatchAgy(ctx)
+		}
+	}
 }
 
 func TestManualRefreshAsksMagpieToRefreshAnExpiredCredential(t *testing.T) {
@@ -156,13 +171,14 @@ func TestManualRefreshAsksMagpieToRefreshAnExpiredCredential(t *testing.T) {
 	if w := claudeWindow(e); w.Remaining != 33 {
 		t.Fatalf("the refreshed reading was not applied: %+v", w)
 	}
-	// A refresh of all accounts refreshes the expired one only.
+	// A refresh of all accounts refreshes the expired one, and the
+	// Antigravity account, whose quota is read only from Magpie.
 	renew.refreshed = nil
 	if err := manualRefresh(e, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(renew.refreshed) != 1 || renew.refreshed[0] != "3" {
-		t.Fatalf("refreshed %v, want [3]", renew.refreshed)
+	if strings.Join(renew.refreshed, ",") != "3,4" {
+		t.Fatalf("refreshed %v, want [3 4]", renew.refreshed)
 	}
 }
 
@@ -273,7 +289,7 @@ func TestRefreshesShareTheManualBudget(t *testing.T) {
 	renewCtx, cancel := context.WithCancelCause(context.Background())
 	cancel(errManualTimeUp)
 	// A refresh whose budget has run out still applies the kept reading.
-	err := e.queryCredWith(context.Background(), cfg, e.creds["3"], true, renewCtx, false)
+	err := e.queryCredWith(context.Background(), cfg, e.creds["3"], true, renewCtx, queryManual)
 	if err == nil || !strings.Contains(err.Error(), "超过") {
 		t.Fatalf("err = %v", err)
 	}

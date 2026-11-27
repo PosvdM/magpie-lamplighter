@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // WindowState is the notification baseline of one quota window.
@@ -185,6 +186,10 @@ type CredentialState struct {
 	Group  string `json:"group,omitempty"`
 	// Since is when the problem was found, in Unix seconds.
 	Since int64 `json:"since,omitempty"`
+	// FailedAt is when the problem was last found, by ignition or by a
+	// query, to the nanosecond. An ignition confirmed after its request
+	// returned ends the problem only when the request was sent after it.
+	FailedAt time.Time `json:"failed_at,omitzero"`
 	// Fingerprint identifies the credential the problem was found with; a
 	// different one, after logging in again, lets ignition try again.
 	Fingerprint string `json:"fingerprint,omitempty"`

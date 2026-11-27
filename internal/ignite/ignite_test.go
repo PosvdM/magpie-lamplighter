@@ -93,6 +93,62 @@ func TestPassiveObservationIsNeverRolling(t *testing.T) {
 	}
 }
 
+// A placeholder of Magpie's (ObserveReading) has nothing used and a reset
+// that moved as far as the readings did, within rollingOffsetTolerance:
+// Magpie's reading times lag Google's by up to half a minute.
+func TestObserveReadingTellsAPlaceholderByItsResets(t *testing.T) {
+	ts := &store.TargetState{}
+	read := local(9, 0)
+	if ObserveReading(ts, read.Add(5*time.Hour), read.Add(time.Second), true) {
+		t.Fatal("one reading cannot be rolling")
+	}
+	next := read.Add(15 * time.Minute)
+	if !ObserveReading(ts, next.Add(5*time.Hour), next.Add(28*time.Second), true) {
+		t.Fatal("a placeholder read 15 minutes later is not rolling")
+	}
+	// The same move with quota used is a running window.
+	ts = &store.TargetState{}
+	ObserveReading(ts, read.Add(5*time.Hour), read, false)
+	if ObserveReading(ts, next.Add(5*time.Hour), next, false) {
+		t.Fatal("a window with quota used is rolling")
+	}
+}
+
+// The first reading of the next cycle resets hours after the last one:
+// that jump is no rolling placeholder, also with nothing used yet.
+func TestObserveReadingNewCycleIsNotRolling(t *testing.T) {
+	ts := &store.TargetState{}
+	read := local(9, 0)
+	ObserveReading(ts, read.Add(2*time.Hour), read, false)
+	next := read.Add(2*time.Hour + 30*time.Minute)
+	if ObserveReading(ts, next.Add(5*time.Hour), next.Add(20*time.Second), true) {
+		t.Fatal("the jump to the next cycle is rolling")
+	}
+}
+
+// A reading no later than the last one observed, such as the same card
+// applied again, is no observation: it neither ends a rolling placeholder
+// nor clears the failure state. A fixed reset with quota used clears it;
+// one with nothing used does not.
+func TestObserveReadingOfTheSameCardChangesNothing(t *testing.T) {
+	ts := &store.TargetState{}
+	read := local(9, 0)
+	ObserveReading(ts, read.Add(5*time.Hour), read, true)
+	next := read.Add(15 * time.Minute)
+	ObserveReading(ts, next.Add(5*time.Hour), next, true)
+	ts.ConsecutiveFailures, ts.CircuitOpenUntilEpoch = 2, 1
+	if !ObserveReading(ts, next.Add(5*time.Hour), next, true) || ts.ConsecutiveFailures != 2 {
+		t.Fatalf("the same card again: %+v", ts)
+	}
+	later := next.Add(time.Minute)
+	if ObserveReading(ts, next.Add(5*time.Hour), later, true) || ts.ConsecutiveFailures != 2 {
+		t.Fatalf("a fixed reset with nothing used: %+v", ts)
+	}
+	if ObserveReading(ts, next.Add(5*time.Hour), later.Add(time.Minute), false) || ts.ConsecutiveFailures != 0 {
+		t.Fatalf("a fixed reset with quota used: %+v", ts)
+	}
+}
+
 func TestHardFailureOpensCircuitImmediately(t *testing.T) {
 	ts := &store.TargetState{}
 	now := local(10, 0)

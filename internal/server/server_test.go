@@ -301,3 +301,22 @@ func TestConcurrentPatchesApplyInSaveOrder(t *testing.T) {
 		t.Fatalf("file %s, running %v", saved, running)
 	}
 }
+
+// An ignition still to be confirmed is answered as done, with pending set,
+// so that the page does not show it as failed.
+func TestPendingIgnitionIsNoFailure(t *testing.T) {
+	s, _ := newServer(t)
+	// An ignition still to be confirmed, and a refresh Magpie has not
+	// finished by the end of a manual refresh.
+	for _, pending := range []error{fmt.Errorf("Gemini: %w", engine.ErrIgnitionPending), engine.ErrRefreshQueued} {
+		rec := httptest.NewRecorder()
+		s.action(rec, pending)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusOK || out["ok"] != true || out["pending"] != true || out["error"] != nil {
+			t.Fatalf("%v: %d %v", pending, rec.Code, out)
+		}
+	}
+}

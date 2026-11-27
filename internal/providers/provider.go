@@ -2,8 +2,10 @@
 // service, in its own file, says how to read its quota, which response
 // headers carry quota, and how to ignite its 5-hour window.
 //
-// Active reads call the vendor usage endpoints with the account's own
-// token. Headers parses the rate-limit headers of an ignition response.
+// Active reads of Codex and Claude call the vendor usage endpoints with the
+// account's own token. Antigravity has no Fetch: its quota is read only
+// from Magpie (package magpie). Headers parses the rate-limit headers of an
+// ignition response.
 package providers
 
 import (
@@ -31,13 +33,16 @@ type Provider struct {
 	// Monitor and Ignite are the default settings.
 	Monitor bool
 	Ignite  bool
-	// Fetch reads the quota windows of one credential.
+	// Fetch reads the quota windows of one credential. It is nil for a
+	// provider whose quota is read only from Magpie's quota cards
+	// (Antigravity), which the engine reads through the host.
 	Fetch func(ctx context.Context, doer quota.Doer, cred Credential, now time.Time) ([]quota.RawGroup, error)
 	// Headers reads quota windows from the response headers of a model
 	// request. It is nil when the provider sends no quota in its headers.
 	Headers func(header http.Header, now time.Time) []quota.RawGroup
-	// Plan names the raw plan value of an account, from RawGroup.Plan or
-	// Profile. It is nil when the provider reports no plan.
+	// Plan names the raw plan value of an account, from RawGroup.Plan,
+	// Profile, or for a provider read only from Magpie the plan of
+	// Magpie's account list. It is nil when the provider reports no plan.
 	Plan func(raw string) Plan
 	// Profile reads the raw plan value with a request of its own, for a
 	// provider whose usage response does not state the plan. The engine
@@ -147,8 +152,15 @@ func GroupRank(sourceLabel string) int {
 	return len(groupOrder)
 }
 
+// MagpieOnly reports whether the quota of p is read only from Magpie: p
+// has no Fetch.
+func MagpieOnly(p *Provider) bool { return p != nil && p.Fetch == nil }
+
 // Fetch reads the quota windows of one credential.
 func Fetch(ctx context.Context, p *Provider, doer quota.Doer, cred Credential, now time.Time) ([]quota.RawGroup, error) {
+	if p.Fetch == nil {
+		return nil, fmt.Errorf("%s 的额度只从 Magpie 读取", p.Title)
+	}
 	if cred.AccessToken == "" {
 		return nil, errors.New("凭证文件中没有 access_token")
 	}

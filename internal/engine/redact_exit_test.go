@@ -51,7 +51,7 @@ func eventTexts(events []Event) []string {
 	return out
 }
 
-// A credential that cannot be read, as agy-cli's raw error, reaches the
+// A credential that cannot be read, with a raw error, reaches the
 // account's error of the status, the log and the answers of a manual
 // refresh redacted.
 func TestCredentialErrorIsRedactedAtTheExits(t *testing.T) {
@@ -60,11 +60,11 @@ func TestCredentialErrorIsRedactedAtTheExits(t *testing.T) {
 	e, _ := newTestEngine(t, h, c)
 	logs := &logHost{fakeHost: h}
 	e.host = logs
-	h.credErrs = map[string]error{"4": fmt.Errorf("%w: %s", host.ErrFormat, leaky)}
+	h.credErrs = map[string]error{"3": fmt.Errorf("%w: %s", host.ErrFormat, leaky)}
 	e.poll(context.Background(), e.config(), c.t, "", false)
 	found := false
 	for _, a := range e.Status().Accounts {
-		if a.AuthIndex == "4" {
+		if a.AuthIndex == "3" {
 			found = a.Error != ""
 			showsNoSecret(t, "account error", a.Error)
 		}
@@ -73,11 +73,11 @@ func TestCredentialErrorIsRedactedAtTheExits(t *testing.T) {
 		t.Fatal("account 4 has no error")
 	}
 	showsNoSecret(t, "log", logs.text())
-	err := manualRefresh(e, "4")
+	err := manualRefresh(e, "3")
 	if !errors.Is(err, host.ErrFormat) {
 		t.Fatalf("the error itself stays whole: %v", err)
 	}
-	result := mcpRefresh(t, e, "4")
+	result := mcpRefresh(t, e, "3")
 	showsNoSecret(t, "refresh_quotas", fmt.Sprint(result))
 }
 

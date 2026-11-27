@@ -166,7 +166,8 @@ func TestRefreshSendsNothingAfterTheCallerEnds(t *testing.T) {
 // A new card of the refresh that does not convert is a format error,
 // unless Magpie's kept quota, read again, holds a reading newer than the
 // one before the refresh that converts: the old reading is neither a
-// refresh that worked nor a stale one.
+// refresh that worked nor a stale one. The newer kept card is marked
+// Reread, as the refresh did not answer it.
 func TestRefreshKeptCardThatDoesNotConvert(t *testing.T) {
 	const noUsed = `{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"5 hours","resetsAt":"2026-11-21T12:00:00Z"}]}]}`
 	const fresh = `{"object":"list","data":[{"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"5 hours","used":40,"resetsAt":"2026-11-21T12:00:00Z"}]}]}`
@@ -214,7 +215,7 @@ func TestRefreshKeptCardThatDoesNotConvert(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || !found || !k.ReadAt.Equal(time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)) || k.Groups[0].Windows[0].Remaining != 60 {
+			if err != nil || !found || !k.Reread || !k.ReadAt.Equal(time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)) || k.Groups[0].Windows[0].Remaining != 60 {
 				t.Fatalf("%+v found=%v err=%v", k, found, err)
 			}
 		})
