@@ -5,8 +5,9 @@
 //   - Accounts: GET /v1/magpie/accounts on the gateway (MAGPIE_ADDR).
 //   - Credential: Magpie's configuration directory (logins.json), and the
 //     proxies in providers.json and settings.json, for Codex and Claude
-//     accounts. Tokens are only read, never refreshed. Nothing of an
-//     agy-cli account is read from files.
+//     accounts. Tokens are only read, never refreshed.
+//   - ConfirmIdentity: the agy-cli plugin's sign-ins and agy's own sign-in
+//     files (agy.go), read only to confirm whose sign-in ignition will use.
 //   - KeptQuotas: GET /v1/magpie/quotas?kept=1, which sends no request to a
 //     vendor. It is the only source of Antigravity quota.
 //   - RefreshQuota: POST /v1/magpie/quotas/refresh.
@@ -66,8 +67,9 @@ func FromEnv() *Host {
 }
 
 var (
-	_ host.Host          = (*Host)(nil)
-	_ host.KeptRefresher = (*Host)(nil)
+	_ host.Host            = (*Host)(nil)
+	_ host.IdentityChecker = (*Host)(nil)
+	_ host.KeptRefresher   = (*Host)(nil)
 )
 
 // Log writes one line: the level and the message, without emails,

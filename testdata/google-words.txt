@@ -1,0 +1,16 @@
+# What a request to Google needs: Google's hosts, Cloud Code's internal
+# methods, agy's OAuth client and the Antigravity Hub's update manifest.
+# Lamplighter sends Google nothing, so none of them may appear in a source
+# (no_google_test.go) or a built program (scripts/check-dist.mjs).
+# One regular expression per line, matched without regard to case; lines
+# starting with # are comments.
+googleapis
+google\.com
+googleusercontent
+v1internal
+retrieveUserQuotaSummary
+loadCodeAssist
+fetchAvailableModels
+cloudcode
+antigravity[-/]hub
+GOCSPX

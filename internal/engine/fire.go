@@ -433,14 +433,32 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	// The fingerprint of the credential the request goes out with; a
 	// rejection waits for another one. When it cannot be read, a rejection
 	// keeps it unknown: the file read after the request may already hold a
-	// new login the request did not use. See noteFingerprint.
+	// new login the request did not use. See noteFingerprint. For an
+	// agy-cli account it is the sign-in confirmed before the last request
+	// that went out (sentResponse.fingerprint).
+	//
+	// The gateway sends an agy-cli account's request with whichever Google
+	// account its agy is signed in to. The account is confirmed before
+	// every ignition, manual ones too, and again before each request
+	// (execute); an account that cannot be confirmed gets no request. See
+	// identityChecked.
 	fingerprint := ""
-	if !manual {
-		fingerprint = e.ignitionCredential(ctx, t.cred)
+	var err error
+	if !manual || identityChecked(t.cred) {
+		fingerprint, err = e.ignitionCredential(ctx, t.cred)
 	}
 	base := e.ignitionBase(t.group.Key, start)
 
-	model, resp, err := e.execute(ctx, cfg, t, manual)
+	var model string
+	var resp sentResponse
+	if err == nil {
+		model, resp, err = e.execute(ctx, cfg, t, manual)
+	}
+	if resp.confirmed {
+		// The sign-in confirmed right before the last request that went
+		// out, which agy may have changed since the first confirmation.
+		fingerprint = resp.fingerprint
+	}
 	if err == nil {
 		// Confirmation needs a reading taken after the request that
 		// worked was sent; the model list and refused candidates before it
@@ -458,13 +476,25 @@ func (e *Engine) igniteTarget(ctx context.Context, cfg config.Config, t target, 
 	if errors.Is(err, ErrIgnitionPending) {
 		return err
 	}
-	return e.finishIgnition(ctx, cfg, t, manual, model, fingerprint, err)
+	if errors.Is(err, host.ErrIdentity) {
+		// An unconfirmed sign-in has no fingerprint to wait on; the first
+		// confirmed sign-in counts as changed (noteFingerprint).
+		fingerprint = ""
+	}
+	return e.finishIgnition(ctx, cfg, t, manual, model, fingerprint, time.Time{}, err)
 }
 
 // finishIgnition records the outcome of the ignition of t: err is the
 // error of its request or confirmation, nil for a confirmed window. It
 // returns the error shown for a manual ignition.
-func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target, manual bool, model, fingerprint string, err error) error {
+//
+// sent is when the request that worked was sent, for an ignition
+// confirmed after igniteTarget returned (confirmMagpie), zero for one
+// confirmed at once. A success ends the account's credential problem
+// only when the request was sent after the problem was last found
+// (store.CredentialState FailedAt): another ignition of the account can
+// find a problem while this one waits for its confirmation.
+func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target, manual bool, model, fingerprint string, sent time.Time, err error) error {
 	ts := e.state.Target(t.group.Key)
 	schedule := e.schedule(cfg)
 	now := e.now()
@@ -484,6 +514,11 @@ func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target
 	}
 	if err != nil {
 		d := failure.Diagnose(err)
+		if errors.Is(err, host.ErrIdentity) {
+			// A credential problem: retrying cannot help until the account
+			// can be confirmed, and no provider limited anything.
+			d.Reason = failure.ReasonAuth
+		}
 		if manual {
 			// Keep the automatic retry, circuit and credential state
 			// unchanged. manual=1 without retry_seconds tells the page that
@@ -551,7 +586,11 @@ func (e *Engine) finishIgnition(ctx context.Context, cfg config.Config, t target
 	}
 	ignite.RecordSuccess(ts, model, now)
 	e.dirty = true
-	e.noteCredentialOK(ctx, t.cred, sourceIgnite)
+	if sent.IsZero() || e.sentAfterProblem(t.cred, sent) {
+		e.noteCredentialOK(ctx, t.cred, sourceIgnite)
+	} else {
+		e.logf("info", "%s：点火请求早于账号最近一次发现的凭证问题，凭证问题保持", t.group.Label)
+	}
 	resetText := "未知"
 	params := map[string]string{"model": model}
 	if group, ok := e.group(t.group.Key); ok {
@@ -585,11 +624,17 @@ func (e *Engine) group(key string) (GroupView, bool) {
 // execute sends the ignition request with the newest candidate model. It
 // tries the next candidate when Magpie refuses a model for the pinned
 // account, and once per ignition when the provider refuses a model. The
-// response carries when the returned candidate was sent.
+// response carries when the returned candidate was sent, and for an
+// agy-cli account the sign-in confirmed before the last request that went
+// out, also with an error.
 //
 // Each request of an automatic ignition passes admit, which checks that
 // the target still qualifies; otherwise the requests not sent yet are
-// dropped with errIgnitionWithdrawn.
+// dropped with errIgnitionWithdrawn. Each request of an agy-cli account
+// confirms the account right before it is sent (confirmIdentity): agy can
+// sign in to another account while the model list is read or a candidate
+// is refused. An account not confirmed before a later candidate returns
+// an error that names that candidate, as the ones before it went out.
 //
 // A model list that fails because the engine stops or ctx ends returns
 // context.Canceled.
@@ -635,6 +680,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 
 	var lastErr, refusedErr error
 	refused := ""
+	// sent is the sign-in of the last request that went out, for the
+	// returns after the loop.
+	var sent sentResponse
 	for i, model := range candidates {
 		if ctx.Err() != nil || e.stopping() {
 			return model, empty, context.Canceled
@@ -643,12 +691,20 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		if err != nil {
 			return "", empty, err
 		}
+		fingerprint := ""
+		if identityChecked(t.cred) {
+			if fingerprint, err = e.confirmIdentity(ctx, t.cred, i+1); err != nil {
+				return model, empty, err
+			}
+		}
 		resp, err := e.executeStream(ctx, t, host.ModelRequest{
 			Account:  t.cred.AuthIndex,
 			Protocol: protocol,
 			Model:    model,
 			Body:     body,
 		}, ignitionOutputWindow)
+		resp.confirmed, resp.fingerprint = identityChecked(t.cred), fingerprint
+		sent = sentResponse{confirmed: resp.confirmed, fingerprint: fingerprint}
 		if err == nil {
 			if refused != "" {
 				e.noteRefused(t, refused, model)
@@ -681,9 +737,9 @@ func (e *Engine) execute(ctx context.Context, cfg config.Config, t target, manua
 		return model, resp, err
 	}
 	if refused != "" {
-		return "", empty, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
+		return "", sent, fmt.Errorf("%w（%s 被上游拒绝：%v；最后一次：%v）", ignite.ErrNoModel, refused, refusedErr, lastErr)
 	}
-	return "", empty, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
+	return "", sent, fmt.Errorf("%w（最后一次：%v）", ignite.ErrNoModel, lastErr)
 }
 
 // refusedFor is how long a model the provider refused for a quota group is

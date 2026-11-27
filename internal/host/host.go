@@ -3,8 +3,9 @@
 // The engine sees Magpie only through Host. Package magpie implements it
 // against a running Magpie: the account list and quotas from the gateway at
 // MAGPIE_ADDR, the Codex and Claude credentials from Magpie's configuration
-// directory, and ignition requests through the gateway with
-// X-Magpie-Account. Tests use a fake Host.
+// directory, the agy-cli sign-ins that ignition confirms from local files,
+// and ignition requests through the gateway with X-Magpie-Account. Tests
+// use a fake Host.
 package host
 
 import (
@@ -53,6 +54,13 @@ var ErrNotImplemented = errors.New("not implemented")
 // not know. Implementations wrap it and never guess a field.
 var ErrFormat = errors.New("unknown Magpie format")
 
+// ErrIdentity is wrapped by ConfirmIdentity when it cannot confirm that
+// the sign-in the gateway sends an account's requests with belongs to the
+// account: agy's own sign-in of an agy-cli account holds whichever Google
+// account agy is signed in to. Ignition sends no request for such an
+// account; see docs/architecture.md.
+var ErrIdentity = errors.New("credential of another or an unconfirmed account")
+
 // Account is one subscription account that Magpie serves.
 type Account struct {
 	// Pin is Magpie's "<provider>/<id>" from GET /v1/magpie/accounts. It is
@@ -81,7 +89,8 @@ type Account struct {
 // Credential is what a provider needs to read the quota of a Codex or
 // Claude account. Implementations read it from Magpie's files and never
 // refresh a token; see docs/architecture.md. Antigravity has none: its
-// quota is read only from Magpie's quota cards.
+// quota is read only from Magpie's quota cards, and its sign-in is only
+// confirmed (IdentityChecker).
 type Credential struct {
 	// Provider is Magpie's provider id; ID and Name are the account pin.
 	Provider    string
@@ -133,6 +142,10 @@ type KeptQuota struct {
 	// active reading when the reading was read, "" when it gave none. The
 	// engine records it before it applies the reading.
 	Plan string
+	// PlanAt is when the host began to read the account list Plan comes
+	// from. The engine records Plan only when no later list has given
+	// the account a plan.
+	PlanAt time.Time
 }
 
 // ModelRequest is one ignition request through the Magpie gateway.
@@ -197,6 +210,20 @@ type Host interface {
 	CloseModelStream(id string) error
 	// Log writes one log entry.
 	Log(level, message string, fields map[string]any)
+}
+
+// IdentityChecker is implemented by a Host that can confirm, from local
+// files alone, whose sign-in the gateway will send an account's requests
+// with. Ignition of an agy-cli account calls it before every request, as
+// agy can sign in to another Google account at any time; without it no
+// agy-cli account is confirmed, and none is ignited. Every error means the
+// account is not confirmed, and no request is sent.
+type IdentityChecker interface {
+	// ConfirmIdentity returns the fingerprint of the account's sign-in
+	// once the sign-in is confirmed to be the account's. It reads local
+	// files only: it sends no request, reads no proxy setting and renews
+	// no token.
+	ConfirmIdentity(ctx context.Context, account Account) (fingerprint string, err error)
 }
 
 // KeptRefresher is implemented by a Host whose RefreshQuota answers the

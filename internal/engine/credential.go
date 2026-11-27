@@ -3,11 +3,15 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/PosvdM/magpie-lamplighter/internal/failure"
+	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/notify"
 	"github.com/PosvdM/magpie-lamplighter/internal/providers"
 	"github.com/PosvdM/magpie-lamplighter/internal/redact"
@@ -129,54 +133,158 @@ func (e *Engine) noteFingerprint(cred *Cred, fingerprint string) {
 	e.logf("info", "%s 的凭证已更新，恢复自动点火", accountLabel(cred))
 }
 
-// noteMagpieReading marks the credential problem of cred, an account whose
-// quota is read only from Magpie (providers.MagpieOnly), as changed when a
-// reading of Magpie's, read at readAt, was certainly made after the
-// problem was last found (store.CredentialState LastFailure): Lamplighter
-// reads no credential of such an account to compare fingerprints with.
-// Only Magpie's own new reading (host.KeptQuota Active), which agy makes
-// with the account's own sign-in, reaches here: agy reads nothing while
-// its token waits to be renewed or Google refuses the account. Ignition
-// then tries again; see noteFingerprint.
-//
-// Magpie stamps readAt when agy has finished, which can be well after
-// agy asked Google: a reading taken before the problem can carry a later
-// readAt. So the reading counts when sent, the time Lamplighter sent the
-// refresh that answered it, is after the problem, or, for any reading,
-// when readAt is magpieReadSpan or more after it.
-func (e *Engine) noteMagpieReading(cred *Cred, readAt, sent time.Time) {
-	if e.state == nil {
-		return
-	}
-	st := e.state.Credentials[cred.AuthIndex]
-	if st == nil || st.Reason == "" || st.Changed {
-		return
-	}
-	failed := st.LastFailure()
-	if !sent.After(failed) && readAt.Before(failed.Add(magpieReadSpan)) {
-		return
-	}
-	st.Changed = true
-	e.dirty = true
-	e.logf("info", "%s 在出现问题后读到了新的额度，恢复自动点火", accountLabel(cred))
+// agyCLI is Magpie's provider id of the agy-cli plugin.
+const agyCLI = "agy-cli"
+
+// identityChecked reports whether ignition of cred confirms the account
+// before every request, manual ignition too. The gateway sends an agy-cli
+// account's requests through agy, which uses whichever Google account it
+// is signed in to now; the pin alone does not tell which. Codex and Claude
+// requests use the account's own credential.
+func identityChecked(cred *Cred) bool {
+	return strings.EqualFold(cred.HostProvider, agyCLI)
 }
 
-// magpieReadSpan bounds how long one reading of Magpie's takes, from
-// asking agy to stamping readAt: agy runs for about 2 minutes at most.
-const magpieReadSpan = 3 * time.Minute
+// errIdentityUnsent prefixes an ignition refused for host.ErrIdentity
+// before any of its requests was sent.
+const errIdentityUnsent = "没有发送点火请求"
+
+// errNoIdentityChecker is why an agy-cli account is not confirmed by a
+// host that does not implement host.IdentityChecker: Credential alone
+// cannot tell that the gateway will use the account's own sign-in.
+var errNoIdentityChecker = errors.New("the host cannot confirm the sign-in of an agy-cli account")
+
+// identityUnconfirmed is an ignition request not sent because the
+// account could not be confirmed. It wraps host.ErrIdentity and the
+// host's error, but its text gives only identityReason.
+type identityUnconfirmed struct {
+	err error
+	// candidate is the number of the candidate model that was not sent,
+	// from 1; 0 or 1 means that the ignition sent no request.
+	candidate int
+}
+
+func (u identityUnconfirmed) Error() string {
+	unsent := errIdentityUnsent
+	if u.candidate > 1 {
+		unsent = fmt.Sprintf("第 %d 个候选模型未发送", u.candidate)
+	}
+	return unsent + "：" + identityReason(u.err)
+}
+
+func (u identityUnconfirmed) Unwrap() []error { return []error{host.ErrIdentity, u.err} }
+
+// identityReason is why the account of an ignition was not confirmed, as
+// events, logs and API answers show it. A host.ErrIdentity error gives the
+// host's own reason, which names the other account by a masked email
+// (redactDetail masks any other). The host's other errors can quote the
+// fields of a credential file, so they are told by kind alone.
+func identityReason(err error) string {
+	const unconfirmed = "无法确认账号身份："
+	switch {
+	case errors.Is(err, errNoIdentityChecker):
+		return unconfirmed + "宿主不支持核对 agy 账号的身份"
+	case errors.Is(err, host.ErrIdentity):
+		return redactDetail(err.Error())
+	case errors.Is(err, host.ErrFormat):
+		return unconfirmed + "凭证文件格式不对"
+	case errors.Is(err, fs.ErrNotExist):
+		return unconfirmed + "找不到凭证文件"
+	}
+	return unconfirmed + "读取凭证失败"
+}
+
+// detailLimit bounds the text redactDetail keeps.
+const detailLimit = 200
+
+var (
+	detailEmail  = regexp.MustCompile(`[^\s@"'<>()\[\],;:（）：，；“”]+@[^\s@"'<>()\[\],;:（）：，；“”]+`)
+	detailQuoted = regexp.MustCompile(`"[^"]*"`)
+	detailSecret = regexp.MustCompile(`[A-Za-z0-9_\-./+=]{32,}`)
+)
+
+// redactDetail is the text of a host error, fit to show or log: one line,
+// emails masked (maskEmail), quoted values and long token-like strings
+// left out, at most detailLimit characters.
+func redactDetail(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = detailEmail.ReplaceAllStringFunc(s, maskEmail)
+	s = detailQuoted.ReplaceAllString(s, `"…"`)
+	s = detailSecret.ReplaceAllString(s, "…")
+	if r := []rune(s); len(r) > detailLimit {
+		s = string(r[:detailLimit]) + "…"
+	}
+	return s
+}
+
+// unconfirmed is identityUnconfirmed for err, the error of confirming cred
+// before the candidate-th candidate model (0 before the model list). The
+// host's error is logged at debug level, redacted (redactDetail).
+func (e *Engine) unconfirmed(cred *Cred, candidate int, err error) error {
+	e.logf("debug", "%s：无法确认账号身份：%s", accountLabel(cred), redactDetail(err.Error()))
+	return identityUnconfirmed{err: err, candidate: candidate}
+}
+
+// confirmIdentity confirms that the gateway sends cred's requests with
+// cred's own sign-in, and returns the sign-in's fingerprint, before the
+// candidate-th candidate model (0 before the model list). Only a
+// host.IdentityChecker can confirm it, from local files alone; a host
+// without one confirms no agy-cli account. Any error means the account is
+// not confirmed: it is returned as identityUnconfirmed, and no request may
+// be sent.
+func (e *Engine) confirmIdentity(ctx context.Context, cred *Cred, candidate int) (string, error) {
+	checker, ok := e.host.(host.IdentityChecker)
+	if !ok {
+		return "", e.unconfirmed(cred, candidate, errNoIdentityChecker)
+	}
+	fingerprint, err := checker.ConfirmIdentity(ctx, hostAccount(cred))
+	if err != nil {
+		return "", e.unconfirmed(cred, candidate, err)
+	}
+	return fingerprint, nil
+}
 
 // ignitionCredential reads the fingerprint of cred's credential before an
-// ignition, "" when it cannot be read. An account whose quota is read only
-// from Magpie (Antigravity) has no credential Lamplighter reads.
-func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) string {
-	if providers.MagpieOnly(providers.Lookup(cred.Provider)) {
-		return ""
+// ignition, "" when it cannot be read. An agy-cli account
+// (identityChecked) must be confirmed (confirmIdentity), and any error
+// refuses the ignition.
+func (e *Engine) ignitionCredential(ctx context.Context, cred *Cred) (string, error) {
+	if identityChecked(cred) {
+		return e.confirmIdentity(ctx, cred, 0)
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	return credential.Fingerprint
+	return credential.Fingerprint, nil
+}
+
+// noteSignIn reads the fingerprint of the sign-in of cred, an agy-cli
+// account (identityChecked), with each query, as Credential gives that of
+// a Codex or Claude account: the quota of such an account comes from
+// Magpie, so no query reads its sign-in otherwise. A new sign-in lets
+// ignition try again (noteFingerprint). Only a host.IdentityChecker
+// reads it, from local files alone; a sign-in that is not confirmed
+// changes nothing.
+func (e *Engine) noteSignIn(ctx context.Context, cred *Cred) {
+	checker, ok := e.host.(host.IdentityChecker)
+	if !ok || !identityChecked(cred) {
+		return
+	}
+	if fingerprint, err := checker.ConfirmIdentity(ctx, hostAccount(cred)); err == nil {
+		e.noteFingerprint(cred, fingerprint)
+	}
+}
+
+// sentAfterProblem reports whether a request of cred sent at sent went
+// out after the account's credential problem was last found
+// (store.CredentialState FailedAt), or the account has none.
+func (e *Engine) sentAfterProblem(cred *Cred, sent time.Time) bool {
+	if e.state == nil {
+		return true
+	}
+	st := e.state.Credentials[cred.AuthIndex]
+	return st == nil || st.Reason == "" || sent.After(st.FailedAt)
 }
 
 // noteQueryFailure handles a failed quota query of cred. A suspended account

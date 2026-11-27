@@ -184,6 +184,6 @@ func (e *Engine) finishMagpieConfirm(ctx context.Context, cfg config.Config, key
 		}
 		e.mu.Unlock()
 	}
-	e.finishIgnition(ctx, cfg, c.target, c.manual, c.model, c.fingerprint, err)
+	e.finishIgnition(ctx, cfg, c.target, c.manual, c.model, c.fingerprint, c.base.start, err)
 	e.refreshTargets(cfg)
 }

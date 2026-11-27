@@ -20,7 +20,8 @@ const agyCardJSON = `{"provider":"agy-cli","kind":"subscription","user":"c@examp
 
 // Each card of the kept quota is decoded on its own: a card whose readAt
 // is no time, or whose used is text, is logged once and left out, and the
-// other cards are returned, each with the plan of the account list.
+// other cards are returned, each with the plan of the account list and
+// when the list was read.
 func TestKeptQuotasSkipsACardThatDoesNotDecode(t *testing.T) {
 	cards := `{"data":[
  {"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"yesterday","windows":[]},
@@ -35,7 +36,7 @@ func TestKeptQuotasSkipsACardThatDoesNotDecode(t *testing.T) {
 	h.Logger = log.New(&logged, "", 0)
 	for range 2 {
 		got, err := h.KeptQuotas(context.Background())
-		if err != nil || len(got) != 1 || got[0].Pin != "agy-cli/ffeeddccbbaa9988" || got[0].Plan != "Google AI Pro" {
+		if err != nil || len(got) != 1 || got[0].Pin != "agy-cli/ffeeddccbbaa9988" || got[0].Plan != "Google AI Pro" || got[0].PlanAt.IsZero() {
 			t.Fatalf("kept %+v, %v", got, err)
 		}
 	}
@@ -47,7 +48,8 @@ func TestKeptQuotasSkipsACardThatDoesNotDecode(t *testing.T) {
 
 // A card of another account that does not decode, in the kept quota read
 // before the refresh or in the refresh's answer, does not fail the
-// refresh; the card it answers carries the account's plan.
+// refresh; the card it answers carries the account's plan, with the time
+// the account list was read before the refresh.
 func TestRefreshKeptSkipsAnotherAccountsBadCard(t *testing.T) {
 	clock := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
 	now = func() time.Time { return clock }
@@ -60,7 +62,7 @@ func TestRefreshKeptSkipsAnotherAccountsBadCard(t *testing.T) {
 	})
 	h.Logger = log.New(&strings.Builder{}, "", 0)
 	k, found, err := h.RefreshKept(context.Background(), "agy-cli/ffeeddccbbaa9988")
-	if err != nil || !found || k.Plan != "Google AI Pro" || !k.ReadAt.Equal(time.Date(2026, 11, 21, 7, 58, 0, 0, time.UTC)) {
+	if err != nil || !found || k.Plan != "Google AI Pro" || !k.PlanAt.Equal(clock) || !k.ReadAt.Equal(time.Date(2026, 11, 21, 7, 58, 0, 0, time.UTC)) {
 		t.Fatalf("refresh: %+v, %v, %v", k, found, err)
 	}
 }

@@ -121,8 +121,6 @@ func TestClaudeCredential(t *testing.T) {
 	}
 }
 
-// agyFixture sets up the agy-cli plugin's accounts: "c@example.com" with a
-// home of its own, "d@example.com" agy's own.
 func TestCredentialFormat(t *testing.T) {
 	useClock(t)
 	cases := []struct {
@@ -247,19 +245,5 @@ func TestProxyFor(t *testing.T) {
 	writeFiles(t, h.ConfigDir, map[string]string{"settings.json": `{"proxy":"direct"}`})
 	if got, err := h.proxyFor("codex", "a"); err != nil || got != "direct" {
 		t.Errorf("global direct: %q, %v", got, err)
-	}
-}
-
-// Nothing of an agy-cli account is read from Magpie's files: its quota
-// comes from Magpie's quota cards alone.
-func TestAgyCredentialIsNotRead(t *testing.T) {
-	h := &Host{ConfigDir: t.TempDir()}
-	writeFiles(t, h.ConfigDir, map[string]string{
-		"logins.json":      `[{"agent":"plugin:agy-cli","user":"c@example.com","home":"agy-cli"}]`,
-		"plugin-auth.json": `{"agy-cli":{"type":"api","key":"agy","metadata":{"email":"c@example.com"}}}`,
-	})
-	pin := "agy-cli/" + nameID("agy-cli", "c@example.com")
-	if got, err := h.Credential(context.Background(), host.Account{Pin: pin, Provider: "agy-cli"}); err == nil || got.AccessToken != "" {
-		t.Fatalf("agy-cli credential: %+v, %v", got, err)
 	}
 }

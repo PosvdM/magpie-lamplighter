@@ -163,23 +163,19 @@ func TestRefreshSendsNothingAfterTheCallerEnds(t *testing.T) {
 	}
 }
 
-// A new card of the refresh that does not convert is a format error,
-// unless Magpie's kept quota, read again, holds a reading newer than the
-// one before the refresh that converts: the old reading is neither a
-// refresh that worked nor a stale one.
+// A new card of the refresh that does not convert is a format error. The
+// kept quota is not read in its place, even when it holds a newer reading
+// that converts: only the refresh's own card is its answer, which the
+// engine confirms an ignition with.
 func TestRefreshKeptCardThatDoesNotConvert(t *testing.T) {
 	const noUsed = `{"object":"list","data":[{"provider":"claude","user":"b@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"5 hours","resetsAt":"2026-11-21T12:00:00Z"}]}]}`
 	const fresh = `{"object":"list","data":[{"provider":"claude","kind":"subscription","user":"b@example.com","readAt":"2026-11-21T08:00:00Z","windows":[{"name":"5 hours","used":40,"resetsAt":"2026-11-21T12:00:00Z"}]}]}`
-	freshNoUsed := strings.Replace(noUsed, `"user"`, `"kind":"subscription","user"`, 1)
 	for _, tc := range []struct {
 		name   string
 		reread string // the kept quota after the refresh
-		found  bool
 	}{
-		{"old reading", cardsBefore, false},
-		{"new reading", fresh, true},
-		{"new reading that does not convert", freshNoUsed, false},
-		{"no answer", "", false},
+		{"old reading", cardsBefore},
+		{"new reading", fresh},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reads := 0
@@ -189,12 +185,9 @@ func TestRefreshKeptCardThatDoesNotConvert(t *testing.T) {
 					w.Write([]byte(claudeOn))
 				case "GET /v1/magpie/quotas":
 					reads++
-					switch {
-					case reads == 1:
+					if reads == 1 {
 						w.Write([]byte(cardsBefore))
-					case tc.reread == "":
-						http.Error(w, "down", http.StatusBadGateway)
-					default:
+					} else {
 						w.Write([]byte(tc.reread))
 					}
 				case "POST /v1/magpie/quotas/refresh":
@@ -204,17 +197,11 @@ func TestRefreshKeptCardThatDoesNotConvert(t *testing.T) {
 			t.Cleanup(srv.Close)
 			h := &Host{Addr: strings.TrimPrefix(srv.URL, "http://")}
 			k, found, err := h.RefreshKept(context.Background(), "claude/0f0e0d0c0b0a0908")
-			if reads != 2 {
+			if reads != 1 {
 				t.Fatalf("read the kept quota %d times", reads)
 			}
-			if !tc.found {
-				var hostErr *host.Error
-				if found || !errors.Is(err, host.ErrFormat) || errors.As(err, &hostErr) {
-					t.Fatalf("%+v found=%v err=%v", k, found, err)
-				}
-				return
-			}
-			if err != nil || !found || !k.ReadAt.Equal(time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)) || k.Groups[0].Windows[0].Remaining != 60 {
+			var hostErr *host.Error
+			if found || !errors.Is(err, host.ErrFormat) || errors.As(err, &hostErr) {
 				t.Fatalf("%+v found=%v err=%v", k, found, err)
 			}
 		})

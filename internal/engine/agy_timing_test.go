@@ -177,7 +177,7 @@ func TestKeptReadingOfClaudeIsObservedAsBefore(t *testing.T) {
 	apply := func(remaining float64, reset time.Time) bool {
 		k := keptClaude("3", c.t, remaining)
 		k.Groups[0].Windows[0].Reset = reset
-		e.applyKeptQuota(ctx, k, time.Time{})
+		e.applyKeptQuota(ctx, k)
 		return e.state.Target(key).RollingReset
 	}
 	c.add(time.Minute)
@@ -349,13 +349,13 @@ func TestAgyPlanIsRecordedBeforeTheReading(t *testing.T) {
 	weekly := c.t.Add(3 * 24 * time.Hour)
 	c.add(time.Minute)
 	r := agyReading("4", c.t, withWeekly(agyPool("Gemini", 100, c.t.Add(-time.Minute)), "Gemini", 3, weekly))
-	r.Plan = "Google AI Pro"
+	r.Plan, r.PlanAt = "Google AI Pro", c.t
 	world.reading = &r
 	e.pollKept(ctx)
 	sender.titles()
 	c.add(time.Minute)
 	next := agyReading("4", c.t, withWeekly(agyPool("Gemini", 100, c.t.Add(-time.Minute)), "Gemini", 100, weekly))
-	next.Plan = "Google AI Ultra"
+	next.Plan, next.PlanAt = "Google AI Ultra", c.t
 	world.reading = &next
 	e.pollKept(ctx)
 	if got := sender.titles(); agPlan(e) != "Ultra" || len(got) != 1 || !strings.Contains(got[0], "Pro → Ultra") {
@@ -390,5 +390,127 @@ func TestAgyNewReadingClearsTheRefreshError(t *testing.T) {
 	e.pollKept(ctx)
 	if got := errorOf(); got != "" {
 		t.Fatalf("error %q after a new reading", got)
+	}
+}
+
+// A plan a reading brings from an account list read before the one the
+// loop last recorded a plan from is older: it is left out, so the plan
+// does not change back and the notification baselines stay. A reading's
+// plan from a later list is recorded.
+func TestAgyOlderPlanOfAReadingIsLeftOut(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	h, e, world := agyHost(t, c)
+	ctx := context.Background()
+	// The worker's refresh reads the account list while Magpie still
+	// says Pro; then the loop's round reads it with Ultra.
+	c.add(time.Minute)
+	listedByTheWorker := c.t
+	c.add(time.Second)
+	h.auths[0].Plan = "Google AI Ultra"
+	e.poll(ctx, e.config(), c.t, "", false)
+	if got := agPlan(e); got != "Ultra" {
+		t.Fatalf("plan %q", got)
+	}
+	changes := len(eventsOf(e, "plan_change"))
+	c.add(10 * time.Second)
+	r := agyReading("4", c.t, agyPool("Gemini", 80, c.t.Add(time.Hour)))
+	r.Plan, r.PlanAt = "Google AI Pro", listedByTheWorker
+	world.reading = &r
+	e.pollKept(ctx)
+	if got := agPlan(e); got != "Ultra" || len(eventsOf(e, "plan_change")) != changes {
+		t.Fatalf("plan %q, events %+v", got, eventsOf(e, "plan_change"))
+	}
+	if w := e.groups[agyTarget(t, e).group.Key].Windows[0]; w.Remaining != 80 {
+		t.Fatalf("the reading was not applied: %+v", w)
+	}
+	c.add(time.Minute)
+	next := agyReading("4", c.t, agyPool("Gemini", 70, c.t.Add(time.Hour)))
+	next.Plan, next.PlanAt = "Google AI Pro", c.t.Add(-time.Second)
+	world.reading = &next
+	e.pollKept(ctx)
+	if got := agPlan(e); got != "Pro" {
+		t.Fatalf("a later list's plan: %q", got)
+	}
+}
+
+// failingRefresh is the Magpie of agyHost whose refresh fails while
+// Magpie finishes a new reading: the refresh's card does not convert, or
+// the gateway does not answer, and the kept quota read again holds the
+// new reading.
+type failingRefresh struct {
+	*agyCards
+	world *agyWorld
+	next  func() host.KeptQuota
+}
+
+func (h *failingRefresh) RefreshKept(ctx context.Context, pin string) (host.KeptQuota, bool, error) {
+	if err := h.RefreshQuota(ctx, pin); err != nil {
+		return host.KeptQuota{}, false, err
+	}
+	r := h.next()
+	h.world.reading = &r
+	return host.KeptQuota{}, false, fmt.Errorf("POST /v1/magpie/quotas/refresh: %s: %w: bad card", pin, host.ErrFormat)
+}
+
+// A refresh that failed but brought a new reading, read from the kept
+// quota, leaves no error in the status. The manual refresh waiting for it
+// still hears that the refresh failed.
+func TestAgyFailedRefreshWithANewReadingLeavesNoError(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	_, e, world := agyHost(t, c)
+	failing := &failingRefresh{agyCards: e.host.(*agyCards), world: world, next: func() host.KeptQuota {
+		return agyReading("4", c.t.Add(5*time.Second), agyPool("Gemini", 80, c.t.Add(time.Hour)))
+	}}
+	e.host = failing
+	c.add(time.Minute)
+	waiting := e.queueAgyManual("4")
+	workAgy(e)
+	if err := <-waiting; !errors.Is(err, host.ErrFormat) {
+		t.Fatalf("manual refresh: %v", err)
+	}
+	for _, a := range e.Status().Accounts {
+		if a.AuthIndex == "4" && a.Error != "" {
+			t.Fatalf("account error %q", a.Error)
+		}
+	}
+	if e.agyErrs["4"] != nil {
+		t.Fatalf("refresh error %v", e.agyErrs["4"])
+	}
+	if w := e.groups[agyTarget(t, e).group.Key].Windows[0]; w.Remaining != 80 {
+		t.Fatalf("the new reading was not applied: %+v", w)
+	}
+	// With no new reading, the failure stays.
+	failing.next = func() host.KeptQuota { return *world.reading }
+	c.add(magpieRefreshGap)
+	waiting = e.queueAgyManual("4")
+	workAgy(e)
+	if err := <-waiting; !errors.Is(err, host.ErrFormat) || e.agyErrs["4"] == nil {
+		t.Fatalf("manual refresh without a new reading: %v", err)
+	}
+}
+
+// Only the card the refresh itself answered confirms an ignition: a
+// reading of the kept quota read after a refresh that failed, which would
+// show the window, is applied but confirms nothing.
+func TestAgyKeptReadingAfterAFailedRefreshIsNoConfirmation(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	h, e, world := agyHost(t, c)
+	ctx := context.Background()
+	key := agyTarget(t, e).group.Key
+	sent := c.t
+	failing := &failingRefresh{agyCards: e.host.(*agyCards), world: world, next: func() host.KeptQuota {
+		return agyReading("4", c.t.Add(10*time.Second), agyPool("Gemini", 99, sent.Add(5*time.Hour)))
+	}}
+	e.host = failing
+	if err := e.igniteTarget(ctx, e.config(), agyTarget(t, e), false); !errors.Is(err, ErrIgnitionPending) {
+		t.Fatalf("ignite: %v", err)
+	}
+	c.add(magpieConfirmDelays[0])
+	workAgy(e)
+	if len(h.refreshed) != 1 || !e.confirmPending(key) || len(eventsOf(e, "ignite")) != 0 {
+		t.Fatalf("refreshed %v, events %+v", h.refreshed, e.Status().Events)
+	}
+	if w := e.groups[key].Windows[0]; w.Remaining != 99 {
+		t.Fatalf("the kept reading was not applied: %+v", w)
 	}
 }

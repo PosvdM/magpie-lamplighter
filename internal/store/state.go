@@ -187,9 +187,8 @@ type CredentialState struct {
 	// Since is when the problem was found, in Unix seconds.
 	Since int64 `json:"since,omitempty"`
 	// FailedAt is when the problem was last found, by ignition or by a
-	// query, to the nanosecond. Only a reading taken after it shows that
-	// the account works again. State saved before FailedAt existed has
-	// only Since; see LastFailure.
+	// query, to the nanosecond. An ignition confirmed after its request
+	// returned ends the problem only when the request was sent after it.
 	FailedAt time.Time `json:"failed_at,omitzero"`
 	// Fingerprint identifies the credential the problem was found with; a
 	// different one, after logging in again, lets ignition try again.
@@ -212,19 +211,6 @@ type CredentialState struct {
 	QueryReason string `json:"query_reason,omitempty"`
 	QuerySince  int64  `json:"query_since,omitempty"`
 	QueryCount  int    `json:"query_count,omitempty"`
-}
-
-// LastFailure is when the problem was last found: FailedAt, else, for
-// state saved without it, the end of the second of Since, so that a
-// reading of that second does not count as later.
-func (c *CredentialState) LastFailure() time.Time {
-	if !c.FailedAt.IsZero() {
-		return c.FailedAt
-	}
-	if c.Since == 0 {
-		return time.Time{}
-	}
-	return time.Unix(c.Since+1, 0).Add(-time.Nanosecond)
 }
 
 // Credential returns the credential state of authIndex, creating it when

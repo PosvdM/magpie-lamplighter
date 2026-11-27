@@ -13,7 +13,6 @@ import (
 	"github.com/PosvdM/magpie-lamplighter/internal/host"
 	"github.com/PosvdM/magpie-lamplighter/internal/ignite"
 	"github.com/PosvdM/magpie-lamplighter/internal/quota"
-	"github.com/PosvdM/magpie-lamplighter/internal/store"
 )
 
 // agyWorld is the agy-cli account "4" as Magpie reads it: reading is
@@ -664,127 +663,6 @@ func TestAgyNewWindowOnTheLastRefreshIsConfirmed(t *testing.T) {
 	e.performDue(ctx, e.config())
 	if len(h.executed) != 1 {
 		t.Fatalf("ignited again: %d", len(h.executed))
-	}
-}
-
-// After ignition finds the credential rejected, a reading of Magpie's made
-// certainly after the problem was last found lets ignition try again: agy
-// reads with the account's own sign-in. Magpie stamps readAt only when agy
-// has finished, so a reading of the kept quota counts from magpieReadSpan
-// after the problem on, and the card of a refresh Lamplighter sent after
-// the problem at once. A refresh sent before the problem does not count,
-// however late its card was stamped, nor does a kept reading taken between
-// two failures and applied after the second.
-func TestAgyReadingAfterAProblemResumesIgnition(t *testing.T) {
-	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
-	h, e, _ := agyHost(t, c)
-	ctx := context.Background()
-	rejected := &host.Error{Code: "host_call_failed", Message: `{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`, Status: 401}
-	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
-		return host.ModelResponse{StatusCode: 401}, rejected
-	}
-	ended := func() quota.RawGroup { return agyPool("Gemini", 100, c.t.Add(-time.Minute)) }
-	c.add(2*time.Minute + 700*time.Millisecond)
-	e.performDue(ctx, e.config())
-	first := c.t
-	if !e.credentialBlocked("4") {
-		t.Fatalf("credential %+v", e.state.Credentials["4"])
-	}
-	e.applyKeptQuota(ctx, agyReading("4", first.Add(magpieReadSpan-time.Second), ended()), time.Time{})
-	if !e.credentialBlocked("4") {
-		t.Fatal("a kept reading stamped within magpieReadSpan of the failure resumed ignition")
-	}
-	e.applyKeptQuota(ctx, agyReading("4", first.Add(magpieReadSpan-500*time.Millisecond), ended()), first.Add(-time.Second))
-	if !e.credentialBlocked("4") {
-		t.Fatal("the card of a refresh sent before the failure resumed ignition")
-	}
-	c.add(time.Minute)
-	e.applyKeptQuota(ctx, agyReading("4", first.Add(magpieReadSpan-200*time.Millisecond), ended()), first.Add(time.Millisecond))
-	if e.credentialBlocked("4") {
-		t.Fatalf("a refresh sent after the failure: credential %+v", e.state.Credentials["4"])
-	}
-	// Ignition tries again and fails again; a reading taken between the
-	// two failures, applied after the second, does not resume ignition.
-	c.add(4 * time.Minute)
-	between := c.t.Add(-time.Minute)
-	e.performDue(ctx, e.config())
-	second := c.t
-	if !e.credentialBlocked("4") || !e.state.Credentials["4"].FailedAt.Equal(second) || e.state.Credentials["4"].Since != first.Unix() {
-		t.Fatalf("credential %+v", e.state.Credentials["4"])
-	}
-	e.applyKeptQuota(ctx, agyReading("4", second.Add(magpieReadSpan-time.Millisecond), ended()), between)
-	if !e.credentialBlocked("4") {
-		t.Fatal("a reading from between two failures resumed ignition")
-	}
-	e.applyKeptQuota(ctx, agyReading("4", second.Add(magpieReadSpan), ended()), time.Time{})
-	if e.credentialBlocked("4") {
-		t.Fatalf("a kept reading magpieReadSpan after the failure: credential %+v", e.state.Credentials["4"])
-	}
-}
-
-// The background refresh in flight when ignition finds the credential
-// rejected was sent before the problem: its card, stamped after the
-// problem, does not resume ignition. The next refresh, sent after it,
-// does.
-func TestAgyRefreshSentBeforeAProblemDoesNotResumeIgnition(t *testing.T) {
-	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
-	h, e, world := agyHost(t, c)
-	ctx := context.Background()
-	rejected := &host.Error{Code: "host_call_failed", Message: `{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`, Status: 401}
-	h.execute = func(host.ModelRequest) (host.ModelResponse, error) {
-		return host.ModelResponse{StatusCode: 401}, rejected
-	}
-	// A manual refresh is sent at 10:00:04; agy read the quota before the
-	// rejection, Magpie stamps the card at 10:00:20, after it.
-	c.add(4 * time.Second)
-	e.queueAgyManual("4")
-	job, ok := e.nextAgyJob(c.t)
-	if !ok {
-		t.Fatal("no job")
-	}
-	world.refresh = func() *host.KeptQuota {
-		r := agyReading("4", c.t.Add(16*time.Second), agyPool("Gemini", 100, c.t.Add(-time.Minute)))
-		return &r
-	}
-	inFlight := agyDone{job: job, result: e.runAgyJob(ctx, job)}
-	if inFlight.result.sentAt.IsZero() || inFlight.result.err != nil {
-		t.Fatalf("refresh %+v", inFlight.result)
-	}
-	c.add(6 * time.Second)
-	e.performDue(ctx, e.config())
-	if !e.credentialBlocked("4") {
-		t.Fatalf("credential %+v", e.state.Credentials["4"])
-	}
-	c.add(10 * time.Second)
-	e.agyFinished(ctx, e.config(), inFlight)
-	if !e.credentialBlocked("4") {
-		t.Fatal("a refresh sent before the rejection resumed ignition")
-	}
-	c.add(time.Minute)
-	e.queueAgyManual("4")
-	workAgy(e)
-	if e.credentialBlocked("4") {
-		t.Fatalf("a refresh sent after the rejection: credential %+v", e.state.Credentials["4"])
-	}
-}
-
-// State saved before failed_at existed has the problem's time to the
-// second only: a refresh sent within that second does not count as after
-// it.
-func TestAgyLegacyProblemTimeIsTheEndOfItsSecond(t *testing.T) {
-	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
-	_, e, _ := agyHost(t, c)
-	ctx := context.Background()
-	since := c.t.Add(time.Minute)
-	e.state.Credentials = map[string]*store.CredentialState{"4": {Reason: "auth", Source: sourceIgnite, Since: since.Unix()}}
-	ended := agyPool("Gemini", 100, since.Add(-time.Minute))
-	e.applyKeptQuota(ctx, agyReading("4", since.Add(10*time.Second), ended), since.Add(900*time.Millisecond))
-	if !e.credentialBlocked("4") {
-		t.Fatal("a refresh sent within the problem's second resumed ignition")
-	}
-	e.applyKeptQuota(ctx, agyReading("4", since.Add(20*time.Second), ended), since.Add(time.Second))
-	if e.credentialBlocked("4") {
-		t.Fatalf("credential %+v", e.state.Credentials["4"])
 	}
 }
 

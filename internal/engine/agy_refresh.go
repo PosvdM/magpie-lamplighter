@@ -376,18 +376,31 @@ func (e *Engine) agyFinished(ctx context.Context, cfg config.Config, d agyDone) 
 	if cred == nil {
 		err = errRefreshAccountGone
 	} else {
-		err = e.settleRefresh(ctx, cred, d.job.before, r)
-		if err != nil {
-			e.agyErrs[pin] = err
+		var fresh bool
+		fresh, err = e.settleRefresh(ctx, cred, d.job.before, r)
+		// A result that brought a new reading leaves no error in the
+		// status, as any new reading ends it (applyMagpieReading), even
+		// when the refresh itself failed; those waiting for it still get
+		// the error.
+		kept := err
+		if fresh {
+			kept = nil
+		}
+		switch {
+		case kept != nil:
+			e.agyErrs[pin] = kept
 			if d.job.kind != agyConfirm {
-				e.logf("warn", "额度刷新失败：%s：%v", accountLabel(cred), err)
+				e.logf("warn", "额度刷新失败：%s：%v", accountLabel(cred), kept)
 			}
-		} else {
+		case err != nil:
+			delete(e.agyErrs, pin)
+			e.logf("info", "%s：Magpie 刷新额度失败，但读到了新的额度：%v", accountLabel(cred), err)
+		default:
 			delete(e.agyErrs, pin)
 		}
 		e.mu.Lock()
-		if err != nil {
-			e.pollErrs[pin] = err.Error()
+		if kept != nil {
+			e.pollErrs[pin] = kept.Error()
 		} else {
 			delete(e.pollErrs, pin)
 		}

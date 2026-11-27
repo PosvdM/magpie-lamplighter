@@ -139,7 +139,7 @@ func (e *Engine) pollKept(ctx context.Context) {
 	e.mu.Unlock()
 	for _, k := range kept {
 		if known[k.Pin] {
-			e.applyKeptQuota(ctx, k, time.Time{})
+			e.applyKeptQuota(ctx, k)
 		}
 	}
 }
@@ -568,7 +568,7 @@ func (e *Engine) pollWith(ctx context.Context, cfg config.Config, slot time.Time
 		e.logf("warn", "%v", err)
 		return nil, err
 	}
-	e.noteMagpiePlans(ctx, creds)
+	e.noteMagpiePlans(ctx, creds, start)
 	errs := map[string]string{}
 	failed := map[string]error{}
 	e.roundRenewed = false
@@ -637,41 +637,42 @@ func (e *Engine) keptFallback(ctx context.Context, cfg config.Config, cred *Cred
 // Magpie has none.
 func (e *Engine) applyKept(ctx context.Context, cred *Cred) (time.Time, error) {
 	kept, err := e.host.KeptQuotas(ctx)
-	return e.applyKeptFrom(ctx, cred, kept, err)
+	readAt, _, err := e.applyKeptFrom(ctx, cred, kept, err)
+	return readAt, err
 }
 
 // applyKeptFrom is applyKept with kept and err, Magpie's kept quotas as
-// KeptQuotas returned them.
-func (e *Engine) applyKeptFrom(ctx context.Context, cred *Cred, kept []host.KeptQuota, err error) (time.Time, error) {
+// KeptQuotas returned them. fresh tells that a new reading of an account
+// read only from Magpie was applied (applyKeptQuota).
+func (e *Engine) applyKeptFrom(ctx context.Context, cred *Cred, kept []host.KeptQuota, err error) (readAt time.Time, fresh bool, _ error) {
 	if err != nil {
-		return time.Time{}, fmt.Errorf("读取 Magpie 额度记录失败：%w", err)
+		return time.Time{}, false, fmt.Errorf("读取 Magpie 额度记录失败：%w", err)
 	}
 	for _, k := range kept {
 		if k.Pin == cred.AuthIndex {
-			e.applyKeptQuota(ctx, k, time.Time{})
-			return k.ReadAt, nil
+			return k.ReadAt, e.applyKeptQuota(ctx, k), nil
 		}
 	}
-	return time.Time{}, errors.New("Magpie 没有这个账号的额度记录")
+	return time.Time{}, false, errors.New("Magpie 没有这个账号的额度记录")
 }
 
 // applyKeptQuota applies the kept reading k when it is newer than the last
-// one applied to its account. A reading no newer is skipped whole. sent is
-// when Lamplighter sent the refresh that answered k, zero for a reading of
-// Magpie's kept quota.
-func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota, sent time.Time) {
+// one applied to its account. A reading no newer is skipped whole. It
+// reports whether k was a new reading of an account read only from Magpie
+// that applyMagpieReading applied, which ends the account's error.
+func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota) bool {
 	if k.ReadAt.IsZero() || !k.ReadAt.After(e.keptAt[k.Pin]) {
-		return
+		return false
 	}
 	e.keptAt[k.Pin] = k.ReadAt
 	e.mu.Lock()
 	cred := e.creds[k.Pin]
 	e.mu.Unlock()
 	if cred != nil && providers.MagpieOnly(providers.Lookup(cred.Provider)) {
-		e.applyMagpieReading(ctx, cred, k, sent)
-		return
+		return e.applyMagpieReading(ctx, cred, k)
 	}
 	e.applyUsage(ctx, usageEvent{authIndex: k.Pin, groups: k.Groups, at: k.ReadAt, kept: true})
+	return false
 }
 
 // applyMagpieReading applies k, Magpie's reading of cred, an account whose
@@ -689,17 +690,18 @@ func (e *Engine) applyKeptQuota(ctx context.Context, k host.KeptQuota, sent time
 //
 // The plan the account list gave with the reading (k.Plan) is recorded
 // first, so that a changed plan resets the notification baselines before
-// the reading is compared with them. A new reading also ends the error of
-// the account's last query or refresh shown in the status. sent is when
-// Lamplighter sent the refresh that answered k, zero for a reading of the
-// kept quota (noteMagpieReading).
-func (e *Engine) applyMagpieReading(ctx context.Context, cred *Cred, k host.KeptQuota, sent time.Time) {
+// the reading is compared with them; a plan of a list read before the one
+// the loop last recorded a plan from is older and is left out
+// (planListedAt). A new reading also ends the error of the account's last
+// query or refresh shown in the status. It reports whether it applied k.
+func (e *Engine) applyMagpieReading(ctx context.Context, cred *Cred, k host.KeptQuota) bool {
 	cfg := e.config()
 	if !cfg.Provider(cred.Provider).Monitor || !k.Active || len(k.Groups) == 0 {
-		return
+		return false
 	}
 	now := e.now()
-	if k.Plan != "" && e.state != nil {
+	if k.Plan != "" && e.state != nil && !k.PlanAt.Before(e.planListedAt[cred.AuthIndex]) {
+		e.planListedAt[cred.AuthIndex] = k.PlanAt
 		e.recordPlan(ctx, cred, e.state.PlanFor(cred.AuthIndex), k.Plan, now)
 	}
 	e.activeAt[cred.AuthIndex] = now
@@ -707,8 +709,8 @@ func (e *Engine) applyMagpieReading(ctx context.Context, cred *Cred, k host.Kept
 	e.mu.Lock()
 	delete(e.pollErrs, cred.AuthIndex)
 	e.mu.Unlock()
-	e.noteMagpieReading(cred, k.ReadAt, sent)
 	e.applyGroupsKeep(ctx, cfg, cred, k.Groups, quota.SourceActive, fromMagpie, now, k.ReadAt, true, k.Unread)
+	return true
 }
 
 // queryMagpie is the active query of cred, an account whose quota is read
@@ -756,7 +758,8 @@ func (e *Engine) queryMagpie(ctx context.Context, cfg config.Config, cred *Cred,
 // applied before.
 func (e *Engine) refreshKept(ctx, renew context.Context, cfg config.Config, cred *Cred) error {
 	before := e.keptAt[cred.AuthIndex]
-	return e.settleRefresh(ctx, cred, before, e.fetchRefresh(ctx, renew, cred.AuthIndex, nil))
+	_, err := e.settleRefresh(ctx, cred, before, e.fetchRefresh(ctx, renew, cred.AuthIndex, nil))
+	return err
 }
 
 // refreshResult is what a refresh of Magpie brought, before it is
@@ -825,16 +828,18 @@ func (e *Engine) fetchRefresh(ctx, renew context.Context, pin string, sending fu
 
 // settleRefresh applies r, a refresh of cred, and returns the refresh's
 // error as refreshKept gives it; before is the time of the account's
-// reading applied before the refresh.
-func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time, r refreshResult) error {
+// reading applied before the refresh. fresh tells that r brought a new
+// reading of an account read only from Magpie, which applyMagpieReading
+// applied, also when the refresh failed.
+func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time, r refreshResult) (fresh bool, _ error) {
 	refreshErr := r.err
 	var readAt time.Time
 	var err error
 	if r.answered {
-		e.applyKeptQuota(ctx, r.card, r.sentAt)
+		fresh = e.applyKeptQuota(ctx, r.card)
 		readAt = r.card.ReadAt
 	} else {
-		readAt, err = e.applyKeptFrom(ctx, cred, r.kept, r.keptErr)
+		readAt, fresh, err = e.applyKeptFrom(ctx, cred, r.kept, r.keptErr)
 	}
 	if !r.cards && refreshErr == nil && err == nil && !readAt.After(before) {
 		// Magpie reported the refresh as done, but its reading is the one
@@ -845,15 +850,15 @@ func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time
 	stale := errors.As(refreshErr, &failure) && failure.stale
 	switch {
 	case refreshErr == nil:
-		return err
+		return fresh, err
 	case stale && err != nil:
-		return fmt.Errorf("%w；%w", refreshErr, err)
+		return fresh, fmt.Errorf("%w；%w", refreshErr, err)
 	case stale:
-		return fmt.Errorf("%w；已显示 Magpie 记下的读数", refreshErr)
+		return fresh, fmt.Errorf("%w；已显示 Magpie 记下的读数", refreshErr)
 	case err != nil:
-		return fmt.Errorf("Magpie 刷新额度失败：%w；%w", refreshErr, err)
+		return fresh, fmt.Errorf("Magpie 刷新额度失败：%w；%w", refreshErr, err)
 	default:
-		return fmt.Errorf("Magpie 刷新额度失败，已显示 Magpie 记下的读数：%w", refreshErr)
+		return fresh, fmt.Errorf("Magpie 刷新额度失败，已显示 Magpie 记下的读数：%w", refreshErr)
 	}
 }
 
@@ -873,13 +878,17 @@ func (e *Engine) queryCred(ctx context.Context, cfg config.Config, cred *Cred, t
 // refresh), an expired credential has Magpie refresh its quota first
 // (refreshKept). A scheduled round and a probe do the same at most once per
 // scheduledRenewGap for each account (renewDue). An account read only from
-// Magpie is queried by queryMagpie.
+// Magpie is queried by queryMagpie, after its sign-in is read for a
+// tracked query (noteSignIn).
 func (e *Engine) queryCredWith(ctx context.Context, cfg config.Config, cred *Cred, track bool, renew context.Context, kind queryKind) error {
 	p := providers.Lookup(cred.Provider)
 	if p == nil {
 		return fmt.Errorf("不支持的额度 provider: %s", cred.Provider)
 	}
 	if providers.MagpieOnly(p) {
+		if track {
+			e.noteSignIn(ctx, cred)
+		}
 		return e.queryMagpie(ctx, cfg, cred, kind)
 	}
 	credential, err := e.host.Credential(ctx, hostAccount(cred))
@@ -1032,15 +1041,18 @@ func (e *Engine) recordPlan(ctx context.Context, cred *Cred, state *store.PlanSt
 // the list, whether or not their quota is read: the agy-cli plugin states
 // the plan of each account. A change resets the notification baselines
 // before the next reading is compared with them, as notePlan does.
-func (e *Engine) noteMagpiePlans(ctx context.Context, creds []*Cred) {
+// listedAt is when the loop began to read the list; a plan a reading
+// brought from a later list stands (planListedAt).
+func (e *Engine) noteMagpiePlans(ctx context.Context, creds []*Cred, listedAt time.Time) {
 	if e.state == nil {
 		return
 	}
 	now := e.now()
 	for _, cred := range creds {
-		if !providers.MagpieOnly(providers.Lookup(cred.Provider)) || cred.MagpiePlan == "" {
+		if !providers.MagpieOnly(providers.Lookup(cred.Provider)) || cred.MagpiePlan == "" || listedAt.Before(e.planListedAt[cred.AuthIndex]) {
 			continue
 		}
+		e.planListedAt[cred.AuthIndex] = listedAt
 		e.recordPlan(ctx, cred, e.state.PlanFor(cred.AuthIndex), cred.MagpiePlan, now)
 	}
 }

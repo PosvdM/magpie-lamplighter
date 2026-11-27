@@ -177,6 +177,11 @@ type Engine struct {
 	// magpieConfirms are the ignitions whose window the loop still
 	// confirms, by target key (confirmStep).
 	magpieConfirms map[string]*magpieConfirm
+	// planListedAt is, for each account read only from Magpie, when the
+	// account list its last recorded plan came from was begun to be read:
+	// by the loop (noteMagpiePlans) or by the host for a reading
+	// (host.KeptQuota PlanAt). An older list's plan is not recorded.
+	planListedAt map[string]time.Time
 	// refused holds when the provider refused a model for a quota group,
 	// keyed by group key and model.
 	refused map[string]time.Time
@@ -209,6 +214,7 @@ func New(opts Options) *Engine {
 		agyWaiters:     map[string][]chan error{},
 		agyErrs:        map[string]error{},
 		magpieConfirms: map[string]*magpieConfirm{},
+		planListedAt:   map[string]time.Time{},
 		creds:          map[string]*Cred{},
 		groups:         map[string]*GroupView{},
 		plans:          map[string]string{},

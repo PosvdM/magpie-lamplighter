@@ -5,7 +5,7 @@ import path from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { DEFAULT_PORT } from "../lamplighter.js"
-import { PLATFORMS, problems } from "../../scripts/check-dist.mjs"
+import { GOOGLE_WORDS, PLATFORMS, problems } from "../../scripts/check-dist.mjs"
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"))
@@ -49,7 +49,7 @@ test("the entry gives the host one plugin function", async () => {
   assert.equal(typeof mod.default.server, "function")
 })
 
-test("check-dist finds a missing, empty or stale build", () => {
+test("check-dist finds a missing, empty or stale build, and Google's names in a program", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lamplighter-"))
   try {
     fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ version: "1.2.3" }))
@@ -66,6 +66,11 @@ test("check-dist finds a missing, empty or stale build", () => {
     assert.deepEqual(problems(dir), ["dist/bin is built for 1.2.2, package.json says 1.2.3"])
     fs.writeFileSync(path.join(bin, "VERSION"), "1.2.3\n")
     assert.deepEqual(problems(dir), [])
+    // The first word of testdata/google-words.txt, in other case.
+    const word = GOOGLE_WORDS.source.split("|")[0].toUpperCase()
+    fs.writeFileSync(path.join(bin, "linux-amd64", "lamplighter"), `x\0https://oauth2.${word}.com/token\0`)
+    assert.deepEqual(problems(dir), [`dist/bin/linux-amd64/lamplighter contains "${word}"`])
+    fs.writeFileSync(path.join(bin, "linux-amd64", "lamplighter"), "x\0plugin-auth.json\0")
     fs.writeFileSync(path.join(bin, "linux-arm64", "lamplighter"), "")
     fs.rmSync(path.join(bin, "darwin-amd64", "lamplighter"))
     assert.equal(problems(dir).length, 2)

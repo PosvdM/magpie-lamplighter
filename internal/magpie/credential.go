@@ -19,12 +19,14 @@ import (
 
 // savedLogin is one entry of logins.json (savedLogin in Magpie's
 // internal/provider/logins.go). Auth is the agent's own credential blob:
-// Codex's auth.json, Claude Code's .credentials.json. A plugin's account,
-// agent "plugin:<id>", is never read.
+// Codex's auth.json, Claude Code's .credentials.json. A plugin's account
+// has agent "plugin:<id>" and no Auth; Home is its key among the plugin's
+// sign-ins (agy.go).
 type savedLogin struct {
 	ID    string          `json:"id"`
 	Agent string          `json:"agent"`
 	User  string          `json:"user"`
+	Home  string          `json:"home"`
 	Auth  json.RawMessage `json:"auth"`
 }
 
@@ -32,7 +34,7 @@ type savedLogin struct {
 func accountKey(user string) string { return strings.ToLower(strings.TrimSpace(user)) }
 
 // nameID is the id Magpie gives an account whose logins.json entry has no
-// id of its own (LoginID, loginID).
+// id of its own, and every plugin account (LoginID, loginID).
 func nameID(agent, user string) string {
 	sum := sha256.Sum256([]byte("magpie login\n" + agent + "\n" + accountKey(user)))
 	return hex.EncodeToString(sum[:8])
@@ -67,8 +69,10 @@ func (h *Host) readJSONFile(name string, out any) error {
 
 // login is the logins.json entry of the account pin of provider.
 // Magpie names a Codex or Claude account by its entry's id, else by
-// nameID of the agent and name (AccountIDs in
-// internal/provider/account_models.go).
+// nameID of the agent and name, and a plugin's account by nameID of the
+// plugin's provider id and the name, whatever id its entry has
+// (AccountIDs in internal/provider/account_models.go: LoginID looks for
+// agent "<provider id>", which no plugin entry has).
 //
 // Magpie writes "null" for a list without accounts, which is read as
 // one; an entry that is not an object wraps host.ErrFormat.
@@ -85,15 +89,19 @@ func (h *Host) login(provider, id string) (savedLogin, error) {
 		if !isJSONObject(entry) || json.Unmarshal(entry, &l) != nil {
 			return savedLogin{}, fmt.Errorf("logins.json: %w: entry %d is not a login", host.ErrFormat, i)
 		}
-		if l.Agent != provider {
-			continue
-		}
-		own := l.ID
-		if own == "" {
-			own = nameID(l.Agent, l.User)
-		}
-		if strings.EqualFold(own, id) {
-			return l, nil
+		switch {
+		case l.Agent == provider:
+			own := l.ID
+			if own == "" {
+				own = nameID(l.Agent, l.User)
+			}
+			if strings.EqualFold(own, id) {
+				return l, nil
+			}
+		case l.Agent == "plugin:"+provider:
+			if strings.EqualFold(nameID(provider, l.User), id) {
+				return l, nil
+			}
 		}
 	}
 	return savedLogin{}, fmt.Errorf("logins.json 中没有账号 %s/%s", provider, id)
@@ -117,8 +125,8 @@ func (h *Host) accountLogin(account host.Account) (string, savedLogin, error) {
 // Credential reads the credential of a Codex or Claude account from
 // logins.json, with the proxy Magpie uses for it. Tokens are never
 // refreshed here; one past its expiry is returned with Expired set. An
-// agy-cli account has no credential Lamplighter reads: its quota comes
-// from Magpie's quota cards alone.
+// agy-cli account has no credential: its quota comes from Magpie's quota
+// cards alone, and its sign-in is only confirmed (ConfirmIdentity).
 func (h *Host) Credential(ctx context.Context, account host.Account) (host.Credential, error) {
 	provider, l, err := h.accountLogin(account)
 	if err != nil {
