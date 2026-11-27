@@ -113,10 +113,12 @@ func (e *Engine) confirmMagpie(t target, base ignitionBase, model, fingerprint s
 // confirmByRefresh records the ignitions of the account of d whose window
 // the card its refresh answered confirms (confirmedByMagpie): a refresh
 // that succeeded, sent magpieConfirmAfter or more after the ignition
-// request was answered.
+// request was answered. A card the host read from the kept quota in place
+// of the refresh's own (host.KeptQuota Reread) confirms nothing: the
+// refresh did not answer it.
 func (e *Engine) confirmByRefresh(ctx context.Context, cfg config.Config, d agyDone) {
 	r := d.result
-	if r.err != nil || !r.answered || r.sentAt.IsZero() {
+	if r.err != nil || !r.answered || r.card.Reread || r.sentAt.IsZero() {
 		return
 	}
 	now := e.now()

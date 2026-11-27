@@ -126,25 +126,33 @@ func agyEgressFiles(t *testing.T) string {
 	return config
 }
 
-// egressGuard is http.DefaultTransport for a test: it dials only allowed
-// and records every other address it is asked to reach. Package egress,
-// which sends the quota requests of Codex and Claude, clones it. The
-// gateway's own client (magpie gatewayClient) has its own transport and
-// reaches only the address of MAGPIE_ADDR, here the fake gateway.
+// egressGuard dials for a test: it dials only allowed and records every
+// other address it is asked to reach, and counts the dials it let through.
+// One serves as http.DefaultTransport, which package egress, sending the
+// quota requests of Codex and Claude, clones; another dials for the
+// gateway's own client (magpie.WatchGatewayDials).
 type egressGuard struct {
 	allowed string
 	mu      sync.Mutex
 	refused []string
+	dialed  int
 }
 
 func (g *egressGuard) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if addr == g.allowed {
+		g.dialed++
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
-	g.mu.Lock()
 	g.refused = append(g.refused, addr)
-	g.mu.Unlock()
 	return nil, errors.New("egress guard: not Magpie")
+}
+
+func (g *egressGuard) dials() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.dialed
 }
 
 func (g *egressGuard) addrs() []string {
@@ -164,12 +172,21 @@ func useEgressGuard(t *testing.T, allowed string) *egressGuard {
 	return g
 }
 
+// useGatewayGuard makes every connection of the gateway client that does
+// not go to allowed fail and be recorded.
+func useGatewayGuard(t *testing.T, allowed string) *egressGuard {
+	g := &egressGuard{allowed: allowed}
+	t.Cleanup(magpie.WatchGatewayDials(g.dial))
+	return g
+}
+
 // Lamplighter sends an agy-cli account's requests to Magpie alone: the
 // confirmation of its sign-in reads local files, and its scheduled query,
 // manual refresh, ignition and the confirmation of the ignition reach no
 // other address, through the gateway client, package egress or Go's
-// default transport. The test runs Magpie's real Host and the engine's
-// real egress; it waits magpieConfirmAfter for the confirmation.
+// default transport; every connection of the gateway client goes to
+// MAGPIE_ADDR. The test runs Magpie's real Host and the engine's real
+// egress; it waits magpieConfirmAfter for the confirmation.
 func TestAgyAccountReachesOnlyMagpie(t *testing.T) {
 	for _, v := range []string{"HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy", "NO_PROXY", "no_proxy"} {
 		t.Setenv(v, "")
@@ -177,6 +194,7 @@ func TestAgyAccountReachesOnlyMagpie(t *testing.T) {
 	gateway := newAgyGateway(t)
 	addr := strings.TrimPrefix(gateway.URL, "http://")
 	guard := useEgressGuard(t, addr)
+	gatewayGuard := useGatewayGuard(t, addr)
 	configDir := agyEgressFiles(t)
 	newHost := func() *magpie.Host { return &magpie.Host{Addr: addr, ConfigDir: configDir} }
 
@@ -226,6 +244,9 @@ func TestAgyAccountReachesOnlyMagpie(t *testing.T) {
 	}
 	if refused := guard.addrs(); len(refused) != 0 {
 		t.Fatalf("requests to %v", refused)
+	}
+	if refused := gatewayGuard.addrs(); len(refused) != 0 || gatewayGuard.dials() == 0 {
+		t.Fatalf("gateway client dialed %d times to Magpie, and to %v", gatewayGuard.dials(), refused)
 	}
 
 	// The guard sees what package egress would send.

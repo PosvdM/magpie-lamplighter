@@ -146,6 +146,12 @@ type KeptQuota struct {
 	// from. The engine records Plan only when no later list has given
 	// the account a plan.
 	PlanAt time.Time
+	// Reread is set on a card RefreshKept read from the kept quota after
+	// the refresh's own card of the account did not convert: a reading
+	// newer than the one before the refresh, which the refresh did not
+	// answer. It shows the quota and counts as a refresh that worked, but
+	// confirms no ignition.
+	Reread bool
 }
 
 // ModelRequest is one ignition request through the Magpie gateway.
@@ -229,7 +235,8 @@ type IdentityChecker interface {
 // KeptRefresher is implemented by a Host whose RefreshQuota answers the
 // account's quota card: RefreshKept is RefreshQuota that also returns
 // that card as a KeptQuota, so that the caller need not read KeptQuotas
-// again. found is false when the answer has no card of the account to
+// again; a card it read from the kept quota in its place is marked
+// KeptQuota Reread. found is false when the answer has no card of the account to
 // use, as when the call failed before the refresh was answered; the error
 // is the one RefreshQuota returns, and a card can come with an error that
 // says the reading is not new.

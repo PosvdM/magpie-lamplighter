@@ -514,3 +514,86 @@ func TestAgyKeptReadingAfterAFailedRefreshIsNoConfirmation(t *testing.T) {
 		t.Fatalf("the kept reading was not applied: %+v", w)
 	}
 }
+
+// rereadRefresh is the Magpie of agyHost whose refresh answers a card the
+// host read from the kept quota in place of the refresh's own, which did
+// not convert (host.KeptQuota Reread): next is that reading.
+type rereadRefresh struct {
+	*agyCards
+	world *agyWorld
+	next  func() host.KeptQuota
+}
+
+func (h *rereadRefresh) RefreshKept(ctx context.Context, pin string) (host.KeptQuota, bool, error) {
+	if err := h.RefreshQuota(ctx, pin); err != nil {
+		return host.KeptQuota{}, false, err
+	}
+	r := h.next()
+	h.world.reading = &r
+	r.Reread = true
+	return r, true, nil
+}
+
+// A card the host read from the kept quota after the refresh's own did
+// not convert shows the quota and counts as a refresh that worked, but
+// confirms no ignition, even with a window that would.
+func TestAgyRereadCardIsNoConfirmation(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	h, e, world := agyHost(t, c)
+	ctx := context.Background()
+	key := agyTarget(t, e).group.Key
+	sent := c.t
+	e.host = &rereadRefresh{agyCards: e.host.(*agyCards), world: world, next: func() host.KeptQuota {
+		return agyReading("4", c.t.Add(10*time.Second), agyPool("Gemini", 99, sent.Add(5*time.Hour)))
+	}}
+	if err := e.igniteTarget(ctx, e.config(), agyTarget(t, e), false); !errors.Is(err, ErrIgnitionPending) {
+		t.Fatalf("ignite: %v", err)
+	}
+	c.add(magpieConfirmDelays[0])
+	workAgy(e)
+	if len(h.refreshed) != 1 || !e.confirmPending(key) || len(eventsOf(e, "ignite")) != 0 {
+		t.Fatalf("refreshed %v, events %+v", h.refreshed, e.Status().Events)
+	}
+	if w := e.groups[key].Windows[0]; w.Remaining != 99 || e.agyErrs["4"] != nil {
+		t.Fatalf("the reread card was not applied as a refresh that worked: %+v, %v", w, e.agyErrs["4"])
+	}
+}
+
+// A refresh that failed, whose new reading the loop applied from the kept
+// quota while the refresh ran, leaves no error in the status: the same
+// card is skipped then, but it ended the error as a new reading does. The
+// manual refresh waiting for it still hears that the refresh failed.
+func TestAgyFailedRefreshWhoseReadingTheLoopAppliedLeavesNoError(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 10, 0, 0, 0, shanghai)}
+	_, e, world := agyHost(t, c)
+	ctx := context.Background()
+	e.host = &failingRefresh{agyCards: e.host.(*agyCards), world: world, next: func() host.KeptQuota {
+		return agyReading("4", c.t.Add(5*time.Second), agyPool("Gemini", 80, c.t.Add(time.Hour)))
+	}}
+	c.add(time.Minute)
+	waiting := e.queueAgyManual("4")
+	job, ok := e.nextAgyJob(e.now())
+	if !ok {
+		t.Fatal("no job")
+	}
+	result := e.runAgyJob(ctx, job)
+	// The loop reads the kept quota before the result comes back.
+	if _, err := e.applyKept(ctx, e.creds["4"]); err != nil {
+		t.Fatal(err)
+	}
+	e.agyFinished(ctx, e.config(), agyDone{job: job, result: result})
+	if err := <-waiting; !errors.Is(err, host.ErrFormat) {
+		t.Fatalf("manual refresh: %v", err)
+	}
+	if e.agyErrs["4"] != nil {
+		t.Fatalf("refresh error %v", e.agyErrs["4"])
+	}
+	for _, a := range e.Status().Accounts {
+		if a.AuthIndex == "4" && a.Error != "" {
+			t.Fatalf("account error %q", a.Error)
+		}
+	}
+	if w := e.groups[agyTarget(t, e).group.Key].Windows[0]; w.Remaining != 80 {
+		t.Fatalf("the new reading was not applied: %+v", w)
+	}
+}

@@ -62,13 +62,13 @@ func TestRefreshKeptSkipsAnotherAccountsBadCard(t *testing.T) {
 	})
 	h.Logger = log.New(&strings.Builder{}, "", 0)
 	k, found, err := h.RefreshKept(context.Background(), "agy-cli/ffeeddccbbaa9988")
-	if err != nil || !found || k.Plan != "Google AI Pro" || !k.PlanAt.Equal(clock) || !k.ReadAt.Equal(time.Date(2026, 11, 21, 7, 58, 0, 0, time.UTC)) {
+	if err != nil || !found || k.Reread || k.Plan != "Google AI Pro" || !k.PlanAt.Equal(clock) || !k.ReadAt.Equal(time.Date(2026, 11, 21, 7, 58, 0, 0, time.UTC)) {
 		t.Fatalf("refresh: %+v, %v, %v", k, found, err)
 	}
 }
 
 // The account's own card that does not decode is a format error of the
-// refresh.
+// refresh, when the kept quota read again has no newer card of it.
 func TestRefreshKeptOwnCardThatDoesNotDecode(t *testing.T) {
 	_, h := newGateway(t, map[string]string{
 		"GET /v1/magpie/accounts":        accountsWithPlansJSON,

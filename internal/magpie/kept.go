@@ -640,10 +640,12 @@ func (h *Host) RefreshQuota(caller context.Context, pin string) error {
 // (refreshStale), it returns a *host.Error with codeRefreshStale, and the
 // card when it converts. A card of the account that does not decode or
 // convert, and a newer card with no window Lamplighter reads, give an
-// error that wraps host.ErrFormat. So a call without an error always
-// returns the refresh's own card, newer than the reading before the
-// refresh; the engine confirms an ignition with such a card alone. The
-// kept quota is never read in its place: the caller reads it for display.
+// error that wraps host.ErrFormat. A newer card that does not convert, or
+// the account's card that does not decode, is settled by keptAfter: that
+// error, unless the kept quota has a newer reading that converts, which is
+// returned marked Reread. So a call without an error always returns a card
+// newer than the reading before the refresh; only one not marked Reread is
+// the refresh's own card, which alone confirms an ignition.
 //
 // The account list and the kept reading end within refreshLookTimeout,
 // and the refresh itself within refreshTimeout, so that a slow reading
@@ -748,7 +750,7 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	i := cardIndex(states, a)
 	if own := ownBadCard(bad, a); i < 0 && own != nil {
 		// The account's card is there, but does not decode.
-		return host.KeptQuota{}, false, fmt.Errorf("%s: %s: %w", route, a.Pin, own.err)
+		return h.keptAfter(ctx, a, before, listedAt, fmt.Errorf("%s: %s: %w", route, a.Pin, own.err))
 	}
 	if i >= 0 {
 		card = states[i]
@@ -757,8 +759,11 @@ func (h *Host) RefreshKept(caller context.Context, pin string) (host.KeptQuota, 
 	}
 	stale := refreshStale(card, i >= 0, before)
 	switch {
+	case convErr != nil && stale == "":
+		return h.keptAfter(ctx, a, before, listedAt, fmt.Errorf("%s: %s: %w", route, a.Pin, convErr))
 	case convErr != nil:
-		// The format is wrong, whatever the refresh did.
+		// The card is no new reading and does not convert either: the
+		// format is wrong, whatever the refresh did.
 		return host.KeptQuota{}, false, fmt.Errorf("%s: %s: %w", route, a.Pin, convErr)
 	case stale != "":
 		return k, usable, &host.Error{Method: route, Code: codeRefreshStale, Message: stale}
@@ -796,8 +801,43 @@ func ended(ctx context.Context) error {
 	return contextEnded{err: ctx.Err(), cause: context.Cause(ctx)}
 }
 
-// refreshedCard is a card of POST /v1/magpie/quotas/refresh: its reading
-// state and its windows.
+// keptAfter reads Magpie's kept quota again after a refresh whose card
+// of the account a is a new reading that does not convert or decode
+// (failed, which wraps host.ErrFormat). The kept card counts only when it
+// is a new reading as the refresh would be (refreshStale against before,
+// the time of the account's reading before the refresh) and converts;
+// then it is returned as the refresh's card, marked Reread: the refresh
+// did not answer it, so it may show the quota and count as a refresh that
+// worked, but confirms no ignition. Otherwise, the kept card being the old
+// reading or none, it returns failed: neither success nor a stale refresh
+// can be told. listedAt is when the account list of a was begun to be read.
+func (h *Host) keptAfter(ctx context.Context, a listedAccount, before *time.Time, listedAt time.Time, failed error) (host.KeptQuota, bool, error) {
+	var kept struct {
+		Data *[]json.RawMessage `json:"data"`
+	}
+	if err := h.gatewayJSON(ctx, http.MethodGet, keptPath, &kept); err != nil || kept.Data == nil {
+		return host.KeptQuota{}, false, failed
+	}
+	cards, _ := decodeCards[refreshedCard](*kept.Data)
+	states := make([]cardState, len(cards))
+	for i, c := range cards {
+		states[i] = c.cardState
+	}
+	i := cardIndex(states, a)
+	if i < 0 || refreshStale(states[i], true, before) != "" {
+		return host.KeptQuota{}, false, failed
+	}
+	k, usable, err := cards[i].kept(a.Pin, now())
+	if err != nil || !usable {
+		return host.KeptQuota{}, false, failed
+	}
+	k.Plan, k.PlanAt = planOf(k, a, listedAt)
+	k.Reread = true
+	return k, true, nil
+}
+
+// refreshedCard is a card of POST /v1/magpie/quotas/refresh, or of GET
+// /v1/magpie/quotas?kept=1: its reading state and its windows.
 type refreshedCard struct {
 	cardState
 	Windows []keptWindow `json:"windows"`

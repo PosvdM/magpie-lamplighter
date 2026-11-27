@@ -829,18 +829,27 @@ func (e *Engine) fetchRefresh(ctx, renew context.Context, pin string, sending fu
 // settleRefresh applies r, a refresh of cred, and returns the refresh's
 // error as refreshKept gives it; before is the time of the account's
 // reading applied before the refresh. fresh tells that r brought a new
-// reading of an account read only from Magpie, which applyMagpieReading
-// applied, also when the refresh failed.
+// reading of an account read only from Magpie, also when the refresh
+// failed: one applyMagpieReading applied, or one the loop applied first
+// (keptCurrent).
 func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time, r refreshResult) (fresh bool, _ error) {
 	refreshErr := r.err
 	var readAt time.Time
 	var err error
+	k := r.card
 	if r.answered {
-		fresh = e.applyKeptQuota(ctx, r.card)
-		readAt = r.card.ReadAt
+		fresh = e.applyKeptQuota(ctx, k)
+		readAt = k.ReadAt
 	} else {
 		readAt, fresh, err = e.applyKeptFrom(ctx, cred, r.kept, r.keptErr)
+		k = host.KeptQuota{}
+		for _, kept := range r.kept {
+			if kept.Pin == cred.AuthIndex {
+				k = kept
+			}
+		}
 	}
+	fresh = fresh || (err == nil && e.keptCurrent(cred, k, before))
 	if !r.cards && refreshErr == nil && err == nil && !readAt.After(before) {
 		// Magpie reported the refresh as done, but its reading is the one
 		// applied before.
@@ -860,6 +869,21 @@ func (e *Engine) settleRefresh(ctx context.Context, cred *Cred, before time.Time
 	default:
 		return fresh, fmt.Errorf("Magpie 刷新额度失败，已显示 Magpie 记下的读数：%w", refreshErr)
 	}
+}
+
+// keptCurrent reports whether k, the reading a refresh of cred brought,
+// is newer than before, the reading applied before the refresh, and is
+// the one the loop has applied since: the same card, which a reading of
+// the kept quota applied while the refresh ran (applyKeptQuota skips it
+// then). Such a reading has ended the account's error as a new one does;
+// only an active reading of an account read only from Magpie, under
+// monitoring, counts (applyMagpieReading).
+func (e *Engine) keptCurrent(cred *Cred, k host.KeptQuota, before time.Time) bool {
+	if !providers.MagpieOnly(providers.Lookup(cred.Provider)) || !e.config().Provider(cred.Provider).Monitor {
+		return false
+	}
+	return k.Pin == cred.AuthIndex && k.Active && len(k.Groups) > 0 &&
+		k.ReadAt.After(before) && !k.ReadAt.Before(e.keptAt[cred.AuthIndex])
 }
 
 // refreshCred runs the active query of one credential.

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -32,17 +33,56 @@ const maxGatewayBody = 16 << 20
 // like quota.HTTPError.Body.
 const errorBodyLimit = 4096
 
+// dialFunc dials one connection, as net.Dialer DialContext.
+type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// gatewayDialer dials the connections of gatewayTransport, unless a test
+// watches them (WatchGatewayDials).
+var (
+	gatewayDialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	gatewayWatch  atomic.Pointer[dialFunc]
+)
+
 var gatewayTransport = &http.Transport{
-	Proxy:           nil,
-	DialContext:     (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	Proxy: nil,
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dial := gatewayWatch.Load(); dial != nil {
+			return (*dial)(ctx, network, addr)
+		}
+		return gatewayDialer.DialContext(ctx, network, addr)
+	},
 	MaxIdleConns:    4,
 	IdleConnTimeout: 90 * time.Second,
 }
 
 // gatewayClient talks to the gateway directly, never through the
-// environment's proxy. It sets no timeout: each request bounds itself
-// through its context, and a model stream lives until it is closed.
-var gatewayClient = &http.Client{Transport: gatewayTransport}
+// environment's proxy, and follows no redirect: a 3xx answer is returned
+// as it is, which the callers take as an error like any status other than
+// 2xx, and the address it names is never reached. It sets no timeout:
+// each request bounds itself through its context, and a model stream
+// lives until it is closed.
+var gatewayClient = &http.Client{
+	Transport: gatewayTransport,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// WatchGatewayDials has dial open every connection of the gateway client
+// from now on, until the returned func restores the default dialer. Idle
+// connections are closed at both ends, so that every later request is
+// dialed anew. It is for tests outside this package that check where the
+// gateway client connects, such as the engine's
+// TestAgyAccountReachesOnlyMagpie.
+func WatchGatewayDials(dial func(ctx context.Context, network, addr string) (net.Conn, error)) (restore func()) {
+	gatewayTransport.CloseIdleConnections()
+	f := dialFunc(dial)
+	gatewayWatch.Store(&f)
+	return func() {
+		gatewayWatch.Store(nil)
+		gatewayTransport.CloseIdleConnections()
+	}
+}
 
 // Deadlines of the whole Accounts, KeptQuotas, RefreshQuota and Models
 // calls: the response headers, the body and the account list a call reads

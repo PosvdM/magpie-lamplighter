@@ -380,8 +380,9 @@ func (e *Engine) agyFinished(ctx context.Context, cfg config.Config, d agyDone) 
 		fresh, err = e.settleRefresh(ctx, cred, d.job.before, r)
 		// A result that brought a new reading leaves no error in the
 		// status, as any new reading ends it (applyMagpieReading), even
-		// when the refresh itself failed; those waiting for it still get
-		// the error.
+		// when the refresh itself failed, and also when the loop applied
+		// the same reading first (keptCurrent); those waiting for it
+		// still get the error.
 		kept := err
 		if fresh {
 			kept = nil
